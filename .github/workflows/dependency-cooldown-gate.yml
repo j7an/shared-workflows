@@ -97,10 +97,19 @@ jobs:
           build_actions_links() {
             SEC_ROW1="| GitHub Advisory (GHSA) | [Search advisories](https://github.com/advisories?query=ecosystem%3Aactions+${PKG_NAME}) |"
             SEC_ROW2="| OSV.dev | [Search vulnerabilities](https://osv.dev/list?ecosystem=GitHub+Actions&q=${PKG_NAME}) |"
-            SEC_ROW3="| OpenSSF Scorecard | [View project health](https://scorecard.dev/viewer/?uri=github.com/${PKG_NAME}) |"
             SEC_ROW4="| GitHub Releases | [View changelog](https://github.com/${PKG_NAME}/releases) |"
-            SECURITY_LINKS="$(printf '%s\n%s\n%s\n%s' "$SEC_ROW1" "$SEC_ROW2" "$SEC_ROW3" "$SEC_ROW4")"
-            SCORECARD_BADGE="$(printf '[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/%s/badge)](https://scorecard.dev/viewer/?uri=github.com/%s)' "$PKG_NAME" "$PKG_NAME")"
+
+            # Only include Scorecard link + badge if the project has been scored
+            SC_STATUS=$(curl -sf --max-time 10 -o /dev/null -w '%{http_code}' \
+              "https://api.securityscorecards.dev/projects/github.com/${PKG_NAME}" 2>/dev/null || echo "000")
+            if [ "$SC_STATUS" = "200" ]; then
+              SEC_ROW3="| OpenSSF Scorecard | [View project health](https://scorecard.dev/viewer/?uri=github.com/${PKG_NAME}) |"
+              SECURITY_LINKS="$(printf '%s\n%s\n%s\n%s' "$SEC_ROW1" "$SEC_ROW2" "$SEC_ROW3" "$SEC_ROW4")"
+              SCORECARD_BADGE="$(printf '[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/%s/badge)](https://scorecard.dev/viewer/?uri=github.com/%s)' "$PKG_NAME" "$PKG_NAME")"
+            else
+              SECURITY_LINKS="$(printf '%s\n%s\n%s' "$SEC_ROW1" "$SEC_ROW2" "$SEC_ROW4")"
+              SCORECARD_BADGE=""
+            fi
           }
 
           case "$PR_BRANCH" in
