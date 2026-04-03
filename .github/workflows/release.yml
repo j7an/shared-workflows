@@ -1,0 +1,47 @@
+name: Update Floating Version Tags
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  update-tags:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Update floating major and minor tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Parse semver components: v1.2.3 → MAJOR=v1, MINOR=v1.2
+          MAJOR=$(echo "$TAG" | sed 's/\..*//')
+          MINOR=$(echo "$TAG" | sed 's/\.[^.]*$//')
+
+          echo "Semver tag: $TAG (immutable)"
+          echo "Minor tag:  $MINOR (floats to latest patch)"
+          echo "Major tag:  $MAJOR (floats to latest minor+patch)"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Update minor floating tag (e.g., v1.2 → v1.2.3)
+          git tag -fa "$MINOR" -m "Release $TAG"
+          git push origin "$MINOR" --force
+          echo "Updated $MINOR → $TAG"
+
+          # Update major floating tag (e.g., v1 → v1.2.3)
+          git tag -fa "$MAJOR" -m "Release $TAG"
+          git push origin "$MAJOR" --force
+          echo "Updated $MAJOR → $TAG"
