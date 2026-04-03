@@ -93,16 +93,21 @@ jobs:
           OLD_VER=$(echo "$PR_TITLE" | sed -n 's/.*from \([^ ]*\) to .*/\1/p')
           NEW_VER=$(echo "$PR_TITLE" | sed -n 's/.* to \([^ ]*\).*/\1/p')
 
+          # Helper: build GitHub Actions security links + badge
+          build_actions_links() {
+            SEC_ROW1="| GitHub Advisory (GHSA) | [Search advisories](https://github.com/advisories?query=ecosystem%3Aactions+${PKG_NAME}) |"
+            SEC_ROW2="| OSV.dev | [Search vulnerabilities](https://osv.dev/list?ecosystem=GitHub+Actions&q=${PKG_NAME}) |"
+            SEC_ROW3="| OpenSSF Scorecard | [View project health](https://scorecard.dev/viewer/?uri=github.com/${PKG_NAME}) |"
+            SEC_ROW4="| GitHub Releases | [View changelog](https://github.com/${PKG_NAME}/releases) |"
+            SECURITY_LINKS="$(printf '%s\n%s\n%s\n%s' "$SEC_ROW1" "$SEC_ROW2" "$SEC_ROW3" "$SEC_ROW4")"
+            SCORECARD_BADGE="$(printf '[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/%s/badge)](https://scorecard.dev/viewer/?uri=github.com/%s)' "$PKG_NAME" "$PKG_NAME")"
+          }
+
           case "$PR_BRANCH" in
             dependabot/github_actions/*)
               ECOSYSTEM="GitHub Actions"
               PKG_NAME=$(echo "$PR_BRANCH" | sed 's|dependabot/github_actions/||' | sed 's|-[0-9].*||')
-              SEC_ROW1="| GitHub Advisory (GHSA) | [Search advisories](https://github.com/advisories?query=ecosystem%3Aactions+${PKG_NAME}) |"
-              SEC_ROW2="| OSV.dev | [Search vulnerabilities](https://osv.dev/list?ecosystem=GitHub+Actions&q=${PKG_NAME}) |"
-              SEC_ROW3="| OpenSSF Scorecard | [View project health](https://scorecard.dev/viewer/?uri=github.com/${PKG_NAME}) |"
-              SEC_ROW4="| GitHub Releases | [View changelog](https://github.com/${PKG_NAME}/releases) |"
-              SECURITY_LINKS="$(printf '%s\n%s\n%s\n%s' "$SEC_ROW1" "$SEC_ROW2" "$SEC_ROW3" "$SEC_ROW4")"
-              SCORECARD_BADGE="$(printf '[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/%s/badge)](https://scorecard.dev/viewer/?uri=github.com/%s)' "$PKG_NAME" "$PKG_NAME")"
+              build_actions_links
               ;;
             dependabot/pip/*)
               ECOSYSTEM="PyPI"
@@ -111,6 +116,24 @@ jobs:
               SEC_ROW2="| OSV.dev | [Search vulnerabilities](https://osv.dev/list?ecosystem=PyPI&q=${PKG_NAME}) |"
               SEC_ROW3="| PyPI | [View package](https://pypi.org/project/${PKG_NAME}/) |"
               SECURITY_LINKS="$(printf '%s\n%s\n%s' "$SEC_ROW1" "$SEC_ROW2" "$SEC_ROW3")"
+              ;;
+            renovate/*)
+              # Renovate flattens owner/repo to owner-repo in branch names,
+              # so parse the package name from the PR title instead.
+              # Title formats: "update owner/repo action to vX.Y.Z"
+              #                "update owner/repo digest to abc123"
+              ECOSYSTEM="GitHub Actions"
+              PKG_NAME=$(echo "$PR_TITLE" | sed -En 's/.*update ([^ ]+) (action|digest) to .*/\1/p')
+              if [ -z "$PKG_NAME" ]; then
+                # Fallback: try generic "update X to Y" pattern
+                PKG_NAME=$(echo "$PR_TITLE" | sed -En 's/.*update ([^ ]+) .*/\1/p')
+              fi
+              if [ -n "$PKG_NAME" ] && echo "$PKG_NAME" | grep -q '/'; then
+                build_actions_links
+              else
+                ECOSYSTEM="Unknown"
+                PKG_NAME="${PKG_NAME:-$PR_TITLE}"
+              fi
               ;;
             *)
               ECOSYSTEM="Unknown"
@@ -150,8 +173,8 @@ jobs:
           # --- Detect ecosystem labels ---
           LABELS="dependencies"
           case "$PR_BRANCH" in
-            dependabot/github_actions/*) LABELS="dependencies,github-actions" ;;
-            dependabot/pip/*)            LABELS="dependencies,python" ;;
+            dependabot/github_actions/*|renovate/*) LABELS="dependencies,github-actions" ;;
+            dependabot/pip/*)                       LABELS="dependencies,python" ;;
           esac
 
           # --- Build enriched issue body ---
