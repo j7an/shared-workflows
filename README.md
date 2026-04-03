@@ -136,6 +136,55 @@ Scan workflow fires (every 6h)
 Human reviews and merges → tracking issue auto-closes
 ```
 
+## Security Analysis (Zizmor)
+
+This repo includes a [Zizmor](https://github.com/zizmorcore/zizmor) workflow that runs static security analysis on all workflow YAML files. It detects:
+
+- Template injection in `run:` blocks
+- Excessive or missing permissions
+- Known CVEs in pinned action commits
+- Dangerous triggers (`pull_request_target`, etc.)
+- Supply chain risks
+
+Zizmor runs automatically on pushes to `main` and on pull requests. Consumer repos can add the same workflow — see [Adding Zizmor to your repo](#adding-zizmor-to-your-repo).
+
+### Adding Zizmor to your repo
+
+```yaml
+# .github/workflows/security.yml
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  zizmor:
+    name: Workflow Security Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run Zizmor
+        uses: zizmorcore/zizmor-action@71321a20a9ded102f6e9ce5718a2fcec2c4f70d8 # v0.5.2
+        with:
+          min-severity: medium
+          min-confidence: medium
+```
+
 ## Emergency Bypass
 
 For zero-day fixes that can't wait for the cooldown:
