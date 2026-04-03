@@ -40,7 +40,7 @@ jobs:
             --jq "[
               .[] |
               select(
-                .author.login == \"dependabot[bot]\" or .author.login == \"app/renovate\"
+                .author.login == \"dependabot[bot]\"
               ) |
               {number, createdAt}
             ]")
