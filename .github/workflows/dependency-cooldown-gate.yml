@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
 
@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
 
@@ -112,19 +112,45 @@ jobs:
             fi
           }
 
+          # Helper: build PyPI security links for a single package
+          build_pypi_links() {
+            SEC_ROW1="| GitHub Advisory (GHSA) | [Search advisories](https://github.com/advisories?query=ecosystem%3Apip+${PKG_NAME}) |"
+            SEC_ROW2="| OSV.dev | [Search vulnerabilities](https://osv.dev/list?ecosystem=PyPI&q=${PKG_NAME}) |"
+            SEC_ROW3="| PyPI | [View package](https://pypi.org/project/${PKG_NAME}/) |"
+            SECURITY_LINKS="$(printf '%s\n%s\n%s' "$SEC_ROW1" "$SEC_ROW2" "$SEC_ROW3")"
+          }
+
+          # Helper: build PyPI security links for multiple packages (grouped PRs)
+          build_pypi_group_links() {
+            SECURITY_LINKS=""
+            for PKG in $GROUP_PKGS; do
+              SEC_ROW1="| GitHub Advisory (GHSA) | [Search \`${PKG}\`](https://github.com/advisories?query=ecosystem%3Apip+${PKG}) |"
+              SEC_ROW2="| OSV.dev | [Search \`${PKG}\`](https://osv.dev/list?ecosystem=PyPI&q=${PKG}) |"
+              SEC_ROW3="| PyPI | [\`${PKG}\`](https://pypi.org/project/${PKG}/) |"
+              SECURITY_LINKS+="$(printf '%s\n%s\n%s\n' "$SEC_ROW1" "$SEC_ROW2" "$SEC_ROW3")"
+            done
+          }
+
           case "$PR_BRANCH" in
             dependabot/github_actions/*)
               ECOSYSTEM="GitHub Actions"
               PKG_NAME=$(echo "$PR_BRANCH" | sed 's|dependabot/github_actions/||' | sed 's|-[0-9].*||')
               build_actions_links
               ;;
-            dependabot/pip/*)
+            dependabot/pip/*|dependabot/uv/*)
               ECOSYSTEM="PyPI"
-              PKG_NAME=$(echo "$PR_BRANCH" | sed 's|dependabot/pip/||' | sed 's|-[0-9].*||')
-              SEC_ROW1="| GitHub Advisory (GHSA) | [Search advisories](https://github.com/advisories?query=ecosystem%3Apip+${PKG_NAME}) |"
-              SEC_ROW2="| OSV.dev | [Search vulnerabilities](https://osv.dev/list?ecosystem=PyPI&q=${PKG_NAME}) |"
-              SEC_ROW3="| PyPI | [View package](https://pypi.org/project/${PKG_NAME}/) |"
-              SECURITY_LINKS="$(printf '%s\n%s\n%s' "$SEC_ROW1" "$SEC_ROW2" "$SEC_ROW3")"
+              # Check if this is a grouped PR (branch contains group name, not package)
+              PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json body --jq '.body')
+              GROUP_PKGS=$(echo "$PR_BODY" | sed -n 's/.*Updates `\([^`]*\)` from .*/\1/p' | tr '\n' ' ')
+              if [ -n "$GROUP_PKGS" ] && [ "$(echo "$GROUP_PKGS" | wc -w | tr -d ' ')" -gt 1 ]; then
+                # Grouped PR — multiple packages
+                PKG_NAME=$(echo "$GROUP_PKGS" | sed 's/ /, /g' | sed 's/, $//')
+                build_pypi_group_links
+              else
+                # Single package PR
+                PKG_NAME=$(echo "$PR_BRANCH" | sed -E 's|dependabot/(pip\|uv)/||' | sed 's|-[0-9].*||')
+                build_pypi_links
+              fi
               ;;
             *)
               ECOSYSTEM="Unknown"
@@ -165,7 +191,7 @@ jobs:
           LABELS="dependencies"
           case "$PR_BRANCH" in
             dependabot/github_actions/*) LABELS="dependencies,github_actions" ;;
-            dependabot/pip/*)                       LABELS="dependencies,python" ;;
+            dependabot/pip/*|dependabot/uv/*) LABELS="dependencies,python" ;;
           esac
 
           # --- Build enriched issue body ---
