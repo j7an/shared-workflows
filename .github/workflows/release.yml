@@ -22,7 +22,7 @@ jobs:
 
       - name: Update floating major and minor tags
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           # Parse semver components: v1.2.3 → MAJOR=v1, MINOR=v1.2
