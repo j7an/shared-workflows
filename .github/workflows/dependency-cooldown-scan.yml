@@ -28,7 +28,7 @@ jobs:
       - name: Find mature bot PRs
         id: find-prs
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           COOLING_DAYS: ${{ inputs.cooling_business_days }}
         run: |
@@ -84,7 +84,7 @@ jobs:
       - name: Scan and comment
         if: steps.find-prs.outputs.pr_numbers != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBERS: ${{ steps.find-prs.outputs.pr_numbers }}
           BYPASS_LABEL: ${{ inputs.bypass_label }}
