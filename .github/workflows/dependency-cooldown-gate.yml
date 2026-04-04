@@ -58,6 +58,50 @@ jobs:
             -f context="dependency-cooldown / gate" \
             -f description="$DESC"
 
+      - name: Ensure Fixes link in PR body
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          ISSUE_TITLE="Track: ${PR_TITLE}"
+
+          # Find tracking issue by title
+          ISSUE_NUMBER=$(gh issue list --repo "$GH_REPO" --state open \
+            --search "in:title \"${ISSUE_TITLE}\"" \
+            --json number --jq '.[0].number // empty')
+
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "No tracking issue found — will be created by create-tracking-issue job"
+            exit 0
+          fi
+
+          # Check if Fixes link already exists
+          CURRENT_BODY=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json body --jq '.body')
+          if echo "$CURRENT_BODY" | grep -q "Fixes #${ISSUE_NUMBER}"; then
+            echo "Fixes #${ISSUE_NUMBER} already in PR body"
+            exit 0
+          fi
+
+          # Compute eligible date for the link text
+          ELIGIBLE_DATE=$(python3 -c "
+          from datetime import datetime, timedelta, timezone
+          now = datetime.now(timezone.utc)
+          count = 0
+          current = now
+          while count < 5:
+              current += timedelta(days=1)
+              if current.weekday() < 5:
+                  count += 1
+          print(current.strftime('%Y-%m-%d'))
+          ")
+
+          NEW_BODY="$(printf 'Fixes #%s \u2014 Tracking issue (cooldown expires %s)\n\n%s' "$ISSUE_NUMBER" "$ELIGIBLE_DATE" "$CURRENT_BODY")"
+          gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --body "$NEW_BODY"
+          echo "Added Fixes #${ISSUE_NUMBER} to PR body"
+
   create-tracking-issue:
     if: >-
       inputs.create_tracking_issue &&
