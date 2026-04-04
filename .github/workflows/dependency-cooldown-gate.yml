@@ -34,11 +34,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          ACTOR: ${{ github.actor }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BYPASS_LABEL: ${{ inputs.bypass_label }}
         run: |
-          if [[ "$ACTOR" != "dependabot[bot]" ]]; then
+          if [[ "$PR_AUTHOR" != "dependabot[bot]" ]]; then
             STATE="success"
             DESC="Non-bot PR — no cool-down required"
           else
@@ -62,7 +62,7 @@ jobs:
     if: >-
       inputs.create_tracking_issue &&
       github.event.action == 'opened' &&
-      github.actor == 'dependabot[bot]'
+      github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner
