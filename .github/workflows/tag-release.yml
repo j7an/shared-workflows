@@ -65,6 +65,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Compute release
         id: compute
