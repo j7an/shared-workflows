@@ -234,7 +234,7 @@ jobs:
           # --- Detect ecosystem labels ---
           LABELS="dependencies"
           case "$PR_BRANCH" in
-            dependabot/github_actions/*) LABELS="dependencies,github_actions" ;;
+            dependabot/github_actions/*) LABELS="dependencies,github-actions" ;;
             dependabot/pip/*|dependabot/uv/*) LABELS="dependencies,python" ;;
           esac
 
