@@ -16,7 +16,7 @@ Reusable GitHub Actions workflows for dependency management and security scannin
 ## Prerequisites
 
 - **Dependabot** configured for your repo (GitHub Actions and/or pip/uv ecosystems)
-- **Labels** must exist in your repo: `dependencies`, `github_actions` (underscore, not hyphen), `python`
+- **Labels** must exist in your repo: `dependencies`, `github-actions`, `python`
 - **No Renovate** — these workflows only support `dependabot[bot]` as the PR actor
 - **Python 3** available on runner (used for business day calculation)
 
