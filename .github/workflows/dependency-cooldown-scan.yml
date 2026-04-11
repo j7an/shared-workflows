@@ -45,9 +45,13 @@ jobs:
               {number, createdAt}
             ]")
 
-          # Filter by business days (Mon-Fri only) using Python
-          PR_NUMBERS=$(echo "$PR_DATA" | python3 << 'PYEOF'
-          import json, sys, os
+          # Filter by business days (Mon-Fri only) using Python.
+          # Pass PR_DATA via env, NOT stdin: `echo ... | python3 <<EOF` collides
+          # on stdin — the heredoc wins as the script source and the piped data
+          # is silently discarded, so json.load(sys.stdin) previously saw empty
+          # input and crashed every scheduled run with JSONDecodeError.
+          PR_NUMBERS=$(PR_DATA="$PR_DATA" python3 <<'PYEOF'
+          import json, os
           from datetime import datetime, timedelta
 
           def business_days_elapsed(created_at):
@@ -64,7 +68,7 @@ jobs:
               return count
 
           threshold = int(os.environ["COOLING_DAYS"])
-          prs = json.load(sys.stdin)
+          prs = json.loads(os.environ["PR_DATA"])
           for pr in prs:
               if business_days_elapsed(pr["createdAt"]) >= threshold:
                   print(pr["number"])
