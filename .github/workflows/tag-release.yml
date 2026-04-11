@@ -1,0 +1,160 @@
+name: Tag Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump (auto = infer from conventional commits since last tag)"
+        type: choice
+        required: true
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    # Releases must originate from main's latest commit. workflow_dispatch
+    # lets the operator pick any branch in the Actions UI, so we gate
+    # explicitly instead of relying on trust.
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute release
+        id: compute
+        env:
+          CHOICE: ${{ inputs.bump }}
+        run: |
+          # --- Find previous tag ---
+          LATEST=$(git tag -l 'v*.*.*' --sort=-version:refname | head -1)
+          if [ -z "$LATEST" ]; then
+            LATEST="v0.0.0"
+            FIRST_RELEASE="true"
+            echo "No existing semver tags — bootstrapping from v0.0.0"
+          else
+            FIRST_RELEASE="false"
+            echo "Latest tag: $LATEST"
+          fi
+
+          # --- Collect commits since LATEST ---
+          if [ "$FIRST_RELEASE" = "true" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${LATEST}..HEAD"
+          fi
+
+          # Subjects only (for display in the step summary)
+          SUBJECTS=$(git log --format='%s' "$RANGE")
+          # Full messages (subject + body) for BREAKING CHANGE detection
+          FULL=$(git log --format='%s%n%b%n---COMMIT---' "$RANGE")
+
+          COMMIT_COUNT=$(printf '%s\n' "$SUBJECTS" | grep -c . || true)
+          echo "Commits since $LATEST: $COMMIT_COUNT"
+
+          if [ "$COMMIT_COUNT" -eq 0 ]; then
+            {
+              echo "### Release blocked: no commits since $LATEST"
+              echo ""
+              echo "Refusing to create an empty release. Merge some PRs and try again."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::No commits since $LATEST, refusing to create empty release"
+            exit 1
+          fi
+
+          # --- Analyze commits for bump level ---
+          ANALYSIS_BUMP="patch"
+          ANALYSIS_REASON="no feat or breaking-change markers found"
+
+          if printf '%s\n' "$FULL" | grep -qE '^[a-z]+(\(.+\))?!:'; then
+            ANALYSIS_BUMP="major"
+            ANALYSIS_REASON="found ! suffix in commit subject (breaking change)"
+          elif printf '%s\n' "$FULL" | grep -q 'BREAKING CHANGE'; then
+            ANALYSIS_BUMP="major"
+            ANALYSIS_REASON="found 'BREAKING CHANGE' in commit body"
+          elif printf '%s\n' "$FULL" | grep -qE '^feat(\(.+\))?:'; then
+            ANALYSIS_BUMP="minor"
+            ANALYSIS_REASON="found feat: prefix"
+          fi
+          echo "Analysis suggests: $ANALYSIS_BUMP ($ANALYSIS_REASON)"
+
+          # --- Resolve operator choice ---
+          if [ "$CHOICE" = "auto" ]; then
+            CHOSEN="$ANALYSIS_BUMP"
+            CHOICE_NOTE="resolved via auto -> **$CHOSEN**"
+            OVERRIDE_WARN=""
+          else
+            CHOSEN="$CHOICE"
+            if [ "$CHOSEN" = "$ANALYSIS_BUMP" ]; then
+              CHOICE_NOTE="explicit: **$CHOSEN** (matches analysis)"
+              OVERRIDE_WARN=""
+            else
+              CHOICE_NOTE="explicit: **$CHOSEN** (overrides analysis suggestion of $ANALYSIS_BUMP)"
+              OVERRIDE_WARN="> **Operator override:** chose \`$CHOSEN\` but analysis suggested \`$ANALYSIS_BUMP\` ($ANALYSIS_REASON). Verify this is intentional."
+            fi
+          fi
+
+          # --- Compute next version ---
+          VERSION="${LATEST#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+          case "$CHOSEN" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            *)
+              echo "::error::Unknown bump level: $CHOSEN"
+              exit 1
+              ;;
+          esac
+
+          NEXT_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "Next tag: $NEXT_TAG"
+          echo "next_tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
+
+          # --- Write step summary ---
+          {
+            echo "### Release $NEXT_TAG ($CHOSEN bump)"
+            echo ""
+            echo "**Source:** \`$LATEST\` -> \`$NEXT_TAG\`"
+            echo "**Input:** \`$CHOICE\` -> $CHOICE_NOTE"
+            echo "**Analysis would have picked:** \`$ANALYSIS_BUMP\` - $ANALYSIS_REASON"
+            if [ -n "$OVERRIDE_WARN" ]; then
+              echo ""
+              echo "$OVERRIDE_WARN"
+            fi
+            echo ""
+            echo "**Commits since $LATEST** ($COMMIT_COUNT):"
+            echo ""
+            git log --format='- %s (%h)' "$RANGE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create and push tag
+        env:
+          NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$NEXT_TAG" -m "Release $NEXT_TAG"
+          git push origin "$NEXT_TAG"
+
+          echo "Tagged and pushed $NEXT_TAG - release.yml will pick up from here."
