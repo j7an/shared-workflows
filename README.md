@@ -4,137 +4,134 @@ Reusable GitHub Actions workflows for dependency management and security scannin
 
 ## Features
 
-- **Business day cooling period** — counts only Mon-Fri (not calendar days) before allowing merge
-- **Emergency bypass** — apply a label to skip cooldown for zero-day fixes, with audit trail
-- **Continuous monitoring** — scan comments updated every 6h, not just once
-- **Change detection** — notification reply when new advisories are published during cooldown
-- **Security database links** — GHSA, OSV, OpenSSF Scorecard in auto-created tracking issues
-- **OpenSSF Scorecard badge** — embedded in tracking issues for scored projects
-- **Auto tracking issues** — created on PR open with cooldown timeline and security links
+- **Native Dependabot cool-down** — configure the waiting period in `dependabot.yml`; Dependabot holds PRs until they mature
+- **Version-aware advisory filtering** — advisories already patched at or below the PR's target version are collapsed into a non-blocking "historical" section
+- **GHSA + OSV dual-source scan** — every package is queried against both GitHub Advisory and OSV.dev; mismatches surface both
+- **OpenSSF Scorecard integration** — Scorecard results for each GitHub Action appear in the scan comment
+- **Update-or-create scan comments** — a single stable comment per PR; change detection posts a reply only when advisory IDs actually change
+- **Optional auto-merge** — clean scans flip on `gh pr merge --auto`; dirty scans apply a `security-review-needed` label instead
 - **Grouped PR support** — handles both single-package and grouped Dependabot PRs
 
 ## Prerequisites
 
 - **Dependabot** configured for your repo (GitHub Actions and/or pip/uv ecosystems)
-- **Labels** must exist in your repo: `dependencies`, `github-actions`, `python`
-- **No Renovate** — these workflows only support `dependabot[bot]` as the PR actor
-- **Python 3** available on runner (used for business day calculation)
+- **Native cool-down** configured in `.github/dependabot.yml` (see Quick Start)
+- **No Renovate** — this workflow only scans `dependabot[bot]` PRs; other actors are passed through with a success status
 
 ## Quick Start
 
-Add these two workflow files to your repo's `.github/workflows/` directory:
+### 1. Configure Dependabot cool-down
 
-### Gate Workflow
-
-Triggers on every Dependabot PR. Sets a pending commit status and creates a tracking issue.
+The waiting period is owned by Dependabot itself — the workflow only scans PRs once they're already open. Add `cooldown:` to `.github/dependabot.yml`:
 
 ```yaml
-# .github/workflows/dependency-cooldown-gate.yml
-name: Dependency Cool-Down Gate
+# .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+```
+
+See [Dependabot cool-down docs](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown--) for per-severity and per-ecosystem overrides.
+
+### 2. Add the caller workflow
+
+One workflow file invokes the reusable scan on every Dependabot PR:
+
+```yaml
+# .github/workflows/dependency-cooldown.yml
+name: Dependency Cool-Down
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
+  contents: write
+  pull-requests: write
   statuses: write
   issues: write
-  pull-requests: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: cooldown-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  gate:
-    uses: j7an/shared-workflows/.github/workflows/dependency-cooldown-gate.yml@v1
+  cooldown:
+    uses: j7an/shared-workflows/.github/workflows/dependency-cooldown.yml@v1
     secrets: inherit
     with:
-      cooling_business_days: 5
+      auto_merge: true
 ```
 
-### Scan Workflow
+`contents: write` is only required when `auto_merge: true`; otherwise `contents: read` is sufficient.
 
-Runs on a schedule. Checks mature PRs for known advisories and posts/updates scan comments.
-
-```yaml
-# .github/workflows/dependency-cooldown-scan.yml
-name: Dependency Cool-Down Scan
-
-on:
-  schedule:
-    - cron: "0 */6 * * *"
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pull-requests: write
-  statuses: write
-
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
-
-jobs:
-  scan:
-    uses: j7an/shared-workflows/.github/workflows/dependency-cooldown-scan.yml@v1
-    secrets: inherit
-    with:
-      cooling_business_days: 5
-```
-
-## Gate Inputs
+## Inputs
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
-| `cooling_business_days` | number | `5` | Business days (Mon-Fri) before a bot PR passes the gate |
-| `bypass_label` | string | `security-bypass-cooling` | Label that skips the cooling period |
-| `create_tracking_issue` | boolean | `true` | Auto-create tracking issues for bot PRs |
-| `default_assignee` | string | `""` | Issue assignee (empty = repo owner) |
-
-## Scan Inputs
-
-| Input | Type | Default | Description |
-|-------|------|---------|-------------|
-| `cooling_business_days` | number | `5` | Business days before a bot PR is eligible for scanning |
-| `bypass_label` | string | `security-bypass-cooling` | Label that skips the cooling period |
-| `enable_scorecard` | boolean | `true` | Include OpenSSF Scorecard in scan results |
+| `enable_scorecard` | boolean | `true` | Include OpenSSF Scorecard results for GitHub Actions in the scan comment |
+| `auto_merge` | boolean | `false` | On clean scans, enable `gh pr merge --auto`; on dirty scans, apply the `security-review-needed` label |
 
 ## Supported Ecosystems
 
-| Ecosystem | Branch pattern | Security sources | Scorecard |
-|-----------|---------------|-----------------|-----------|
-| GitHub Actions | `dependabot/github_actions/*` | GHSA, OSV, Scorecard, GitHub Releases | Badge + link |
-| Python (pip) | `dependabot/pip/*` | GHSA, OSV, PyPI | No |
-| Python (uv) | `dependabot/uv/*` | GHSA, OSV, PyPI | No |
+| Ecosystem | Diff markers parsed | Security sources | Scorecard |
+|-----------|--------------------|-----------------|-----------|
+| GitHub Actions | `uses: owner/repo@vX.Y.Z` lines | GHSA (ecosystem `ACTIONS`), OSV (`GitHub Actions`) | Yes |
+| Python (pip / uv) | `pkg==X.Y.Z`, `pkg>=X.Y.Z`, etc. | GHSA (ecosystem `PIP`), OSV (`PyPI`) | No |
 
-Grouped Dependabot PRs (multiple packages in one PR) are supported — security links are generated for each package individually.
+Grouped Dependabot PRs (multiple packages in one PR) are supported — each package is scanned independently and results are merged into one comment. Target versions come from inline `# vX.Y.Z` comments; when those are missing, the workflow falls back to parsing the Dependabot PR body (`Bumps [pkg] from A to B`).
 
 ## How It Works
 
 ```
-Dependabot opens PR
+Dependabot queues an update
     │
     ▼
-Gate workflow fires
-    ├── Sets commit status to "pending"
-    ├── Creates tracking issue with security links + Scorecard badge
-    └── Prepends "Fixes #N" to PR body
-    │
-    ... 5 business days pass ...
+Native cooldown holds it for `default-days`
     │
     ▼
-Scan workflow fires (every 6h)
-    ├── Checks if PR has matured (business days >= threshold)
-    ├── Queries GHSA + OSV for advisories (Tier 1 — blocks on findings)
-    ├── Queries OpenSSF Scorecard (Tier 2 — informational only)
-    ├── Posts or updates scan comment with results
-    ├── Posts change notification if advisories changed since last scan
-    └── Sets commit status to "success"
+Dependabot opens the PR
     │
     ▼
-Human reviews and merges → tracking issue auto-closes
+Cool-down workflow fires on pull_request
+    ├── Non-dependabot PR? → status "success" (no-op)
+    ├── Status → "pending" ("Scanning dependencies...")
+    ├── Parses diff to extract package names + target versions
+    │     ├── Falls back to PR body text when inline versions are absent
+    │     └── Supports github-actions, pip, and uv ecosystems
+    ├── For each package:
+    │     ├── GHSA GraphQL query (by ecosystem)
+    │     ├── OSV.dev POST query (with version if known)
+    │     └── OpenSSF Scorecard (github-actions only, if enabled)
+    ├── Version-aware filter:
+    │     ├── Advisories with firstPatchedVersion ≤ target → historical bucket
+    │     └── Advisories affecting target version → blocking bucket
+    ├── Update-or-create single scan comment
+    ├── If advisory IDs changed since last scan → post change-notification reply
+    ├── auto_merge=true + 0 blocking advisories → gh pr merge --auto
+    ├── auto_merge=true + ≥1 blocking advisory → label `security-review-needed`
+    └── Status → "success" (description carries the outcome)
 ```
+
+### Version-aware filtering
+
+PR #23 added filtering so that advisories Dependabot has already fixed don't block the PR:
+
+- If GHSA reports `firstPatchedVersion` and the target version is ≥ that value, the advisory is moved into a collapsed `<details>` block labeled "historical advisory/ies (patched at or before target version — not blocking)".
+- Only advisories affecting the *target* version count toward the blocking total.
+- When the target version can't be determined (no inline comment and no match in the PR body), the workflow falls back to reporting all advisories for the package — safer default.
+
+## Cool-down configuration
+
+All cool-down timing lives in `.github/dependabot.yml` and is enforced by Dependabot itself. There is no bypass label — to ship a zero-day fix immediately, lower `cooldown.default-days` (or remove it for the affected ecosystem) and let Dependabot re-run. Commit history on `dependabot.yml` is the audit trail.
+
+See the [cool-down options reference](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown--) for per-severity (`semver-major-days`, `semver-minor-days`, `semver-patch-days`) and package include/exclude lists.
 
 ## Security Analysis (Zizmor)
 
@@ -184,14 +181,6 @@ jobs:
           min-severity: medium
           min-confidence: medium
 ```
-
-## Emergency Bypass
-
-For zero-day fixes that can't wait for the cooldown:
-
-1. Apply the `security-bypass-cooling` label to the PR
-2. The gate/scan workflows detect the label and immediately set status to `success`
-3. The bypass is recorded in the commit status description (audit trail)
 
 ## Versioning
 
