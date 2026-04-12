@@ -9,6 +9,11 @@ permissions:
   contents: write
   pull-requests: write
   statuses: write
+  issues: write
+
+concurrency:
+  group: cooldown-scan
+  cancel-in-progress: false
 
 jobs:
   scan:

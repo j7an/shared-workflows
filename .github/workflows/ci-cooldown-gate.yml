@@ -3,6 +3,7 @@ name: Dependency Cool-Down Gate
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
