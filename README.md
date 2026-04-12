@@ -202,3 +202,33 @@ For zero-day fixes that can't wait for the cooldown:
 | `@v1.2.3` | Nothing (frozen) | Need exact reproducibility or rollback |
 
 Tags are managed automatically — merging a PR to this repo creates a semver tag based on conventional commit prefixes and updates the floating tags.
+
+## Release Bot App setup
+
+`tag-release.yml` needs a non-`GITHUB_TOKEN` identity to push new tags, otherwise GitHub's recursion guard silently suppresses the downstream `release.yml` run. We use a GitHub App for this.
+
+### Required config
+
+| Kind | Name | Value |
+|------|------|-------|
+| Repo variable | `RELEASE_BOT_APP_ID` | Numeric App ID |
+| Repo secret | `RELEASE_BOT_PRIVATE_KEY` | Full PEM contents including header/footer |
+
+### One-time provisioning
+
+1. Create a GitHub App (org- or user-owned) with **repository permission** `Contents: Read and write` — nothing else.
+2. Install the App on this repo (single-repo install recommended).
+3. Copy the App ID into `vars.RELEASE_BOT_APP_ID` under **Settings → Secrets and variables → Actions → Variables**.
+4. Generate a private key from the App settings and paste the PEM into `secrets.RELEASE_BOT_PRIVATE_KEY` under **Settings → Secrets and variables → Actions → Secrets**.
+
+### Verify
+
+Dispatch **Actions → Tag Release → Run workflow** with `bump=patch`. Within ~30 seconds, a new run of `Publish Release` should appear:
+
+```bash
+gh run list --workflow=release.yml --limit 1
+```
+
+### Rotation
+
+To rotate the key: generate a new private key in the App settings, update `secrets.RELEASE_BOT_PRIVATE_KEY`, then delete the old key in the App settings. No code change required.
