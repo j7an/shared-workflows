@@ -1,0 +1,17 @@
+name: Dependency Cool-Down Scan
+
+on:
+  schedule:
+    - cron: "0 15 * * 1-5"  # 8am PT (PDT) / 7am PT (PST)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  scan:
+    uses: ./.github/workflows/dependency-cooldown-scan.yml
+    with:
+      auto_merge: true
