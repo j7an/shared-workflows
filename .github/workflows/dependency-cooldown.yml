@@ -482,6 +482,36 @@ jobs:
             echo "Posted change notification"
           fi
 
+          # --- Label reconciliation (Task 10 — fixes #26: every scan is authoritative) ---
+          LABEL_COLOR_security_review_needed="B60205"
+          LABEL_DESC_security_review_needed="Dependency scan found advisories — manual review required"
+          LABEL_COLOR_cooldown_pending="FBCA04"
+          LABEL_DESC_cooldown_pending="One or more target versions are within the configured cooldown window"
+
+          reconcile_label() {
+            local label="$1"
+            local should_be_present="$2"
+            local color="$3"
+            local desc="$4"
+            local current has_it
+            current=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json labels --jq '[.labels[].name]')
+            has_it=$(echo "$current" | jq -e --arg l "$label" 'contains([$l])' >/dev/null && echo true || echo false)
+
+            if [ "$should_be_present" = "true" ] && [ "$has_it" = "false" ]; then
+              gh label create "$label" --repo "$GH_REPO" --color "$color" --description "$desc" --force >/dev/null 2>&1 || true
+              gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --add-label "$label" || true
+              echo "Applied label: $label"
+            elif [ "$should_be_present" = "false" ] && [ "$has_it" = "true" ]; then
+              gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --remove-label "$label" || true
+              echo "Removed stale label: $label"
+            fi
+          }
+
+          _needs_security=$([ "$TOTAL" -gt 0 ] && echo true || echo false)
+          _needs_cooldown=$([ "$COOLDOWN_FAILURES" -gt 0 ] && echo true || echo false)
+          reconcile_label "security-review-needed" "$_needs_security" "$LABEL_COLOR_security_review_needed" "$LABEL_DESC_security_review_needed"
+          reconcile_label "cooldown-pending"       "$_needs_cooldown" "$LABEL_COLOR_cooldown_pending"       "$LABEL_DESC_cooldown_pending"
+
           # --- Auto-merge decision ---
           if [[ "$AUTO_MERGE" == "true" ]]; then
             if [ "$TOTAL" -eq 0 ]; then
@@ -493,13 +523,6 @@ jobs:
                 echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — manual merge required"
               fi
             else
-              gh label create "security-review-needed" \
-                --repo "$GH_REPO" \
-                --color "B60205" \
-                --description "Dependency scan found advisories — manual review required" \
-                --force
-              gh pr edit "$PR_NUMBER" --repo "$GH_REPO" \
-                --add-label "security-review-needed"
               STATUS_DESC="Advisories found (version-filtered). Manual review required."
               echo "Skipped auto-merge for PR #${PR_NUMBER}: ${TOTAL} advisory/ies found, labeled security-review-needed"
             fi
