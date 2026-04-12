@@ -11,6 +11,14 @@ on:
         type: boolean
         default: false
         description: "Auto-merge clean PRs after scan completes"
+      cooldown_days:
+        type: number
+        default: 7
+        description: "Minimum release age in days before auto-merge is allowed. 0 disables the release-age gate entirely (pre-v2.0.2 behavior)."
+      fail_on_cooldown:
+        type: boolean
+        default: false
+        description: "If true, cooldown blocks set the gate to failure instead of pending. Use when branch protection requires a hard-red blocker."
 
 jobs:
   scan:
@@ -52,6 +60,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ENABLE_SCORECARD: ${{ inputs.enable_scorecard }}
           AUTO_MERGE: ${{ inputs.auto_merge }}
+          COOLDOWN_DAYS: ${{ inputs.cooldown_days }}
+          FAIL_ON_COOLDOWN: ${{ inputs.fail_on_cooldown }}
         run: |
           DIFF=$(gh pr diff "$PR_NUMBER" --repo "$GH_REPO")
 
@@ -112,6 +122,14 @@ jobs:
           EXTRACTION_WARNING=""
           if [ "$EXPECTED_ACTIONS" != "$EXTRACTED_ACTIONS" ]; then
             EXTRACTION_WARNING="⚠️ Extraction mismatch: diff has ${EXPECTED_ACTIONS} action bumps, extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
+          fi
+
+          # --- Check release age via standalone script (Task 9 — phase 2) ---
+          COOLDOWN_FAILURES=0
+          AGE_TSV=""
+          if [ "$COOLDOWN_DAYS" -gt 0 ]; then
+            AGE_TSV=$(echo "$DEPS_TSV" | bash "${GITHUB_WORKSPACE}/scripts/check-release-age.sh")
+            COOLDOWN_FAILURES=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" || $6=="error"' | wc -l | tr -d ' ')
           fi
 
           for ACTION in $ACTIONS; do
