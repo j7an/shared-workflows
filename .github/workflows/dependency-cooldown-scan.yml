@@ -247,7 +247,7 @@ jobs:
                     GHSA_TOTAL=$((GHSA_TOTAL + 1))
                   done <<< "$(echo "$GHSA_RESULT" | jq -r '
                     .data.securityVulnerabilities.nodes[] |
-                    [.advisory.ghsaId, .advisory.severity, .advisory.summary, (.firstPatchedVersion.identifier // "")] |
+                    [.advisory.ghsaId, .advisory.severity, .advisory.summary, ((.firstPatchedVersion.identifier // "") | ltrimstr("v"))] |
                     @tsv
                   ' 2>/dev/null || true)"
                 else
@@ -386,7 +386,7 @@ jobs:
                     GHSA_TOTAL=$((GHSA_TOTAL + 1))
                   done <<< "$(echo "$GHSA_RESULT" | jq -r '
                     .data.securityVulnerabilities.nodes[] |
-                    [.advisory.ghsaId, .advisory.severity, .advisory.summary, (.firstPatchedVersion.identifier // "")] |
+                    [.advisory.ghsaId, .advisory.severity, .advisory.summary, ((.firstPatchedVersion.identifier // "") | ltrimstr("v"))] |
                     @tsv
                   ' 2>/dev/null || true)"
                 else
