@@ -194,7 +194,7 @@ jobs:
                 DEPS="${DEPS}\`${ACTION}\`, "
               fi
 
-              # Query GHSA via GraphQL
+              # Query GHSA via GraphQL (includes version data for filtering)
               GHSA_RESULT=$(gh api graphql -f query='
                 query($name: String!) {
                   securityVulnerabilities(
@@ -207,6 +207,10 @@ jobs:
                         ghsaId
                         severity
                         summary
+                      }
+                      vulnerableVersionRange
+                      firstPatchedVersion {
+                        identifier
                       }
                     }
                   }
@@ -226,15 +230,37 @@ jobs:
               fi
 
               if [ -n "$GHSA_RESULT" ]; then
-                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
-                  .data.securityVulnerabilities.nodes[] |
-                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
-                ' 2>/dev/null || true)
+                _target_ver="${ACTION_VERSIONS[$ACTION]}"
 
-                if [ -n "$GHSA_VULNS" ]; then
-                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
-                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
-                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                if [ -n "$_target_ver" ]; then
+                  while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
+                    [ -z "$_g_id" ] && continue
+                    if [ -n "$_g_patched" ]; then
+                      _lowest=$(printf '%s\n' "$_g_patched" "$_target_ver" | sort -V | head -1)
+                      if [ "$_lowest" = "$_g_patched" ]; then
+                        FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
+                        FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
+                        continue
+                      fi
+                    fi
+                    SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                    GHSA_TOTAL=$((GHSA_TOTAL + 1))
+                  done <<< "$(echo "$GHSA_RESULT" | jq -r '
+                    .data.securityVulnerabilities.nodes[] |
+                    [.advisory.ghsaId, .advisory.severity, .advisory.summary, (.firstPatchedVersion.identifier // "")] |
+                    @tsv
+                  ' 2>/dev/null || true)"
+                else
+                  GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
+                    .data.securityVulnerabilities.nodes[] |
+                    "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
+                  ' 2>/dev/null || true)
+
+                  if [ -n "$GHSA_VULNS" ]; then
+                    GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
+                    GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
+                    SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                  fi
                 fi
               fi
 
@@ -307,7 +333,7 @@ jobs:
                 DEPS="${DEPS}\`${PKG}\`, "
               fi
 
-              # Query GHSA for PyPI
+              # Query GHSA for PyPI (includes version data for filtering)
               GHSA_RESULT=$(gh api graphql -f query='
                 query($name: String!) {
                   securityVulnerabilities(
@@ -320,6 +346,10 @@ jobs:
                         ghsaId
                         severity
                         summary
+                      }
+                      vulnerableVersionRange
+                      firstPatchedVersion {
+                        identifier
                       }
                     }
                   }
@@ -339,15 +369,37 @@ jobs:
               fi
 
               if [ -n "$GHSA_RESULT" ]; then
-                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
-                  .data.securityVulnerabilities.nodes[] |
-                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
-                ' 2>/dev/null || true)
+                _target_ver="${PY_VERSIONS[$PKG]}"
 
-                if [ -n "$GHSA_VULNS" ]; then
-                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
-                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
-                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                if [ -n "$_target_ver" ]; then
+                  while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
+                    [ -z "$_g_id" ] && continue
+                    if [ -n "$_g_patched" ]; then
+                      _lowest=$(printf '%s\n' "$_g_patched" "$_target_ver" | sort -V | head -1)
+                      if [ "$_lowest" = "$_g_patched" ]; then
+                        FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
+                        FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
+                        continue
+                      fi
+                    fi
+                    SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                    GHSA_TOTAL=$((GHSA_TOTAL + 1))
+                  done <<< "$(echo "$GHSA_RESULT" | jq -r '
+                    .data.securityVulnerabilities.nodes[] |
+                    [.advisory.ghsaId, .advisory.severity, .advisory.summary, (.firstPatchedVersion.identifier // "")] |
+                    @tsv
+                  ' 2>/dev/null || true)"
+                else
+                  GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
+                    .data.securityVulnerabilities.nodes[] |
+                    "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
+                  ' 2>/dev/null || true)
+
+                  if [ -n "$GHSA_VULNS" ]; then
+                    GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
+                    GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
+                    SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                  fi
                 fi
               fi
 
