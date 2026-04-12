@@ -25,18 +25,18 @@ jobs:
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
+          GH_REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           if [[ "$PR_AUTHOR" != "dependabot[bot]" ]]; then
-            gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
               -f state="success" \
               -f context="dependency-cooldown / gate" \
               -f description="Non-bot PR — no cool-down required"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
               -f state="pending" \
               -f context="dependency-cooldown / gate" \
               -f description="Scanning dependencies for known exploits..."
@@ -267,7 +267,10 @@ jobs:
             RESULTS_TABLE="$(printf '%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$SCAN_RESULTS")"
             RESULTS_FOOTER="> Review the advisories above before deciding to merge."
           elif [ -n "$HAS_ERROR" ]; then
-            echo "Scan had API errors for PR #${PR_NUMBER} — skipping comment and status. Will retry on next event."
+            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+              -f state=error \
+              -f context="dependency-cooldown / gate" \
+              -f description="Scan failed due to API errors — re-run or push to retry."
             exit 0
           else
             RESULTS_HEADER="No known exploits found in GHSA or OSV databases."
