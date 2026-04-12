@@ -167,6 +167,7 @@ jobs:
             while IFS= read -r _uses_line; do
               [ -z "$_uses_line" ] && continue
               _action_name=$(echo "$_uses_line" | sed -E 's/^\+\s+uses:\s+//' | sed -E 's/@.*//' | sed -E 's/\s*$//')
+              [ -z "$_action_name" ] && continue
               echo "$_action_name" | grep -qE '^(\./|docker://)' && continue
               echo "$ACTIONS" | grep -qxF "$_action_name" 2>/dev/null && continue
               _action_ver=$(echo "$_uses_line" | grep -oE '#\s*v[0-9][0-9.]*' | sed -E 's/#\s*v//' || true)
@@ -271,7 +272,7 @@ jobs:
               _pkg_name=$(echo "$_py_line" | sed -E 's/[>=<~!].*//' | sed -E 's/\s*$//')
               [ -z "$_pkg_name" ] && continue
               echo "$PY_DEPS" | grep -qxF "$_pkg_name" 2>/dev/null && continue
-              _pkg_ver=$(echo "$_py_line" | grep -oE '[>=<~!]+[0-9][0-9.]*' | head -1 | sed -E 's/^[>=<~!]+//' || true)
+              _pkg_ver=$(echo "$_py_line" | grep -oE '[>=<~]+[0-9][0-9.]*' | head -1 | sed -E 's/^[>=<~]+//' || true)
               PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_pkg_name")"
               PY_VERSIONS["$_pkg_name"]="$_pkg_ver"
             done <<< "$(echo "$DIFF" | grep -E '^\+.*=' | \
