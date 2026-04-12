@@ -238,9 +238,15 @@ jobs:
                 fi
               fi
 
-              # Query OSV
-              OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" \
-                '{"package":{"name":$name,"ecosystem":$eco}}')
+              # Query OSV (version-filtered when target version is known)
+              _target_ver="${ACTION_VERSIONS[$ACTION]}"
+              if [ -n "$_target_ver" ]; then
+                OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" --arg ver "$_target_ver" \
+                  '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
+              else
+                OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" \
+                  '{"package":{"name":$name,"ecosystem":$eco}}')
+              fi
               OSV_RESULT=$(curl -sf --max-time 30 \
                 -X POST "https://api.osv.dev/v1/query" \
                 -H "Content-Type: application/json" \
@@ -345,9 +351,15 @@ jobs:
                 fi
               fi
 
-              # Query OSV for PyPI
-              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" \
-                '{"package":{"name":$name,"ecosystem":$eco}}')
+              # Query OSV for PyPI (version-filtered when target version is known)
+              _target_ver="${PY_VERSIONS[$PKG]}"
+              if [ -n "$_target_ver" ]; then
+                OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" --arg ver "$_target_ver" \
+                  '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
+              else
+                OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" \
+                  '{"package":{"name":$name,"ecosystem":$eco}}')
+              fi
               OSV_RESULT=$(curl -sf --max-time 30 \
                 -X POST "https://api.osv.dev/v1/query" \
                 -H "Content-Type: application/json" \
