@@ -15,6 +15,10 @@ on:
         type: boolean
         default: true
         description: "Include OpenSSF Scorecard in scan results"
+      auto_merge:
+        type: boolean
+        default: false
+        description: "Auto-merge clean PRs after scan completes"
 
 jobs:
   scan:
@@ -93,6 +97,7 @@ jobs:
           PR_NUMBERS: ${{ steps.find-prs.outputs.pr_numbers }}
           BYPASS_LABEL: ${{ inputs.bypass_label }}
           ENABLE_SCORECARD: ${{ inputs.enable_scorecard }}
+          AUTO_MERGE: ${{ inputs.auto_merge }}
         run: |
           for PR_NUMBER in $PR_NUMBERS; do
             echo "=== Scanning PR #${PR_NUMBER} ==="
