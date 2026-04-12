@@ -1,0 +1,22 @@
+name: Dependency Cool-Down
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+  issues: write
+
+concurrency:
+  group: cooldown-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cooldown:
+    uses: ./.github/workflows/dependency-cooldown.yml
+    with:
+      auto_merge: true

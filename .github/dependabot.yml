@@ -9,3 +9,5 @@ updates:
       timezone: "America/Los_Angeles"
     commit-message:
       prefix: "deps"
+    cooldown:
+      default-days: 7
