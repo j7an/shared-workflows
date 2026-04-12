@@ -381,7 +381,11 @@ jobs:
               ROW1="| GitHub Advisory (GHSA) | 0 found |"
               ROW2="| OSV.dev | 0 found |"
               RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
-              RESULTS_FOOTER="> This PR is now eligible for manual review and merge."
+              if [[ "$AUTO_MERGE" == "true" ]]; then
+                RESULTS_FOOTER="> Auto-merge has been enabled. This PR will merge once all status checks pass."
+              else
+                RESULTS_FOOTER="> This PR is now eligible for manual review and merge."
+              fi
             fi
 
             COMMENT_BODY="$(printf '%s\n\n%s\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s' \
@@ -452,10 +456,38 @@ jobs:
             fi
 
             # Set status to success
+            if [[ "$AUTO_MERGE" == "true" ]] && [ "$TOTAL" -eq 0 ]; then
+              STATUS_DESC="Cool-down complete. Clean scan. Auto-merge enabled."
+            elif [[ "$AUTO_MERGE" == "true" ]] && [ "$TOTAL" -gt 0 ]; then
+              STATUS_DESC="Cool-down complete. Advisories found. Manual review required."
+            else
+              STATUS_DESC="Cool-down complete. Exploit scan posted. Ready for manual review."
+            fi
+
             gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
               -f state=success \
               -f context="dependency-cooldown / gate" \
-              -f description="Cool-down complete. Exploit scan posted. Ready for manual review."
+              -f description="$STATUS_DESC"
+
+            # --- Auto-merge decision (opt-in via auto_merge input) ---
+            if [[ "$AUTO_MERGE" == "true" ]]; then
+              if [ "$TOTAL" -eq 0 ]; then
+                if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
+                  echo "Auto-merge enabled for PR #${PR_NUMBER} (clean scan)"
+                else
+                  echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — manual merge required"
+                fi
+              else
+                gh label create "security-review-needed" \
+                  --repo "$GH_REPO" \
+                  --color "B60205" \
+                  --description "Dependency scan found advisories — manual review required" \
+                  --force
+                gh pr edit "$PR_NUMBER" --repo "$GH_REPO" \
+                  --add-label "security-review-needed"
+                echo "Skipped auto-merge for PR #${PR_NUMBER}: ${TOTAL} advisory/ies found, labeled security-review-needed"
+              fi
+            fi
 
             echo "=== Done with PR #${PR_NUMBER} ==="
           done
