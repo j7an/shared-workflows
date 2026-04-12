@@ -5,5 +5,7 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+      time: "18:00"
+      timezone: "America/Los_Angeles"
     commit-message:
       prefix: "deps"
