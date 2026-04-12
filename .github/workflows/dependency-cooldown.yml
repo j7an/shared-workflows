@@ -67,28 +67,52 @@ jobs:
           # Fetch PR body for Dependabot version fallback
           PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json body --jq '.body // ""')
 
-          # --- Parse GitHub Actions dependencies (with version extraction) ---
-          ACTIONS=""
-          while IFS= read -r _uses_line; do
-            [ -z "$_uses_line" ] && continue
-            _action_name=$(echo "$_uses_line" | sed -E 's/^\+\s+uses:\s+//' | sed -E 's/@.*//' | sed -E 's/\s*$//')
-            [ -z "$_action_name" ] && continue
-            echo "$_action_name" | grep -qE '^(\./|docker://)' && continue
-            echo "$ACTIONS" | grep -qxF "$_action_name" 2>/dev/null && continue
-            _action_ver=$(echo "$_uses_line" | grep -oE '#\s*v[0-9][0-9.]*' | sed -E 's/#\s*v//' || true)
-            ACTIONS="$(printf '%s\n%s' "$ACTIONS" "$_action_name")"
-            ACTION_VERSIONS["$_action_name"]="$_action_ver"
-          done <<< "$(echo "$DIFF" | grep -E '^\+\s+uses:' || true)"
-          ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
+          # --- Extract dependencies via standalone script (Task 8) ---
+          DEPS_TSV=$(echo "$DIFF" | bash "${GITHUB_WORKSPACE}/scripts/extract-deps.sh")
 
-          # Fallback: extract versions from Dependabot PR body for actions without inline comment
+          # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
+          # so the existing advisory-scan loops below can consume them unchanged.
+          ACTIONS=""
+          PY_DEPS=""
+          while IFS=$'\t' read -r _name _ver _eco; do
+            [ -z "$_name" ] && continue
+            case "$_eco" in
+              actions)
+                ACTIONS="$(printf '%s\n%s' "$ACTIONS" "$_name")"
+                ACTION_VERSIONS["$_name"]="$_ver"
+                ;;
+              pypi)
+                PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_name")"
+                PY_VERSIONS["$_name"]="$_ver"
+                ;;
+            esac
+          done <<< "$DEPS_TSV"
+          ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
+          PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
+
+          # PR-body version fallback for deps without inline version (preserved from v2.0.1)
           for ACTION in $ACTIONS; do
             [ -z "$ACTION" ] && continue
-            if [ -z "${ACTION_VERSIONS[$ACTION]}" ]; then
+            if [ -z "${ACTION_VERSIONS[$ACTION]:-}" ]; then
               _dep_ver=$(echo "$PR_BODY" | grep -F "[$ACTION]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
               ACTION_VERSIONS["$ACTION"]="$_dep_ver"
             fi
           done
+          for PKG in $PY_DEPS; do
+            [ -z "$PKG" ] && continue
+            if [ -z "${PY_VERSIONS[$PKG]:-}" ]; then
+              _dep_ver=$(echo "$PR_BODY" | grep -Fi "[$PKG]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
+              PY_VERSIONS["$PKG"]="$_dep_ver"
+            fi
+          done
+
+          # Sanity-check: count +uses lines in diff vs extracted actions (Task 8 — fixes #27 regression defense)
+          EXPECTED_ACTIONS=$(echo "$DIFF" | grep -cE '^\+[[:space:]]+(- )?uses:' || true)
+          EXTRACTED_ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | wc -l | tr -d ' ')
+          EXTRACTION_WARNING=""
+          if [ "$EXPECTED_ACTIONS" != "$EXTRACTED_ACTIONS" ]; then
+            EXTRACTION_WARNING="⚠️ Extraction mismatch: diff has ${EXPECTED_ACTIONS} action bumps, extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
+          fi
 
           for ACTION in $ACTIONS; do
             [ -z "$ACTION" ] && continue
@@ -196,33 +220,6 @@ jobs:
                 OSV_TOTAL=$((OSV_TOTAL + OSV_COUNT))
                 SCAN_RESULTS="${SCAN_RESULTS}${OSV_VULNS}"$'\n'
               fi
-            fi
-          done
-
-          # --- Parse Python dependencies (with version extraction) ---
-          PY_DEPS=""
-          while IFS= read -r _py_line; do
-            [ -z "$_py_line" ] && continue
-            _pkg_name=$(echo "$_py_line" | sed -E 's/[>=<~!].*//' | sed -E 's/\s*$//')
-            [ -z "$_pkg_name" ] && continue
-            echo "$PY_DEPS" | grep -qxF "$_pkg_name" 2>/dev/null && continue
-            _pkg_ver=$(echo "$_py_line" | grep -oE '[>=<~]+[0-9][0-9.]*' | head -1 | sed -E 's/^[>=<~]+//' || true)
-            PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_pkg_name")"
-            PY_VERSIONS["$_pkg_name"]="$_pkg_ver"
-          done <<< "$(echo "$DIFF" | grep -E '^\+.*=' | \
-            grep -v '^\+\+\+' | \
-            grep -v '^\+#' | \
-            grep -v 'uses:' | \
-            sed -E 's/^\+\s*//' | \
-            grep -E '^[a-zA-Z].*[>=<~!]' || true)"
-          PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
-
-          # Fallback: extract versions from Dependabot PR body for packages without version
-          for PKG in $PY_DEPS; do
-            [ -z "$PKG" ] && continue
-            if [ -z "${PY_VERSIONS[$PKG]}" ]; then
-              _dep_ver=$(echo "$PR_BODY" | grep -Fi "[$PKG]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
-              PY_VERSIONS["$PKG"]="$_dep_ver"
             fi
           done
 
