@@ -24,6 +24,11 @@ concurrency:
 jobs:
   tag-release:
     runs-on: ubuntu-latest
+    # Gate secret access on a named environment so a malicious workflow edit
+    # can't reach RELEASE_BOT_PRIVATE_KEY without passing the environment's
+    # branch-policy check (main only). Pairs with the if: below as a
+    # GitHub-side enforcement of the same invariant.
+    environment: release
     # Releases must originate from main's latest commit. workflow_dispatch
     # lets the operator pick any branch in the Actions UI, so we gate
     # explicitly instead of relying on trust.
@@ -34,10 +39,38 @@ jobs:
         with:
           egress-policy: audit
 
+      - name: Preflight — verify Release Bot App credentials
+        env:
+          APP_ID: ${{ vars.RELEASE_BOT_APP_ID }}
+        run: |
+          if [ -z "${APP_ID}" ]; then
+            {
+              echo "### Release Bot App not configured"
+              echo ""
+              echo "\`vars.RELEASE_BOT_APP_ID\` is empty. Tag Release needs a GitHub App identity"
+              echo "to push tags so that \`release.yml\` fires (the default \`GITHUB_TOKEN\` is"
+              echo "suppressed by GitHub's recursion guard)."
+              echo ""
+              echo "See [README › Release Bot App setup](../../README.md#release-bot-app-setup)"
+              echo "for one-time provisioning steps."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Release Bot App not configured (see README#release-bot-app-setup)"
+            exit 1
+          fi
+          echo "Release Bot App ID present: ${APP_ID}"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           fetch-tags: true
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Compute release
         id: compute
