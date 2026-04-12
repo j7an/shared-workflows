@@ -162,17 +162,36 @@ jobs:
             FILTERED_RESULTS=""
             FILTERED_TOTAL=0
 
-            # --- Parse GitHub Actions dependencies ---
-            ACTIONS=$(echo "$DIFF" | grep -E '^\+\s+uses:' | \
-              sed -E 's/^\+\s+uses:\s+//' | \
-              sed -E 's/@.*//' | \
-              sed -E 's/\s*#.*//' | \
-              grep -v -E '^(\.\/|docker://)' | \
-              sort -u || true)
+            # --- Parse GitHub Actions dependencies (with version extraction) ---
+            ACTIONS=""
+            while IFS= read -r _uses_line; do
+              [ -z "$_uses_line" ] && continue
+              _action_name=$(echo "$_uses_line" | sed -E 's/^\+\s+uses:\s+//' | sed -E 's/@.*//' | sed -E 's/\s*$//')
+              echo "$_action_name" | grep -qE '^(\./|docker://)' && continue
+              echo "$ACTIONS" | grep -qxF "$_action_name" 2>/dev/null && continue
+              _action_ver=$(echo "$_uses_line" | grep -oE '#\s*v[0-9][0-9.]*' | sed -E 's/#\s*v//' || true)
+              ACTIONS="$(printf '%s\n%s' "$ACTIONS" "$_action_name")"
+              ACTION_VERSIONS["$_action_name"]="$_action_ver"
+            done <<< "$(echo "$DIFF" | grep -E '^\+\s+uses:' || true)"
+            ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
+
+            # Fallback: extract versions from Dependabot PR body for actions without inline comment
+            for ACTION in $ACTIONS; do
+              [ -z "$ACTION" ] && continue
+              if [ -z "${ACTION_VERSIONS[$ACTION]}" ]; then
+                _dep_ver=$(echo "$PR_BODY" | grep -F "[$ACTION]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
+                ACTION_VERSIONS["$ACTION"]="$_dep_ver"
+              fi
+            done
 
             for ACTION in $ACTIONS; do
               [ -z "$ACTION" ] && continue
-              DEPS="${DEPS}\`${ACTION}\`, "
+              _ver="${ACTION_VERSIONS[$ACTION]}"
+              if [ -n "$_ver" ]; then
+                DEPS="${DEPS}\`${ACTION}\` (v${_ver}), "
+              else
+                DEPS="${DEPS}\`${ACTION}\`, "
+              fi
 
               # Query GHSA via GraphQL
               GHSA_RESULT=$(gh api graphql -f query='
