@@ -11,6 +11,10 @@ permissions:
   statuses: write
   issues: write
 
+concurrency:
+  group: cooldown-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   cooldown:
     uses: ./.github/workflows/dependency-cooldown.yml
