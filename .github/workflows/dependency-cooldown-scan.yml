@@ -264,20 +264,41 @@ jobs:
               fi
             done
 
-            # --- Parse Python dependencies ---
-            PY_DEPS=$(echo "$DIFF" | grep -E '^\+.*=' | \
+            # --- Parse Python dependencies (with version extraction) ---
+            PY_DEPS=""
+            while IFS= read -r _py_line; do
+              [ -z "$_py_line" ] && continue
+              _pkg_name=$(echo "$_py_line" | sed -E 's/[>=<~!].*//' | sed -E 's/\s*$//')
+              [ -z "$_pkg_name" ] && continue
+              echo "$PY_DEPS" | grep -qxF "$_pkg_name" 2>/dev/null && continue
+              _pkg_ver=$(echo "$_py_line" | grep -oE '[>=<~!]+[0-9][0-9.]*' | head -1 | sed -E 's/^[>=<~!]+//' || true)
+              PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_pkg_name")"
+              PY_VERSIONS["$_pkg_name"]="$_pkg_ver"
+            done <<< "$(echo "$DIFF" | grep -E '^\+.*=' | \
               grep -v '^\+\+\+' | \
               grep -v '^\+#' | \
               grep -v 'uses:' | \
               sed -E 's/^\+\s*//' | \
-              grep -E '^[a-zA-Z].*[>=<~!]' | \
-              sed -E 's/[>=<~!].*//' | \
-              sed -E 's/\s*$//' | \
-              sort -u || true)
+              grep -E '^[a-zA-Z].*[>=<~!]' || true)"
+            PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
+
+            # Fallback: extract versions from Dependabot PR body for packages without version
+            for PKG in $PY_DEPS; do
+              [ -z "$PKG" ] && continue
+              if [ -z "${PY_VERSIONS[$PKG]}" ]; then
+                _dep_ver=$(echo "$PR_BODY" | grep -Fi "[$PKG]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
+                PY_VERSIONS["$PKG"]="$_dep_ver"
+              fi
+            done
 
             for PKG in $PY_DEPS; do
               [ -z "$PKG" ] && continue
-              DEPS="${DEPS}\`${PKG}\`, "
+              _ver="${PY_VERSIONS[$PKG]}"
+              if [ -n "$_ver" ]; then
+                DEPS="${DEPS}\`${PKG}\` (v${_ver}), "
+              else
+                DEPS="${DEPS}\`${PKG}\`, "
+              fi
 
               # Query GHSA for PyPI
               GHSA_RESULT=$(gh api graphql -f query='
