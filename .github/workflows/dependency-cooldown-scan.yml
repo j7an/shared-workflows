@@ -99,15 +99,17 @@ jobs:
           ENABLE_SCORECARD: ${{ inputs.enable_scorecard }}
           AUTO_MERGE: ${{ inputs.auto_merge }}
         run: |
+          declare -A ACTION_VERSIONS PY_VERSIONS
           for PR_NUMBER in $PR_NUMBERS; do
             echo "=== Scanning PR #${PR_NUMBER} ==="
 
             # Get PR metadata including labels for bypass check
             PR_META=$(gh pr view "$PR_NUMBER" \
               --repo "$GH_REPO" \
-              --json createdAt,headRefOid,labels)
+              --json createdAt,headRefOid,labels,body)
             CREATED_AT=$(echo "$PR_META" | jq -r '.createdAt')
             HEAD_SHA=$(echo "$PR_META" | jq -r '.headRefOid')
+            PR_BODY=$(echo "$PR_META" | jq -r '.body // ""')
 
             # Check for bypass label
             HAS_BYPASS=$(echo "$PR_META" | jq -r \
@@ -155,6 +157,10 @@ jobs:
             GHSA_TOTAL=0
             OSV_TOTAL=0
             HAS_ERROR=""
+            ACTION_VERSIONS=()
+            PY_VERSIONS=()
+            FILTERED_RESULTS=""
+            FILTERED_TOTAL=0
 
             # --- Parse GitHub Actions dependencies ---
             ACTIONS=$(echo "$DIFF" | grep -E '^\+\s+uses:' | \
