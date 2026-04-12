@@ -24,6 +24,11 @@ concurrency:
 jobs:
   tag-release:
     runs-on: ubuntu-latest
+    # Gate secret access on a named environment so a malicious workflow edit
+    # can't reach RELEASE_BOT_PRIVATE_KEY without passing the environment's
+    # branch-policy check (main only). Pairs with the if: below as a
+    # GitHub-side enforcement of the same invariant.
+    environment: release
     # Releases must originate from main's latest commit. workflow_dispatch
     # lets the operator pick any branch in the Actions UI, so we gate
     # explicitly instead of relying on trust.
