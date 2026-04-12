@@ -455,26 +455,14 @@ jobs:
               echo "Posted change notification"
             fi
 
-            # Set status to success
-            if [[ "$AUTO_MERGE" == "true" ]] && [ "$TOTAL" -eq 0 ]; then
-              STATUS_DESC="Cool-down complete. Clean scan. Auto-merge enabled."
-            elif [[ "$AUTO_MERGE" == "true" ]] && [ "$TOTAL" -gt 0 ]; then
-              STATUS_DESC="Cool-down complete. Advisories found. Manual review required."
-            else
-              STATUS_DESC="Cool-down complete. Exploit scan posted. Ready for manual review."
-            fi
-
-            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
-              -f state=success \
-              -f context="dependency-cooldown / gate" \
-              -f description="$STATUS_DESC"
-
             # --- Auto-merge decision (opt-in via auto_merge input) ---
             if [[ "$AUTO_MERGE" == "true" ]]; then
               if [ "$TOTAL" -eq 0 ]; then
                 if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
+                  STATUS_DESC="Cool-down complete. Clean scan. Auto-merge enabled."
                   echo "Auto-merge enabled for PR #${PR_NUMBER} (clean scan)"
                 else
+                  STATUS_DESC="Cool-down complete. Clean scan. Auto-merge unavailable — merge manually."
                   echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — manual merge required"
                 fi
               else
@@ -485,9 +473,18 @@ jobs:
                   --force
                 gh pr edit "$PR_NUMBER" --repo "$GH_REPO" \
                   --add-label "security-review-needed"
+                STATUS_DESC="Cool-down complete. Advisories found. Manual review required."
                 echo "Skipped auto-merge for PR #${PR_NUMBER}: ${TOTAL} advisory/ies found, labeled security-review-needed"
               fi
+            else
+              STATUS_DESC="Cool-down complete. Exploit scan posted. Ready for manual review."
             fi
+
+            # Set status to success
+            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+              -f state=success \
+              -f context="dependency-cooldown / gate" \
+              -f description="$STATUS_DESC"
 
             echo "=== Done with PR #${PR_NUMBER} ==="
           done
