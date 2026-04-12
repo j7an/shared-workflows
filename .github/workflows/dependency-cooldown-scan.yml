@@ -532,7 +532,8 @@ jobs:
             if [ -n "$EXISTING_COMMENT_ID" ]; then
               PREV_BODY=$(echo "$COMMENTS_JSON" | jq -r "
                 [.[] | select(.id == ${EXISTING_COMMENT_ID})][0].body")
-              PREV_IDS=$(echo "$PREV_BODY" | \
+              PREV_ACTIVE=$(echo "$PREV_BODY" | sed '/<details>/,$d')
+              PREV_IDS=$(echo "$PREV_ACTIVE" | \
                 grep -oE '(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|PYSEC-[0-9]+-[0-9]+)' | \
                 sort -u | tr '\n' ',' | sed 's/,$//' || true)
             fi
@@ -578,10 +579,10 @@ jobs:
             if [[ "$AUTO_MERGE" == "true" ]]; then
               if [ "$TOTAL" -eq 0 ]; then
                 if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
-                  STATUS_DESC="Cool-down complete. Clean scan. Auto-merge enabled."
+                  STATUS_DESC="Cool-down complete. Clean scan (version-filtered). Auto-merge enabled."
                   echo "Auto-merge enabled for PR #${PR_NUMBER} (clean scan)"
                 else
-                  STATUS_DESC="Cool-down complete. Clean scan. Auto-merge unavailable — merge manually."
+                  STATUS_DESC="Cool-down complete. Clean scan (version-filtered). Auto-merge unavailable — merge manually."
                   echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — manual merge required"
                 fi
               else
@@ -592,11 +593,11 @@ jobs:
                   --force
                 gh pr edit "$PR_NUMBER" --repo "$GH_REPO" \
                   --add-label "security-review-needed"
-                STATUS_DESC="Cool-down complete. Advisories found. Manual review required."
+                STATUS_DESC="Cool-down complete. Advisories found (version-filtered). Manual review required."
                 echo "Skipped auto-merge for PR #${PR_NUMBER}: ${TOTAL} advisory/ies found, labeled security-review-needed"
               fi
             else
-              STATUS_DESC="Cool-down complete. Exploit scan posted. Ready for manual review."
+              STATUS_DESC="Cool-down complete. Exploit scan posted (version-filtered). Ready for manual review."
             fi
 
             # Set status to success
