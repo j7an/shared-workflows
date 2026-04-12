@@ -1,0 +1,11 @@
+diff --git a/requirements.txt b/requirements.txt
+index abc1234..def5678 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,4 +1,4 @@
+-requests==2.31.0
+-urllib3==2.0.7
++requests==2.32.5
++urllib3==2.2.3
+ certifi==2024.2.2
+ charset-normalizer==3.3.2
