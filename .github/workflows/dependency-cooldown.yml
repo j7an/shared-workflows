@@ -60,18 +60,44 @@ jobs:
           GHSA_TOTAL=0
           OSV_TOTAL=0
           HAS_ERROR=""
+          declare -A ACTION_VERSIONS PY_VERSIONS
+          FILTERED_RESULTS=""
+          FILTERED_TOTAL=0
 
-          # --- Parse GitHub Actions dependencies ---
-          ACTIONS=$(echo "$DIFF" | grep -E '^\+\s+uses:' | \
-            sed -E 's/^\+\s+uses:\s+//' | \
-            sed -E 's/@.*//' | \
-            sed -E 's/\s*#.*//' | \
-            grep -v -E '^(\.\/|docker://)' | \
-            sort -u || true)
+          # Fetch PR body for Dependabot version fallback
+          PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json body --jq '.body // ""')
+
+          # --- Parse GitHub Actions dependencies (with version extraction) ---
+          ACTIONS=""
+          while IFS= read -r _uses_line; do
+            [ -z "$_uses_line" ] && continue
+            _action_name=$(echo "$_uses_line" | sed -E 's/^\+\s+uses:\s+//' | sed -E 's/@.*//' | sed -E 's/\s*$//')
+            [ -z "$_action_name" ] && continue
+            echo "$_action_name" | grep -qE '^(\./|docker://)' && continue
+            echo "$ACTIONS" | grep -qxF "$_action_name" 2>/dev/null && continue
+            _action_ver=$(echo "$_uses_line" | grep -oE '#\s*v[0-9][0-9.]*' | sed -E 's/#\s*v//' || true)
+            ACTIONS="$(printf '%s\n%s' "$ACTIONS" "$_action_name")"
+            ACTION_VERSIONS["$_action_name"]="$_action_ver"
+          done <<< "$(echo "$DIFF" | grep -E '^\+\s+uses:' || true)"
+          ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
+
+          # Fallback: extract versions from Dependabot PR body for actions without inline comment
+          for ACTION in $ACTIONS; do
+            [ -z "$ACTION" ] && continue
+            if [ -z "${ACTION_VERSIONS[$ACTION]}" ]; then
+              _dep_ver=$(echo "$PR_BODY" | grep -F "[$ACTION]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
+              ACTION_VERSIONS["$ACTION"]="$_dep_ver"
+            fi
+          done
 
           for ACTION in $ACTIONS; do
             [ -z "$ACTION" ] && continue
-            DEPS="${DEPS}\`${ACTION}\`, "
+            _ver="${ACTION_VERSIONS[$ACTION]}"
+            if [ -n "$_ver" ]; then
+              DEPS="${DEPS}\`${ACTION}\` (v${_ver}), "
+            else
+              DEPS="${DEPS}\`${ACTION}\`, "
+            fi
 
             GHSA_RESULT=$(gh api graphql -f query='
               query($name: String!) {
@@ -85,6 +111,10 @@ jobs:
                       ghsaId
                       severity
                       summary
+                    }
+                    vulnerableVersionRange
+                    firstPatchedVersion {
+                      identifier
                     }
                   }
                 }
@@ -103,20 +133,48 @@ jobs:
             fi
 
             if [ -n "$GHSA_RESULT" ]; then
-              GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
-                .data.securityVulnerabilities.nodes[] |
-                "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
-              ' 2>/dev/null || true)
+              _target_ver="${ACTION_VERSIONS[$ACTION]}"
 
-              if [ -n "$GHSA_VULNS" ]; then
-                GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
-                GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
-                SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+              if [ -n "$_target_ver" ]; then
+                while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
+                  [ -z "$_g_id" ] && continue
+                  if [ -n "$_g_patched" ]; then
+                    _lowest=$(printf '%s\n' "$_g_patched" "$_target_ver" | sort -V | head -1)
+                    if [ "$_lowest" = "$_g_patched" ]; then
+                      FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
+                      FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
+                      continue
+                    fi
+                  fi
+                  SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                  GHSA_TOTAL=$((GHSA_TOTAL + 1))
+                done <<< "$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[] |
+                  [.advisory.ghsaId, .advisory.severity, .advisory.summary, ((.firstPatchedVersion.identifier // "") | ltrimstr("v"))] |
+                  @tsv
+                ' 2>/dev/null || true)"
+              else
+                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[] |
+                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
+                ' 2>/dev/null || true)
+
+                if [ -n "$GHSA_VULNS" ]; then
+                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
+                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
+                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                fi
               fi
             fi
 
-            OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" \
-              '{"package":{"name":$name,"ecosystem":$eco}}')
+            _target_ver="${ACTION_VERSIONS[$ACTION]}"
+            if [ -n "$_target_ver" ]; then
+              OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" --arg ver "$_target_ver" \
+                '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
+            else
+              OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" \
+                '{"package":{"name":$name,"ecosystem":$eco}}')
+            fi
             OSV_RESULT=$(curl -sf --max-time 30 \
               -X POST "https://api.osv.dev/v1/query" \
               -H "Content-Type: application/json" \
@@ -141,20 +199,41 @@ jobs:
             fi
           done
 
-          # --- Parse Python dependencies ---
-          PY_DEPS=$(echo "$DIFF" | grep -E '^\+.*=' | \
+          # --- Parse Python dependencies (with version extraction) ---
+          PY_DEPS=""
+          while IFS= read -r _py_line; do
+            [ -z "$_py_line" ] && continue
+            _pkg_name=$(echo "$_py_line" | sed -E 's/[>=<~!].*//' | sed -E 's/\s*$//')
+            [ -z "$_pkg_name" ] && continue
+            echo "$PY_DEPS" | grep -qxF "$_pkg_name" 2>/dev/null && continue
+            _pkg_ver=$(echo "$_py_line" | grep -oE '[>=<~]+[0-9][0-9.]*' | head -1 | sed -E 's/^[>=<~]+//' || true)
+            PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_pkg_name")"
+            PY_VERSIONS["$_pkg_name"]="$_pkg_ver"
+          done <<< "$(echo "$DIFF" | grep -E '^\+.*=' | \
             grep -v '^\+\+\+' | \
             grep -v '^\+#' | \
             grep -v 'uses:' | \
             sed -E 's/^\+\s*//' | \
-            grep -E '^[a-zA-Z].*[>=<~!]' | \
-            sed -E 's/[>=<~!].*//' | \
-            sed -E 's/\s*$//' | \
-            sort -u || true)
+            grep -E '^[a-zA-Z].*[>=<~!]' || true)"
+          PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
+
+          # Fallback: extract versions from Dependabot PR body for packages without version
+          for PKG in $PY_DEPS; do
+            [ -z "$PKG" ] && continue
+            if [ -z "${PY_VERSIONS[$PKG]}" ]; then
+              _dep_ver=$(echo "$PR_BODY" | grep -Fi "[$PKG]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
+              PY_VERSIONS["$PKG"]="$_dep_ver"
+            fi
+          done
 
           for PKG in $PY_DEPS; do
             [ -z "$PKG" ] && continue
-            DEPS="${DEPS}\`${PKG}\`, "
+            _ver="${PY_VERSIONS[$PKG]}"
+            if [ -n "$_ver" ]; then
+              DEPS="${DEPS}\`${PKG}\` (v${_ver}), "
+            else
+              DEPS="${DEPS}\`${PKG}\`, "
+            fi
 
             GHSA_RESULT=$(gh api graphql -f query='
               query($name: String!) {
@@ -168,6 +247,10 @@ jobs:
                       ghsaId
                       severity
                       summary
+                    }
+                    vulnerableVersionRange
+                    firstPatchedVersion {
+                      identifier
                     }
                   }
                 }
@@ -186,20 +269,48 @@ jobs:
             fi
 
             if [ -n "$GHSA_RESULT" ]; then
-              GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
-                .data.securityVulnerabilities.nodes[] |
-                "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
-              ' 2>/dev/null || true)
+              _target_ver="${PY_VERSIONS[$PKG]}"
 
-              if [ -n "$GHSA_VULNS" ]; then
-                GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
-                GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
-                SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+              if [ -n "$_target_ver" ]; then
+                while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
+                  [ -z "$_g_id" ] && continue
+                  if [ -n "$_g_patched" ]; then
+                    _lowest=$(printf '%s\n' "$_g_patched" "$_target_ver" | sort -V | head -1)
+                    if [ "$_lowest" = "$_g_patched" ]; then
+                      FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
+                      FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
+                      continue
+                    fi
+                  fi
+                  SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                  GHSA_TOTAL=$((GHSA_TOTAL + 1))
+                done <<< "$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[] |
+                  [.advisory.ghsaId, .advisory.severity, .advisory.summary, ((.firstPatchedVersion.identifier // "") | ltrimstr("v"))] |
+                  @tsv
+                ' 2>/dev/null || true)"
+              else
+                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[] |
+                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
+                ' 2>/dev/null || true)
+
+                if [ -n "$GHSA_VULNS" ]; then
+                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
+                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
+                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                fi
               fi
             fi
 
-            OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" \
-              '{"package":{"name":$name,"ecosystem":$eco}}')
+            _target_ver="${PY_VERSIONS[$PKG]}"
+            if [ -n "$_target_ver" ]; then
+              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" --arg ver "$_target_ver" \
+                '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
+            else
+              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" \
+                '{"package":{"name":$name,"ecosystem":$eco}}')
+            fi
             OSV_RESULT=$(curl -sf --max-time 30 \
               -X POST "https://api.osv.dev/v1/query" \
               -H "Content-Type: application/json" \
@@ -261,7 +372,7 @@ jobs:
           # --- Build comment body ---
           TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
           if [ "$TOTAL" -gt 0 ]; then
-            RESULTS_HEADER="**${TOTAL} advisory/ies found** — review before merging."
+            RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
             TABLE_HDR="| ID | Severity | Summary | Source |"
             TABLE_SEP="|----|----------|---------|--------|"
             RESULTS_TABLE="$(printf '%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$SCAN_RESULTS")"
@@ -273,11 +384,11 @@ jobs:
               -f description="Scan failed due to API errors — re-run or push to retry."
             exit 0
           else
-            RESULTS_HEADER="No known exploits found in GHSA or OSV databases."
+            RESULTS_HEADER="No known exploits found affecting the target versions."
             TABLE_HDR="| Source | Vulnerabilities |"
             TABLE_SEP="|--------|----------------|"
-            ROW1="| GitHub Advisory (GHSA) | 0 found |"
-            ROW2="| OSV.dev | 0 found |"
+            ROW1="| GitHub Advisory (GHSA) | 0 affecting target |"
+            ROW2="| OSV.dev | 0 affecting target |"
             RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
             if [[ "$AUTO_MERGE" == "true" ]]; then
               RESULTS_FOOTER="> Auto-merge has been enabled. This PR will merge once all status checks pass."
@@ -286,13 +397,23 @@ jobs:
             fi
           fi
 
-          COMMENT_BODY="$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s' \
+          # Build collapsed historical section (non-blocking, for transparency)
+          HISTORICAL_SECTION=""
+          if [ "$FILTERED_TOTAL" -gt 0 ]; then
+            HIST_HDR="| ID | Severity | Summary | Source | Patched In |"
+            HIST_SEP="|----|----------|---------|--------|------------|"
+            HISTORICAL_SECTION="$(printf '\n<details>\n<summary>%d historical advisory/ies (patched before target version — not blocking)</summary>\n\n%s\n%s\n%s\n</details>' \
+              "$FILTERED_TOTAL" "$HIST_HDR" "$HIST_SEP" "$FILTERED_RESULTS")"
+          fi
+
+          COMMENT_BODY="$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s' \
             "## Dependency Security Scan" \
             "**Packages scanned:** ${DEPS}" \
             "### Results" \
             "$RESULTS_HEADER" \
             "$RESULTS_TABLE" \
             "$RESULTS_FOOTER" \
+            "$HISTORICAL_SECTION" \
             "$SCORECARD_SECTION")"
 
           # --- Comment management: update-or-create with change detection ---
@@ -307,7 +428,8 @@ jobs:
           if [ -n "$EXISTING_COMMENT_ID" ]; then
             PREV_BODY=$(echo "$COMMENTS_JSON" | jq -r "
               [.[] | select(.id == ${EXISTING_COMMENT_ID})][0].body")
-            PREV_IDS=$(echo "$PREV_BODY" | \
+            PREV_ACTIVE=$(echo "$PREV_BODY" | sed '/<details>/,$d')
+            PREV_IDS=$(echo "$PREV_ACTIVE" | \
               grep -oE '(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|PYSEC-[0-9]+-[0-9]+)' | \
               sort -u | tr '\n' ',' | sed 's/,$//' || true)
           fi
@@ -349,10 +471,10 @@ jobs:
           if [[ "$AUTO_MERGE" == "true" ]]; then
             if [ "$TOTAL" -eq 0 ]; then
               if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
-                STATUS_DESC="Clean scan. Auto-merge enabled."
+                STATUS_DESC="Clean scan (version-filtered). Auto-merge enabled."
                 echo "Auto-merge enabled for PR #${PR_NUMBER} (clean scan)"
               else
-                STATUS_DESC="Clean scan. Auto-merge unavailable — merge manually."
+                STATUS_DESC="Clean scan (version-filtered). Auto-merge unavailable — merge manually."
                 echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — manual merge required"
               fi
             else
@@ -363,11 +485,11 @@ jobs:
                 --force
               gh pr edit "$PR_NUMBER" --repo "$GH_REPO" \
                 --add-label "security-review-needed"
-              STATUS_DESC="Advisories found. Manual review required."
+              STATUS_DESC="Advisories found (version-filtered). Manual review required."
               echo "Skipped auto-merge for PR #${PR_NUMBER}: ${TOTAL} advisory/ies found, labeled security-review-needed"
             fi
           else
-            STATUS_DESC="Exploit scan posted. Ready for manual review."
+            STATUS_DESC="Exploit scan posted (version-filtered). Ready for manual review."
           fi
 
           # --- Set final status ---
