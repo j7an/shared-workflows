@@ -402,7 +402,7 @@ jobs:
           if [ "$FILTERED_TOTAL" -gt 0 ]; then
             HIST_HDR="| ID | Severity | Summary | Source | Patched In |"
             HIST_SEP="|----|----------|---------|--------|------------|"
-            HISTORICAL_SECTION="$(printf '\n<details>\n<summary>%d historical advisory/ies (patched before target version — not blocking)</summary>\n\n%s\n%s\n%s\n</details>' \
+            HISTORICAL_SECTION="$(printf '\n\n<details>\n<summary>%d historical advisory/ies (patched at or before target version — not blocking)</summary>\n\n%s\n%s\n%s</details>' \
               "$FILTERED_TOTAL" "$HIST_HDR" "$HIST_SEP" "$FILTERED_RESULTS")"
           fi
 
