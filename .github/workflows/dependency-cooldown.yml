@@ -11,6 +11,14 @@ on:
         type: boolean
         default: false
         description: "Auto-merge clean PRs after scan completes"
+      cooldown_days:
+        type: number
+        default: 7
+        description: "Minimum release age in days before auto-merge is allowed. 0 disables the release-age gate entirely (pre-v2.0.2 behavior)."
+      fail_on_cooldown:
+        type: boolean
+        default: false
+        description: "If true, cooldown blocks set the gate to failure instead of pending. Use when branch protection requires a hard-red blocker."
 
 jobs:
   scan:
@@ -20,6 +28,15 @@ jobs:
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
+
+      - name: Checkout shared-workflows scripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: j7an/shared-workflows
+          ref: ${{ github.workflow_sha }}
+          path: shared-workflows
+          sparse-checkout: scripts
+          persist-credentials: false
 
       - name: Set initial status
         id: gate
@@ -52,6 +69,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ENABLE_SCORECARD: ${{ inputs.enable_scorecard }}
           AUTO_MERGE: ${{ inputs.auto_merge }}
+          COOLDOWN_DAYS: ${{ inputs.cooldown_days }}
+          FAIL_ON_COOLDOWN: ${{ inputs.fail_on_cooldown }}
         run: |
           DIFF=$(gh pr diff "$PR_NUMBER" --repo "$GH_REPO")
 
@@ -67,28 +86,69 @@ jobs:
           # Fetch PR body for Dependabot version fallback
           PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json body --jq '.body // ""')
 
-          # --- Parse GitHub Actions dependencies (with version extraction) ---
-          ACTIONS=""
-          while IFS= read -r _uses_line; do
-            [ -z "$_uses_line" ] && continue
-            _action_name=$(echo "$_uses_line" | sed -E 's/^\+\s+uses:\s+//' | sed -E 's/@.*//' | sed -E 's/\s*$//')
-            [ -z "$_action_name" ] && continue
-            echo "$_action_name" | grep -qE '^(\./|docker://)' && continue
-            echo "$ACTIONS" | grep -qxF "$_action_name" 2>/dev/null && continue
-            _action_ver=$(echo "$_uses_line" | grep -oE '#\s*v[0-9][0-9.]*' | sed -E 's/#\s*v//' || true)
-            ACTIONS="$(printf '%s\n%s' "$ACTIONS" "$_action_name")"
-            ACTION_VERSIONS["$_action_name"]="$_action_ver"
-          done <<< "$(echo "$DIFF" | grep -E '^\+\s+uses:' || true)"
-          ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
+          # --- Extract dependencies via standalone script (Task 8) ---
+          DEPS_TSV=$(echo "$DIFF" | bash "${GITHUB_WORKSPACE}/shared-workflows/scripts/extract-deps.sh")
 
-          # Fallback: extract versions from Dependabot PR body for actions without inline comment
+          # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
+          # so the existing advisory-scan loops below can consume them unchanged.
+          ACTIONS=""
+          PY_DEPS=""
+          while IFS=$'\t' read -r _name _ver _eco; do
+            [ -z "$_name" ] && continue
+            case "$_eco" in
+              actions)
+                ACTIONS="$(printf '%s\n%s' "$ACTIONS" "$_name")"
+                ACTION_VERSIONS["$_name"]="$_ver"
+                ;;
+              pypi)
+                PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_name")"
+                PY_VERSIONS["$_name"]="$_ver"
+                ;;
+            esac
+          done <<< "$DEPS_TSV"
+          ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
+          PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
+
+          # PR-body version fallback for deps without inline version (preserved from v2.0.1)
           for ACTION in $ACTIONS; do
             [ -z "$ACTION" ] && continue
-            if [ -z "${ACTION_VERSIONS[$ACTION]}" ]; then
+            if [ -z "${ACTION_VERSIONS[$ACTION]:-}" ]; then
               _dep_ver=$(echo "$PR_BODY" | grep -F "[$ACTION]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
               ACTION_VERSIONS["$ACTION"]="$_dep_ver"
             fi
           done
+          for PKG in $PY_DEPS; do
+            [ -z "$PKG" ] && continue
+            if [ -z "${PY_VERSIONS[$PKG]:-}" ]; then
+              _dep_ver=$(echo "$PR_BODY" | grep -Fi "[$PKG]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
+              PY_VERSIONS["$PKG"]="$_dep_ver"
+            fi
+          done
+
+          # Sanity-check: count UNIQUE action names in the diff vs extracted actions.
+          # Filters ./ (local) and docker:// actions because the extractor at
+          # scripts/extract-deps.sh:51-52 intentionally skips them — counting them
+          # here would produce a false-positive extraction-mismatch warning on any
+          # PR adding a local or docker action reference.
+          # (Task 13c — fixes regression introduced by Task 13b)
+          EXPECTED_ACTIONS=$(echo "$DIFF" \
+            | grep -oE '^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]@]+' \
+            | sed -E 's/^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+//' \
+            | grep -vE '^(\./|docker://)' \
+            | sort -u | wc -l | tr -d ' ')
+          EXTRACTED_ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | wc -l | tr -d ' ')
+          EXTRACTION_WARNING=""
+          if [ "$EXPECTED_ACTIONS" != "$EXTRACTED_ACTIONS" ]; then
+            EXTRACTION_WARNING="⚠️ Extraction mismatch: diff contains ${EXPECTED_ACTIONS} unique action(s), extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
+          fi
+
+          # --- Check release age via standalone script (Task 9 — phase 2) ---
+          COOLDOWN_FAILURES=0
+          AGE_TSV=""
+          if [ "$COOLDOWN_DAYS" -gt 0 ]; then
+            AGE_TSV=$(echo "$DEPS_TSV" | bash "${GITHUB_WORKSPACE}/shared-workflows/scripts/check-release-age.sh")
+            COOLDOWN_FAILURES=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" || $6=="error"' | wc -l | tr -d ' ')
+          fi
 
           for ACTION in $ACTIONS; do
             [ -z "$ACTION" ] && continue
@@ -196,33 +256,6 @@ jobs:
                 OSV_TOTAL=$((OSV_TOTAL + OSV_COUNT))
                 SCAN_RESULTS="${SCAN_RESULTS}${OSV_VULNS}"$'\n'
               fi
-            fi
-          done
-
-          # --- Parse Python dependencies (with version extraction) ---
-          PY_DEPS=""
-          while IFS= read -r _py_line; do
-            [ -z "$_py_line" ] && continue
-            _pkg_name=$(echo "$_py_line" | sed -E 's/[>=<~!].*//' | sed -E 's/\s*$//')
-            [ -z "$_pkg_name" ] && continue
-            echo "$PY_DEPS" | grep -qxF "$_pkg_name" 2>/dev/null && continue
-            _pkg_ver=$(echo "$_py_line" | grep -oE '[>=<~]+[0-9][0-9.]*' | head -1 | sed -E 's/^[>=<~]+//' || true)
-            PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_pkg_name")"
-            PY_VERSIONS["$_pkg_name"]="$_pkg_ver"
-          done <<< "$(echo "$DIFF" | grep -E '^\+.*=' | \
-            grep -v '^\+\+\+' | \
-            grep -v '^\+#' | \
-            grep -v 'uses:' | \
-            sed -E 's/^\+\s*//' | \
-            grep -E '^[a-zA-Z].*[>=<~!]' || true)"
-          PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
-
-          # Fallback: extract versions from Dependabot PR body for packages without version
-          for PKG in $PY_DEPS; do
-            [ -z "$PKG" ] && continue
-            if [ -z "${PY_VERSIONS[$PKG]}" ]; then
-              _dep_ver=$(echo "$PR_BODY" | grep -Fi "[$PKG]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
-              PY_VERSIONS["$PKG"]="$_dep_ver"
             fi
           done
 
@@ -371,6 +404,39 @@ jobs:
 
           # --- Build comment body ---
           TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
+
+          # --- Label reconciliation (Task 13b — authoritative on clean runs, additive-only on HAS_ERROR paths) ---
+          LABEL_COLOR_security_review_needed="B60205"
+          LABEL_DESC_security_review_needed="Dependency scan found advisories — manual review required"
+          LABEL_COLOR_cooldown_pending="FBCA04"
+          LABEL_DESC_cooldown_pending="One or more target versions are within the configured cooldown window"
+
+          reconcile_label() {
+            local label="$1"
+            local should_be_present="$2"
+            local color="$3"
+            local desc="$4"
+            local current has_it
+            current=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json labels --jq '[.labels[].name]')
+            has_it=$(echo "$current" | jq -e --arg l "$label" 'contains([$l])' >/dev/null && echo true || echo false)
+
+            if [ "$should_be_present" = "true" ] && [ "$has_it" = "false" ]; then
+              gh label create "$label" --repo "$GH_REPO" --color "$color" --description "$desc" --force >/dev/null 2>&1 || true
+              gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --add-label "$label" || true
+              echo "Applied label: $label"
+            elif [ "$should_be_present" = "false" ] && [ "$has_it" = "true" ] && [ -z "${HAS_ERROR:-}" ]; then
+              gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --remove-label "$label" || true
+              echo "Removed stale label: $label"
+            elif [ "$should_be_present" = "false" ] && [ "$has_it" = "true" ]; then
+              echo "Preserving label $label: scan had API errors, verdict is unreliable"
+            fi
+          }
+
+          _needs_security=$([ "$TOTAL" -gt 0 ] && echo true || echo false)
+          _needs_cooldown=$([ "$COOLDOWN_FAILURES" -gt 0 ] && echo true || echo false)
+          reconcile_label "security-review-needed" "$_needs_security" "$LABEL_COLOR_security_review_needed" "$LABEL_DESC_security_review_needed"
+          reconcile_label "cooldown-pending"       "$_needs_cooldown" "$LABEL_COLOR_cooldown_pending"       "$LABEL_DESC_cooldown_pending"
+
           if [ "$TOTAL" -gt 0 ]; then
             RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
             TABLE_HDR="| ID | Severity | Summary | Source |"
@@ -406,14 +472,70 @@ jobs:
               "$FILTERED_TOTAL" "$HIST_HDR" "$HIST_SEP" "$FILTERED_RESULTS")"
           fi
 
-          COMMENT_BODY="$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s' \
+          # --- Release Age section (Task 12 — fixes #25 UX) ---
+          RELEASE_AGE_SECTION=""
+          if [ -n "$AGE_TSV" ]; then
+            AGE_TABLE_HDR="| Package | Version | Published | Age | Status |"
+            AGE_TABLE_SEP="|---------|---------|-----------|-----|--------|"
+            AGE_ROWS=""
+            MAX_FAIL_EPOCH=0
+            while IFS=$'\t' read -r _name _ver _eco _iso _days _verdict _reason; do
+              [ -z "$_name" ] && continue
+              case "$_verdict" in
+                pass)  _status="✅ passed" ;;
+                fail)  if [ -n "$_reason" ]; then _status="❌ blocked (${_reason})"; else _status="❌ blocked"; fi ;;
+                error) _status="⚠️ error (${_reason})" ;;
+                *)     _status="?" ;;
+              esac
+              if [ "$_iso" = "-" ]; then
+                _published_short="-"
+              else
+                _published_short="${_iso%T*}"
+              fi
+              AGE_ROWS="${AGE_ROWS}| \`${_name}\` | v${_ver} | ${_published_short} | ${_days}d | ${_status} |"$'\n'
+
+              # Track max fail epoch for "earliest unblock" footer
+              if [ "$_verdict" = "fail" ] && [ "$_iso" != "-" ]; then
+                _pub_epoch=$(date -u -d "$_iso" +%s 2>/dev/null \
+                  || date -u -d "${_iso}Z" +%s 2>/dev/null \
+                  || date -u -jf '%Y-%m-%dT%H:%M:%SZ' "$_iso" +%s 2>/dev/null \
+                  || date -u -jf '%Y-%m-%dT%H:%M:%S' "${_iso%Z}" +%s 2>/dev/null \
+                  || echo 0)
+                if [ "$_pub_epoch" -gt "$MAX_FAIL_EPOCH" ]; then
+                  MAX_FAIL_EPOCH="$_pub_epoch"
+                fi
+              fi
+            done <<< "$AGE_TSV"
+
+            AGE_FOOTER=""
+            if [ "$COOLDOWN_FAILURES" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
+              _unblock_epoch=$(( MAX_FAIL_EPOCH + COOLDOWN_DAYS * 86400 ))
+              _unblock_iso=$(date -u -d "@$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
+                || date -u -r "$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
+                || echo "unknown")
+              AGE_FOOTER="$(printf '\n> %d package(s) within cooldown window. Earliest unblock: %s.' "$COOLDOWN_FAILURES" "$_unblock_iso")"
+            fi
+
+            RELEASE_AGE_SECTION="$(printf '\n### Release Age (cooldown: %s days)\n\n%s\n%s\n%s%s' \
+              "$COOLDOWN_DAYS" "$AGE_TABLE_HDR" "$AGE_TABLE_SEP" "$AGE_ROWS" "$AGE_FOOTER")"
+          fi
+
+          # --- Extraction warning section (Task 12 — surfaces #27 silent drops) ---
+          EXTRACTION_WARNING_SECTION=""
+          if [ -n "$EXTRACTION_WARNING" ]; then
+            EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
+          fi
+
+          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s' \
             "## Dependency Security Scan" \
+            "$EXTRACTION_WARNING_SECTION" \
             "**Packages scanned:** ${DEPS}" \
             "### Results" \
             "$RESULTS_HEADER" \
             "$RESULTS_TABLE" \
             "$RESULTS_FOOTER" \
             "$HISTORICAL_SECTION" \
+            "$RELEASE_AGE_SECTION" \
             "$SCORECARD_SECTION")"
 
           # --- Comment management: update-or-create with change detection ---
@@ -467,33 +589,39 @@ jobs:
             echo "Posted change notification"
           fi
 
-          # --- Auto-merge decision ---
-          if [[ "$AUTO_MERGE" == "true" ]]; then
-            if [ "$TOTAL" -eq 0 ]; then
-              if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
-                STATUS_DESC="Clean scan (version-filtered). Auto-merge enabled."
-                echo "Auto-merge enabled for PR #${PR_NUMBER} (clean scan)"
-              else
-                STATUS_DESC="Clean scan (version-filtered). Auto-merge unavailable — merge manually."
-                echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — manual merge required"
-              fi
+          # --- Gate state machine (Task 11 — combines advisory + cooldown verdicts) ---
+          if [ "$TOTAL" -gt 0 ]; then
+            # Advisory failure wins — strictest signal (existing v2.0.1 semantic: gate=success with "review needed")
+            GATE_STATE="success"
+            STATUS_DESC="${TOTAL} advisory/ies found (version-filtered). Manual review required."
+            AUTO_MERGE_OK=false
+          elif [ "$COOLDOWN_FAILURES" -gt 0 ]; then
+            if [ "$FAIL_ON_COOLDOWN" = "true" ]; then
+              GATE_STATE="failure"
             else
-              gh label create "security-review-needed" \
-                --repo "$GH_REPO" \
-                --color "B60205" \
-                --description "Dependency scan found advisories — manual review required" \
-                --force
-              gh pr edit "$PR_NUMBER" --repo "$GH_REPO" \
-                --add-label "security-review-needed"
-              STATUS_DESC="Advisories found (version-filtered). Manual review required."
-              echo "Skipped auto-merge for PR #${PR_NUMBER}: ${TOTAL} advisory/ies found, labeled security-review-needed"
+              GATE_STATE="pending"
             fi
+            STATUS_DESC="${COOLDOWN_FAILURES} package(s) within ${COOLDOWN_DAYS}-day cooldown window. Waiting for age."
+            AUTO_MERGE_OK=false
           else
-            STATUS_DESC="Exploit scan posted (version-filtered). Ready for manual review."
+            GATE_STATE="success"
+            STATUS_DESC="Clean scan (version-filtered, cooldown ≥ ${COOLDOWN_DAYS}d). Ready for merge."
+            AUTO_MERGE_OK=true
+          fi
+
+          # --- Conditional auto-merge ---
+          if [ "$AUTO_MERGE" = "true" ] && [ "$AUTO_MERGE_OK" = "true" ]; then
+            if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
+              STATUS_DESC="${STATUS_DESC} Auto-merge enabled."
+              echo "Auto-merge enabled for PR #${PR_NUMBER}"
+            else
+              STATUS_DESC="${STATUS_DESC} Auto-merge unavailable — merge manually."
+              echo "WARNING: gh pr merge failed for PR #${PR_NUMBER}"
+            fi
           fi
 
           # --- Set final status ---
           gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
-            -f state=success \
+            -f state="$GATE_STATE" \
             -f context="dependency-cooldown / gate" \
             -f description="$STATUS_DESC"
