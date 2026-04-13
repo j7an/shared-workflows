@@ -23,20 +23,17 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # Gate discipline (see #29): `Set initial status` must be the first
+    # step after `Harden runner`. Every subsequent step must carry
+    # `if: steps.gate.outputs.skip == 'false'` unless it is itself part
+    # of the gate. This avoids making non-bot PRs pay for fallible work
+    # (cross-repo fetches, API calls, script execution) that would only
+    # be used for Dependabot PRs.
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
-
-      - name: Checkout shared-workflows scripts
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: j7an/shared-workflows
-          ref: ${{ github.workflow_sha }}
-          path: shared-workflows
-          sparse-checkout: scripts
-          persist-credentials: false
 
       - name: Set initial status
         id: gate
@@ -72,6 +69,245 @@ jobs:
           COOLDOWN_DAYS: ${{ inputs.cooldown_days }}
           FAIL_ON_COOLDOWN: ${{ inputs.fail_on_cooldown }}
         run: |
+          # --- BEGIN inline:scripts/extract-deps.sh ---
+          extract_deps() (
+          # extract-deps.sh — parse unified diff on stdin, emit dependency TSV on stdout
+          #
+          # Output: <name>\t<version>\t<ecosystem>  where ecosystem ∈ {actions, pypi}
+          # Exit:   0 on success (possibly zero rows), 2 on malformed input
+          #
+          # Handles BOTH GitHub Actions shapes observed in real PR diffs:
+          #   +        uses: owner/repo@sha # vX.Y.Z        (no list marker)
+          #   +      - uses: owner/repo@sha # vX.Y.Z        (YAML list marker)
+          #
+          # The missing list-marker support in the v2.0.1 regex `^\+\s+uses:` is the
+          # root cause of issue #27 (astral-sh/setup-uv silently dropped from
+          # nexus-mcp#160's cooldown scan).
+
+          set -euo pipefail
+
+          # Dedup sentinel: newline-delimited list of "ecosystem:name" keys.
+          # Using a plain string (not `declare -A`) for bash 3.2 compatibility, since
+          # macOS's system bash is still 3.2 and the bats test invokes `bash` directly.
+          seen=$'\n'
+          rows=()
+
+          input=$(cat)
+
+          # Empty input → exit 0 with no output
+          if [ -z "$input" ]; then
+            exit 0
+          fi
+
+          # Malformed input detection: if non-empty and has none of the unified-diff
+          # markers, reject with exit 2.
+          if ! printf '%s\n' "$input" | grep -qE '^(\+\+\+|---|@@|diff --git)'; then
+            echo "extract-deps.sh: input is not a unified diff" >&2
+            exit 2
+          fi
+
+          while IFS= read -r line; do
+            # Strip CR for CRLF-encoded diffs
+            line="${line%$'\r'}"
+
+            # Skip diff file headers (+++ b/path)
+            [[ "$line" == +++* ]] && continue
+
+            # --- GitHub Actions parser ---
+            # Matches both "+ uses: foo@..." and "+ - uses: foo@..."
+            if [[ "$line" =~ ^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+([^[:space:]@]+)@[^[:space:]]+(.*)$ ]]; then
+              name="${BASH_REMATCH[2]}"
+              rest="${BASH_REMATCH[3]}"
+
+              # Skip local and docker actions
+              [[ "$name" == ./* ]] && continue
+              [[ "$name" == docker://* ]] && continue
+
+              version=""
+              # Capture version from trailing comment: " # v1.2.3" or " # 1.2.3"
+              # The `v?` is OUTSIDE the capture group so we strip the leading v.
+              if [[ "$rest" =~ \#[[:space:]]*v?([0-9][0-9.]*) ]]; then
+                version="${BASH_REMATCH[1]}"
+              fi
+
+              key="actions:$name"
+              case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+              seen="${seen}${key}"$'\n'
+              rows+=("$name"$'\t'"$version"$'\t'"actions")
+              continue
+            fi
+
+            # --- Python deps parser ---
+            # Skip Python-style comment lines first
+            [[ "$line" =~ ^\+[[:space:]]*# ]] && continue
+
+            if [[ "$line" =~ ^\+[[:space:]]*([a-zA-Z][a-zA-Z0-9_.\-]*)[[:space:]]*(==|\>=|\<=|~=|\!=|\>|\<)[[:space:]]*([0-9][0-9a-zA-Z.\-]*) ]]; then
+              name="${BASH_REMATCH[1]}"
+              version="${BASH_REMATCH[3]}"
+              key="pypi:$name"
+              case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+              seen="${seen}${key}"$'\n'
+              rows+=("$name"$'\t'"$version"$'\t'"pypi")
+              continue
+            fi
+          done <<< "$input"
+
+          if [ ${#rows[@]} -gt 0 ]; then
+            printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1
+          fi
+          )
+          # --- END inline:scripts/extract-deps.sh ---
+
+          # --- BEGIN inline:scripts/check-release-age.sh ---
+          check_release_age() (
+          # check-release-age.sh — read dep TSV on stdin, emit verdict TSV on stdout
+          #
+          # Schema:
+          #   in:  <name>\t<version>\t<ecosystem>
+          #   out: <name>\t<version>\t<ecosystem>\t<published_iso>\t<age_days>\t<verdict>\t<reason>
+          #
+          # Verdicts: pass | fail | error
+          # Exit: always 0; failures are per-row.
+          #
+          # Bash 3.2 compatible (macOS system bash).
+
+          set -uo pipefail
+
+          : "${COOLDOWN_DAYS:?COOLDOWN_DAYS env var is required}"
+          : "${NOW_EPOCH:=$(date +%s)}"
+
+          # iso_to_epoch <iso> — print unix epoch on stdout, return 1 on parse failure.
+          # Handles both GitHub ("2026-03-29T12:00:00Z") and PyPI ("2026-03-29T12:00:00")
+          # ISO variants across GNU and BSD date.
+          iso_to_epoch() {
+            local iso="$1"
+            # GNU date: accepts the ISO string as-is (with or without Z).
+            date -u -d "$iso" +%s 2>/dev/null && return 0
+            # GNU date: append Z for naive PyPI upload_time.
+            date -u -d "${iso}Z" +%s 2>/dev/null && return 0
+            # BSD date (macOS): strip trailing Z and parse via -jf.
+            local stripped="${iso%Z}"
+            date -u -jf '%Y-%m-%dT%H:%M:%S' "$stripped" +%s 2>/dev/null && return 0
+            return 1
+          }
+
+          # fetch_github <owner> <repo> <version> — print published_at ISO on stdout, return 1 on failure.
+          fetch_github() {
+            local owner="$1" repo="$2" version="$3"
+            if [ -n "${AGE_FIXTURE_DIR:-}" ]; then
+              local fx="$AGE_FIXTURE_DIR/github/$owner/$repo/releases/tags/v$version.json"
+              [ -f "$fx" ] || return 1
+              jq -r '.published_at // empty' "$fx"
+              return 0
+            fi
+            local resp
+            if ! resp=$(gh api "repos/$owner/$repo/releases/tags/v$version" 2>/dev/null); then
+              sleep 2
+              if ! resp=$(gh api "repos/$owner/$repo/releases/tags/v$version" 2>/dev/null); then
+                return 1
+              fi
+            fi
+            printf '%s' "$resp" | jq -r '.published_at // empty'
+          }
+
+          # fetch_pypi <pkg> <version> — print "<upload_time>\t<yanked_bool>" on stdout, return 1 on failure.
+          fetch_pypi() {
+            local pkg="$1" version="$2"
+            local upload yanked
+            if [ -n "${AGE_FIXTURE_DIR:-}" ]; then
+              local fx="$AGE_FIXTURE_DIR/pypi/$pkg/$version.json"
+              [ -f "$fx" ] || return 1
+              upload=$(jq -r '.urls[0].upload_time // empty' "$fx")
+              yanked=$(jq -r '.urls[0].yanked // false' "$fx")
+              printf '%s\t%s\n' "$upload" "$yanked"
+              return 0
+            fi
+            local resp
+            if ! resp=$(curl -sf --max-time 30 "https://pypi.org/pypi/$pkg/$version/json" 2>/dev/null); then
+              sleep 2
+              if ! resp=$(curl -sf --max-time 30 "https://pypi.org/pypi/$pkg/$version/json" 2>/dev/null); then
+                return 1
+              fi
+            fi
+            upload=$(printf '%s' "$resp" | jq -r '.urls[0].upload_time // empty')
+            yanked=$(printf '%s' "$resp" | jq -r '.urls[0].yanked // false')
+            printf '%s\t%s\n' "$upload" "$yanked"
+          }
+
+          # emit name version ecosystem published age verdict reason
+          emit() {
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+          }
+
+          while IFS=$'\t' read -r name version ecosystem || [ -n "${name:-}" ]; do
+            [ -z "${name:-}" ] && continue
+
+            # Escape hatch: COOLDOWN_DAYS=0 → all pass without lookup.
+            if [ "$COOLDOWN_DAYS" -eq 0 ]; then
+              emit "$name" "$version" "$ecosystem" "-" "-" "pass" ""
+              continue
+            fi
+
+            case "$ecosystem" in
+              actions)
+                owner="${name%%/*}"
+                remainder="${name#*/}"
+                repo="${remainder%%/*}"
+                if ! iso=$(fetch_github "$owner" "$repo" "$version"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "tier-1-404"
+                  continue
+                fi
+                if [ -z "$iso" ]; then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "transient-failure"
+                  continue
+                fi
+                if ! pub_epoch=$(iso_to_epoch "$iso"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "parse-failure"
+                  continue
+                fi
+                age_days=$(( (NOW_EPOCH - pub_epoch) / 86400 ))
+                if [ "$age_days" -ge "$COOLDOWN_DAYS" ]; then
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "pass" ""
+                else
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" ""
+                fi
+                ;;
+
+              pypi)
+                if ! result=$(fetch_pypi "$name" "$version"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "pypi-404"
+                  continue
+                fi
+                iso="${result%%$'\t'*}"
+                yanked="${result##*$'\t'}"
+                if [ -z "$iso" ]; then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "transient-failure"
+                  continue
+                fi
+                if ! pub_epoch=$(iso_to_epoch "$iso"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "parse-failure"
+                  continue
+                fi
+                age_days=$(( (NOW_EPOCH - pub_epoch) / 86400 ))
+                if [ "$yanked" = "true" ]; then
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" "yanked"
+                elif [ "$age_days" -ge "$COOLDOWN_DAYS" ]; then
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "pass" ""
+                else
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" ""
+                fi
+                ;;
+
+              *)
+                emit "$name" "$version" "$ecosystem" "-" "-" "error" "unknown-ecosystem"
+                ;;
+            esac
+          done
+
+          exit 0
+          )
+          # --- END inline:scripts/check-release-age.sh ---
+
           DIFF=$(gh pr diff "$PR_NUMBER" --repo "$GH_REPO")
 
           DEPS=""
@@ -87,7 +323,7 @@ jobs:
           PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json body --jq '.body // ""')
 
           # --- Extract dependencies via standalone script (Task 8) ---
-          DEPS_TSV=$(echo "$DIFF" | bash "${GITHUB_WORKSPACE}/shared-workflows/scripts/extract-deps.sh")
+          DEPS_TSV=$(echo "$DIFF" | extract_deps)
 
           # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
           # so the existing advisory-scan loops below can consume them unchanged.
@@ -146,7 +382,11 @@ jobs:
           COOLDOWN_FAILURES=0
           AGE_TSV=""
           if [ "$COOLDOWN_DAYS" -gt 0 ]; then
-            AGE_TSV=$(echo "$DEPS_TSV" | bash "${GITHUB_WORKSPACE}/shared-workflows/scripts/check-release-age.sh")
+            # check_release_age must be invoked via command substitution so
+            # bash's parent -e is dropped — this preserves per-row error
+            # tolerance (404s, parse failures, etc. emit error verdicts
+            # instead of killing the step). Do not convert to a direct call.
+            AGE_TSV=$(echo "$DEPS_TSV" | check_release_age)
             COOLDOWN_FAILURES=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" || $6=="error"' | wc -l | tr -d ' ')
           fi
 
