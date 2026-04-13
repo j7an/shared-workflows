@@ -382,6 +382,10 @@ jobs:
           COOLDOWN_FAILURES=0
           AGE_TSV=""
           if [ "$COOLDOWN_DAYS" -gt 0 ]; then
+            # check_release_age must be invoked via command substitution so
+            # bash's parent -e is dropped — this preserves per-row error
+            # tolerance (404s, parse failures, etc. emit error verdicts
+            # instead of killing the step). Do not convert to a direct call.
             AGE_TSV=$(echo "$DEPS_TSV" | check_release_age)
             COOLDOWN_FAILURES=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" || $6=="error"' | wc -l | tr -d ' ')
           fi
