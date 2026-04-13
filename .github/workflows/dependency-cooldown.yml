@@ -421,14 +421,70 @@ jobs:
               "$FILTERED_TOTAL" "$HIST_HDR" "$HIST_SEP" "$FILTERED_RESULTS")"
           fi
 
-          COMMENT_BODY="$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s' \
+          # --- Release Age section (Task 12 — fixes #25 UX) ---
+          RELEASE_AGE_SECTION=""
+          if [ -n "$AGE_TSV" ]; then
+            AGE_TABLE_HDR="| Package | Version | Published | Age | Status |"
+            AGE_TABLE_SEP="|---------|---------|-----------|-----|--------|"
+            AGE_ROWS=""
+            MAX_FAIL_EPOCH=0
+            while IFS=$'\t' read -r _name _ver _eco _iso _days _verdict _reason; do
+              [ -z "$_name" ] && continue
+              case "$_verdict" in
+                pass)  _status="✅ passed" ;;
+                fail)  if [ -n "$_reason" ]; then _status="❌ blocked (${_reason})"; else _status="❌ blocked"; fi ;;
+                error) _status="⚠️ error (${_reason})" ;;
+                *)     _status="?" ;;
+              esac
+              if [ "$_iso" = "-" ]; then
+                _published_short="-"
+              else
+                _published_short="${_iso%T*}"
+              fi
+              AGE_ROWS="${AGE_ROWS}| \`${_name}\` | v${_ver} | ${_published_short} | ${_days}d | ${_status} |"$'\n'
+
+              # Track max fail epoch for "earliest unblock" footer
+              if [ "$_verdict" = "fail" ] && [ "$_iso" != "-" ]; then
+                _pub_epoch=$(date -u -d "$_iso" +%s 2>/dev/null \
+                  || date -u -d "${_iso}Z" +%s 2>/dev/null \
+                  || date -u -jf '%Y-%m-%dT%H:%M:%SZ' "$_iso" +%s 2>/dev/null \
+                  || date -u -jf '%Y-%m-%dT%H:%M:%S' "${_iso%Z}" +%s 2>/dev/null \
+                  || echo 0)
+                if [ "$_pub_epoch" -gt "$MAX_FAIL_EPOCH" ]; then
+                  MAX_FAIL_EPOCH="$_pub_epoch"
+                fi
+              fi
+            done <<< "$AGE_TSV"
+
+            AGE_FOOTER=""
+            if [ "$COOLDOWN_FAILURES" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
+              _unblock_epoch=$(( MAX_FAIL_EPOCH + COOLDOWN_DAYS * 86400 ))
+              _unblock_iso=$(date -u -r "$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
+                || date -u -d "@$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
+                || echo "unknown")
+              AGE_FOOTER="$(printf '\n> %d package(s) within cooldown window. Earliest unblock: %s.' "$COOLDOWN_FAILURES" "$_unblock_iso")"
+            fi
+
+            RELEASE_AGE_SECTION="$(printf '\n### Release Age (cooldown: %s days)\n\n%s\n%s\n%s%s' \
+              "$COOLDOWN_DAYS" "$AGE_TABLE_HDR" "$AGE_TABLE_SEP" "$AGE_ROWS" "$AGE_FOOTER")"
+          fi
+
+          # --- Extraction warning section (Task 12 — surfaces #27 silent drops) ---
+          EXTRACTION_WARNING_SECTION=""
+          if [ -n "$EXTRACTION_WARNING" ]; then
+            EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
+          fi
+
+          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s' \
             "## Dependency Security Scan" \
+            "$EXTRACTION_WARNING_SECTION" \
             "**Packages scanned:** ${DEPS}" \
             "### Results" \
             "$RESULTS_HEADER" \
             "$RESULTS_TABLE" \
             "$RESULTS_FOOTER" \
             "$HISTORICAL_SECTION" \
+            "$RELEASE_AGE_SECTION" \
             "$SCORECARD_SECTION")"
 
           # --- Comment management: update-or-create with change detection ---
