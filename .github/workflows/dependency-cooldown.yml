@@ -125,14 +125,16 @@ jobs:
             fi
           done
 
-          # Sanity-check: count UNIQUE action names in the diff vs extracted actions
-          # (Task 13b — fixes false-positive on diffs with repeated actions across files)
-          # Uses the same regex shape as scripts/extract-deps.sh so drift cannot produce
-          # spurious warnings. Deduplicates via sort -u before counting so that an action
-          # referenced in N files counts once, matching the extractor's dedup semantic.
+          # Sanity-check: count UNIQUE action names in the diff vs extracted actions.
+          # Filters ./ (local) and docker:// actions because the extractor at
+          # scripts/extract-deps.sh:51-52 intentionally skips them — counting them
+          # here would produce a false-positive extraction-mismatch warning on any
+          # PR adding a local or docker action reference.
+          # (Task 13c — fixes regression introduced by Task 13b)
           EXPECTED_ACTIONS=$(echo "$DIFF" \
             | grep -oE '^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]@]+' \
             | sed -E 's/^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+//' \
+            | grep -vE '^(\./|docker://)' \
             | sort -u | wc -l | tr -d ' ')
           EXTRACTED_ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | wc -l | tr -d ' ')
           EXTRACTION_WARNING=""
@@ -508,8 +510,8 @@ jobs:
             AGE_FOOTER=""
             if [ "$COOLDOWN_FAILURES" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
               _unblock_epoch=$(( MAX_FAIL_EPOCH + COOLDOWN_DAYS * 86400 ))
-              _unblock_iso=$(date -u -r "$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
-                || date -u -d "@$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
+              _unblock_iso=$(date -u -d "@$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
+                || date -u -r "$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
                 || echo "unknown")
               AGE_FOOTER="$(printf '\n> %d package(s) within cooldown window. Earliest unblock: %s.' "$COOLDOWN_FAILURES" "$_unblock_iso")"
             fi
