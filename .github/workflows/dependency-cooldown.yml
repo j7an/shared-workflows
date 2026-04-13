@@ -23,20 +23,17 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # Gate discipline (see #29): `Set initial status` must be the first
+    # step after `Harden runner`. Every subsequent step must carry
+    # `if: steps.gate.outputs.skip == 'false'` unless it is itself part
+    # of the gate. This avoids making non-bot PRs pay for fallible work
+    # (cross-repo fetches, API calls, script execution) that would only
+    # be used for Dependabot PRs.
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
-
-      - name: Checkout shared-workflows scripts
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: j7an/shared-workflows
-          ref: ${{ github.workflow_sha }}
-          path: shared-workflows
-          sparse-checkout: scripts
-          persist-credentials: false
 
       - name: Set initial status
         id: gate
