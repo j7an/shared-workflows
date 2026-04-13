@@ -512,26 +512,39 @@ jobs:
           reconcile_label "security-review-needed" "$_needs_security" "$LABEL_COLOR_security_review_needed" "$LABEL_DESC_security_review_needed"
           reconcile_label "cooldown-pending"       "$_needs_cooldown" "$LABEL_COLOR_cooldown_pending"       "$LABEL_DESC_cooldown_pending"
 
-          # --- Auto-merge decision ---
-          if [[ "$AUTO_MERGE" == "true" ]]; then
-            if [ "$TOTAL" -eq 0 ]; then
-              if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
-                STATUS_DESC="Clean scan (version-filtered). Auto-merge enabled."
-                echo "Auto-merge enabled for PR #${PR_NUMBER} (clean scan)"
-              else
-                STATUS_DESC="Clean scan (version-filtered). Auto-merge unavailable — merge manually."
-                echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — manual merge required"
-              fi
+          # --- Gate state machine (Task 11 — combines advisory + cooldown verdicts) ---
+          if [ "$TOTAL" -gt 0 ]; then
+            # Advisory failure wins — strictest signal (existing v2.0.1 semantic: gate=success with "review needed")
+            GATE_STATE="success"
+            STATUS_DESC="${TOTAL} advisory/ies found (version-filtered). Manual review required."
+            AUTO_MERGE_OK=false
+          elif [ "$COOLDOWN_FAILURES" -gt 0 ]; then
+            if [ "$FAIL_ON_COOLDOWN" = "true" ]; then
+              GATE_STATE="failure"
             else
-              STATUS_DESC="Advisories found (version-filtered). Manual review required."
-              echo "Skipped auto-merge for PR #${PR_NUMBER}: ${TOTAL} advisory/ies found, labeled security-review-needed"
+              GATE_STATE="pending"
             fi
+            STATUS_DESC="${COOLDOWN_FAILURES} package(s) within ${COOLDOWN_DAYS}-day cooldown window. Waiting for age."
+            AUTO_MERGE_OK=false
           else
-            STATUS_DESC="Exploit scan posted (version-filtered). Ready for manual review."
+            GATE_STATE="success"
+            STATUS_DESC="Clean scan (version-filtered, cooldown ≥ ${COOLDOWN_DAYS}d). Ready for merge."
+            AUTO_MERGE_OK=true
+          fi
+
+          # --- Conditional auto-merge ---
+          if [ "$AUTO_MERGE" = "true" ] && [ "$AUTO_MERGE_OK" = "true" ]; then
+            if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
+              STATUS_DESC="${STATUS_DESC} Auto-merge enabled."
+              echo "Auto-merge enabled for PR #${PR_NUMBER}"
+            else
+              STATUS_DESC="${STATUS_DESC} Auto-merge unavailable — merge manually."
+              echo "WARNING: gh pr merge failed for PR #${PR_NUMBER}"
+            fi
           fi
 
           # --- Set final status ---
           gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
-            -f state=success \
+            -f state="$GATE_STATE" \
             -f context="dependency-cooldown / gate" \
             -f description="$STATUS_DESC"
