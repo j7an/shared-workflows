@@ -29,6 +29,15 @@ jobs:
         with:
           egress-policy: audit
 
+      - name: Checkout shared-workflows scripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: j7an/shared-workflows
+          ref: ${{ github.workflow_sha }}
+          path: shared-workflows
+          sparse-checkout: scripts
+          persist-credentials: false
+
       - name: Set initial status
         id: gate
         env:
@@ -78,7 +87,7 @@ jobs:
           PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json body --jq '.body // ""')
 
           # --- Extract dependencies via standalone script (Task 8) ---
-          DEPS_TSV=$(echo "$DIFF" | bash "${GITHUB_WORKSPACE}/scripts/extract-deps.sh")
+          DEPS_TSV=$(echo "$DIFF" | bash "${GITHUB_WORKSPACE}/shared-workflows/scripts/extract-deps.sh")
 
           # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
           # so the existing advisory-scan loops below can consume them unchanged.
@@ -116,19 +125,26 @@ jobs:
             fi
           done
 
-          # Sanity-check: count +uses lines in diff vs extracted actions (Task 8 — fixes #27 regression defense)
-          EXPECTED_ACTIONS=$(echo "$DIFF" | grep -cE '^\+[[:space:]]+(- )?uses:' || true)
+          # Sanity-check: count UNIQUE action names in the diff vs extracted actions
+          # (Task 13b — fixes false-positive on diffs with repeated actions across files)
+          # Uses the same regex shape as scripts/extract-deps.sh so drift cannot produce
+          # spurious warnings. Deduplicates via sort -u before counting so that an action
+          # referenced in N files counts once, matching the extractor's dedup semantic.
+          EXPECTED_ACTIONS=$(echo "$DIFF" \
+            | grep -oE '^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]@]+' \
+            | sed -E 's/^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+//' \
+            | sort -u | wc -l | tr -d ' ')
           EXTRACTED_ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | wc -l | tr -d ' ')
           EXTRACTION_WARNING=""
           if [ "$EXPECTED_ACTIONS" != "$EXTRACTED_ACTIONS" ]; then
-            EXTRACTION_WARNING="⚠️ Extraction mismatch: diff has ${EXPECTED_ACTIONS} action bumps, extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
+            EXTRACTION_WARNING="⚠️ Extraction mismatch: diff contains ${EXPECTED_ACTIONS} unique action(s), extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
           fi
 
           # --- Check release age via standalone script (Task 9 — phase 2) ---
           COOLDOWN_FAILURES=0
           AGE_TSV=""
           if [ "$COOLDOWN_DAYS" -gt 0 ]; then
-            AGE_TSV=$(echo "$DEPS_TSV" | bash "${GITHUB_WORKSPACE}/scripts/check-release-age.sh")
+            AGE_TSV=$(echo "$DEPS_TSV" | bash "${GITHUB_WORKSPACE}/shared-workflows/scripts/check-release-age.sh")
             COOLDOWN_FAILURES=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" || $6=="error"' | wc -l | tr -d ' ')
           fi
 
@@ -387,7 +403,7 @@ jobs:
           # --- Build comment body ---
           TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
 
-          # --- Label reconciliation (Task 13a — runs BEFORE HAS_ERROR exit so error-path re-scans still reconcile) ---
+          # --- Label reconciliation (Task 13b — authoritative on clean runs, additive-only on HAS_ERROR paths) ---
           LABEL_COLOR_security_review_needed="B60205"
           LABEL_DESC_security_review_needed="Dependency scan found advisories — manual review required"
           LABEL_COLOR_cooldown_pending="FBCA04"
@@ -406,9 +422,11 @@ jobs:
               gh label create "$label" --repo "$GH_REPO" --color "$color" --description "$desc" --force >/dev/null 2>&1 || true
               gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --add-label "$label" || true
               echo "Applied label: $label"
-            elif [ "$should_be_present" = "false" ] && [ "$has_it" = "true" ]; then
+            elif [ "$should_be_present" = "false" ] && [ "$has_it" = "true" ] && [ -z "${HAS_ERROR:-}" ]; then
               gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --remove-label "$label" || true
               echo "Removed stale label: $label"
+            elif [ "$should_be_present" = "false" ] && [ "$has_it" = "true" ]; then
+              echo "Preserving label $label: scan had API errors, verdict is unreliable"
             fi
           }
 
