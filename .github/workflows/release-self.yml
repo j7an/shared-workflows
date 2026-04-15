@@ -14,11 +14,12 @@ on:
           - minor
           - major
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   tag:
+    permissions:
+      contents: write
     uses: ./.github/workflows/tag-release.yml
     with:
       bump: ${{ inputs.bump }}
@@ -26,6 +27,8 @@ jobs:
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
   publish:
+    permissions:
+      contents: write
     needs: tag
     uses: ./.github/workflows/release.yml
     with:
