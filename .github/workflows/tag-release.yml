@@ -13,6 +13,20 @@ on:
           - patch
           - minor
           - major
+  workflow_call:
+    inputs:
+      bump:
+        type: string
+        required: false
+        default: auto
+        description: "Semver bump (auto/patch/minor/major)"
+    secrets:
+      RELEASE_BOT_PRIVATE_KEY:
+        required: true
+    outputs:
+      tag:
+        description: "The semver tag that was created (e.g. v1.2.3)"
+        value: ${{ jobs.tag-release.outputs.tag }}
 
 permissions:
   contents: write
@@ -24,6 +38,8 @@ concurrency:
 jobs:
   tag-release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.compute.outputs.next_tag }}
     # Gate secret access on a named environment so a malicious workflow edit
     # can't reach RELEASE_BOT_PRIVATE_KEY without passing the environment's
     # branch-policy check (main only). Pairs with the if: below as a
