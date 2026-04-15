@@ -244,9 +244,9 @@ jobs:
 
 | Pin | Gets updates | Use when |
 |-----|-------------|----------|
-| `@v1` | All non-breaking changes | Default — most convenient |
-| `@v1.2` | Patch fixes only | Want patches but not new features |
-| `@v1.2.3` | Nothing (frozen) | Need exact reproducibility or rollback |
+| `@vX` | All non-breaking changes within major `X` | Default — most convenient |
+| `@vX.Y` | Patch fixes only within minor `X.Y` | Want patches but not new features |
+| `@vX.Y.Z` | Nothing (frozen) | Need exact reproducibility or rollback |
 
 Tags are managed automatically — merging a PR to this repo creates a semver tag based on conventional commit prefixes and updates the floating tags.
 
@@ -259,14 +259,14 @@ Tags are managed automatically — merging a PR to this repo creates a semver ta
 | Kind | Name | Value |
 |------|------|-------|
 | Repo variable | `RELEASE_BOT_APP_ID` | Numeric App ID |
-| Repo secret | `RELEASE_BOT_PRIVATE_KEY` | Full PEM contents including header/footer |
+| Secret | `RELEASE_BOT_PRIVATE_KEY` | Full PEM contents including header/footer |
 
 ### One-time provisioning
 
 1. Create a GitHub App (org- or user-owned) with **repository permission** `Contents: Read and write` — nothing else.
 2. Install the App on this repo (single-repo install recommended).
 3. Copy the App ID into `vars.RELEASE_BOT_APP_ID` under **Settings → Secrets and variables → Actions → Variables**.
-4. Generate a private key from the App settings and paste the PEM into `secrets.RELEASE_BOT_PRIVATE_KEY` under **Settings → Secrets and variables → Actions → Secrets**.
+4. Generate a private key from the App settings and store the PEM as `RELEASE_BOT_PRIVATE_KEY`. A repo-level Actions secret works with the sample caller below; if you scope release credentials to the `release` environment, expose the same secret name there instead.
 
 ### Verify
 
@@ -279,3 +279,77 @@ gh run list --workflow=release.yml --limit 1
 ### Rotation
 
 To rotate the key: generate a new private key in the App settings, update `secrets.RELEASE_BOT_PRIVATE_KEY`, then delete the old key in the App settings. No code change required.
+
+## Using shared-workflows for releases
+
+`tag-release.yml` and `release.yml` are reusable workflows. Downstream repos can cut and publish releases by adding a thin caller that delegates to this repo — no copy-pasted release logic.
+
+### Minimal caller (recommended)
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v2
+    secrets:
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+  publish:
+    needs: tag
+    uses: j7an/shared-workflows/.github/workflows/release.yml@v2
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+```
+
+Dispatching this workflow runs `tag-release` with the default `bump: auto` (infers the semver bump from conventional commit prefixes), then publishes the resulting tag.
+
+### Full caller (with operator bump override)
+
+Use this variant if you want to expose a picker in the Actions UI so operators can force a specific bump level.
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v2
+    with:
+      bump: ${{ inputs.bump }}
+    secrets:
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+  publish:
+    needs: tag
+    uses: j7an/shared-workflows/.github/workflows/release.yml@v2
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+```
+
+### Required downstream setup
+
+1. **Create a `release` GitHub Environment**, restricted to the `main` branch via deployment branch policy (Settings → Environments → New environment → Deployment branches → Selected branches → `main`).
+2. **Make `RELEASE_BOT_PRIVATE_KEY` available as `secrets.RELEASE_BOT_PRIVATE_KEY`** in the caller repo. The sample snippets work with a repo-level Actions secret; if you scope release credentials to the `release` environment, keep the same secret name there so the caller can forward it unchanged.
+3. **Set `vars.RELEASE_BOT_APP_ID`** as a repo variable pointing at the Release Bot GitHub App's numeric App ID.
+4. **Install the Release Bot App on the repo** with `Contents: Read and write` permission (see [Release Bot App setup](#release-bot-app-setup) above for provisioning).
+
+The `environment: release` + `if: github.ref == 'refs/heads/main'` gate inside `tag-release.yml` runs in **your repo's** security context — `shared-workflows` cannot unilaterally enforce it across consumers. If you skip step 1, you lose the environment-side branch policy and secret protection; the in-file `if:` check still blocks non-`main` refs, but the extra GitHub-side gate is gone.
+
+### On the `@v2` pin
+
+`@v2` is the floating major tag for the current `v2.x.y` line. It always points at the latest `v2.x.y` release because `release.yml` force-updates floating majors on every publish. Pinning to `@v2` means you get all non-breaking updates automatically. Pin to `@v2.1` for patch-only updates, or `@v2.1.0` for an immutable freeze — see the [Versioning](#versioning) section above.
