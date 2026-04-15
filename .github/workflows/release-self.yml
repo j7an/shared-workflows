@@ -1,0 +1,35 @@
+name: Release (self)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump (auto = infer from conventional commits since last tag)"
+        type: choice
+        required: true
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+
+permissions: {}
+
+jobs:
+  tag:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/tag-release.yml
+    with:
+      bump: ${{ inputs.bump }}
+    secrets:
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+  publish:
+    permissions:
+      contents: write
+    needs: tag
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}

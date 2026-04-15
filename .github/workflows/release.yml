@@ -3,13 +3,25 @@ name: Publish Release
 on:
   push:
     tags: ['v*.*.*']
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+        description: "Semver tag to publish (e.g. v1.2.3)"
 
 permissions:
   contents: write
 
+concurrency:
+  group: publish-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   publish-release:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
@@ -19,15 +31,16 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Update floating major and minor tags
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
+          [ -n "$TAG" ] || { echo "::error::tag input is empty — caller did not pass a tag"; exit 1; }
           # Parse semver components: v1.2.3 → MAJOR=v1, MINOR=v1.2
-          MAJOR=$(echo "$TAG" | sed 's/\..*//')
-          MINOR=$(echo "$TAG" | sed 's/\.[^.]*$//')
+          MAJOR=${TAG%%.*}
+          MINOR=${TAG%.*}
 
           echo "Semver tag: $TAG (immutable)"
           echo "Minor tag:  $MINOR (floats to latest patch)"
@@ -49,7 +62,6 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
           # Idempotent: skip if a release already exists for this tag
           # (e.g. manual re-run, or backfilled during a migration).
