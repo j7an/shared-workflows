@@ -196,6 +196,93 @@ jobs:
             git log --format='- %s (%h)' "$RANGE"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Bump version files
+        env:
+          NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
+        run: |
+          # --- Bump version files (opt-in via .version-bump.json) ---
+          CONFIG=".version-bump.json"
+          if [ ! -f "$CONFIG" ]; then
+            echo "No .version-bump.json found, skipping version file bump"
+            exit 0
+          fi
+
+          if ! jq -e '.files | type == "array" and length > 0' "$CONFIG" > /dev/null 2>&1; then
+            echo "::error::.version-bump.json is missing or has an invalid 'files' array"
+            exit 1
+          fi
+
+          VERSION="${NEXT_TAG#v}"   # v0.2.0 -> 0.2.0
+          CHANGED=false
+          SUMMARY=""
+
+          while IFS= read -r row; do
+            FILE_PATH=$(echo "$row" | jq -r '.path')
+            FIELD=$(echo "$row" | jq -r '.field')
+
+            # Reject absolute paths and directory traversal
+            case "$FILE_PATH" in
+              /* | *..*)
+                echo "::warning::$FILE_PATH contains path traversal or is absolute, skipping"
+                SUMMARY="${SUMMARY}\n| \`$FILE_PATH\` | - | skipped (unsafe path) |"
+                continue
+                ;;
+            esac
+
+            if [ ! -f "$FILE_PATH" ]; then
+              echo "::warning::$FILE_PATH not found, skipping"
+              SUMMARY="${SUMMARY}\n| \`$FILE_PATH\` | - | skipped (file not found) |"
+              continue
+            fi
+
+            case "$FILE_PATH" in
+              *.json) ;;
+              *)
+                echo "::warning::$FILE_PATH is not a JSON file, skipping (only JSON supported)"
+                SUMMARY="${SUMMARY}\n| \`$FILE_PATH\` | - | skipped (not JSON) |"
+                continue
+                ;;
+            esac
+
+            CURRENT=$(jq -r --arg f "$FIELD" '.[$f]' "$FILE_PATH")
+            if [ "$CURRENT" = "$VERSION" ]; then
+              echo "$FILE_PATH already at $VERSION, skipping"
+              SUMMARY="${SUMMARY}\n| \`$FILE_PATH\` | \`$CURRENT\` | already up to date |"
+              continue
+            fi
+
+            TMPFILE=$(mktemp)
+            jq --indent 2 --arg f "$FIELD" --arg v "$VERSION" '.[$f] = $v' "$FILE_PATH" > "$TMPFILE" && mv "$TMPFILE" "$FILE_PATH"
+            git add "$FILE_PATH"
+            echo "Updated $FILE_PATH: $CURRENT -> $VERSION"
+            SUMMARY="${SUMMARY}\n| \`$FILE_PATH\` | \`$CURRENT\` -> \`$VERSION\` | updated |"
+            CHANGED=true
+
+          done < <(jq -c '.files[]' "$CONFIG")
+
+          if [ "$CHANGED" = true ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore(release): bump version files to $VERSION"
+            git push origin HEAD:main
+            RESULT="Committed and pushed version file updates"
+          else
+            RESULT="All version files already up to date — no commit needed"
+          fi
+
+          # --- Step summary ---
+          {
+            echo "### Version file bump"
+            echo ""
+            echo "**Target version:** \`$VERSION\`"
+            echo ""
+            echo "| File | Version | Status |"
+            echo "|------|---------|--------|"
+            printf '%b\n' "$SUMMARY"
+            echo ""
+            echo "$RESULT"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Create and push tag
         env:
           NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
