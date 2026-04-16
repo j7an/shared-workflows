@@ -5,8 +5,7 @@ on:
     paths:
       - 'scripts/**'
       - 'tests/**'
-      - '.github/workflows/ci-scripts.yml'
-      - '.github/workflows/dependency-cooldown.yml'
+      - '.github/workflows/**'
 
 permissions:
   contents: read
