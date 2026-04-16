@@ -1,0 +1,13 @@
+name: Bad Reusable Workflow
+
+on:
+  workflow_call:
+
+jobs:
+  example:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: j7an/shared-workflows
+          ref: ${{ github.workflow_sha }}
