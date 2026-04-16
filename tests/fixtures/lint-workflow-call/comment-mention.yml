@@ -1,0 +1,13 @@
+name: Regular CI
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # This step is for workflow_call testing
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
