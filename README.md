@@ -250,6 +250,42 @@ jobs:
 
 Tags are managed automatically — merging a PR to this repo creates a semver tag based on conventional commit prefixes and updates the floating tags.
 
+## Known caller-side constraints
+
+The reusable workflows in this repo are **self-contained at runtime**: they must
+not fetch `j7an/shared-workflows` source at runtime, and they must not reference
+caller-scoped context variables as if they were reusable-workflow-scoped.
+
+The following are forbidden inside any `workflow_call` file:
+
+| Pattern | Why it's wrong |
+|---------|---------------|
+| `ref: ${{ github.workflow_sha }}` | Resolves to the **caller's** event SHA, not this workflow's commit |
+| `ref: ${{ github.sha }}` | Same problem — resolves to caller context |
+| `ref: ${{ github.ref }}` | Same problem — resolves to caller's branch/tag ref |
+
+This policy exists because violating it caused [#29](https://github.com/j7an/shared-workflows/issues/29):
+v2.0.2 shipped with a broken `actions/checkout` step that failed deterministically
+on every cross-repo consumer PR. The CI gate that should have caught it was
+structurally incapable of doing so, because `ci-cooldown.yml` self-consumes via
+local path (`uses: ./...`), which makes the caller repo the same as the checkout
+target and masks caller-context bugs by coincidence.
+
+If a future reusable workflow needs to execute a script that's under version
+control in this repo, **inline the script into the workflow YAML**. The bats test
+suite under `tests/` provides unit-test coverage against the standalone
+`scripts/*.sh` files, and `scripts/check-inline-sync.sh` verifies the inline
+copies stay in sync — so test feedback is preserved without introducing a runtime
+source-fetch dependency.
+
+### For authors adding a new reusable workflow
+
+Before opening a PR that adds or modifies a `workflow_call` file:
+
+1. **Review the constraints above** — no runtime source fetching, no caller-context refs
+2. **The lint rule enforces this in CI** — `scripts/lint-workflow-call.sh` runs as the `lint-workflow-call` job in `ci-scripts.yml` and will fail your PR if it detects a forbidden pattern
+3. **Cross-repo smoke testing is planned** ([#30](https://github.com/j7an/shared-workflows/issues/30)) — a companion repo will exercise reusable workflows from a genuinely external caller context to catch bugs that the self-consumption harness cannot detect
+
 ## Release Bot App setup
 
 `tag-release.yml` needs a non-`GITHUB_TOKEN` identity to push new tags, otherwise GitHub's recursion guard silently suppresses the downstream `release.yml` run. We use a GitHub App for this.
