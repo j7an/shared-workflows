@@ -219,6 +219,7 @@ jobs:
       - name: Bump version files
         env:
           NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
         run: |
           # --- Bump version files (opt-in via .version-bump.json) ---
           CONFIG=".version-bump.json"
@@ -232,7 +233,8 @@ jobs:
             exit 1
           fi
 
-          VERSION="${NEXT_TAG#v}"   # v0.2.0 -> 0.2.0
+          PREFIX="${TAG_PREFIX:-v}"
+          VERSION="${NEXT_TAG#"${PREFIX}"}"   # tools/v0.2.0 -> 0.2.0, v0.2.0 -> 0.2.0
           CHANGED=false
           SUMMARY=""
 
