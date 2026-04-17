@@ -28,9 +28,7 @@ on:
         description: "Attach wheel + sdist to the GitHub release"
 
 permissions:
-  contents: write       # create GitHub release, upload assets
-  id-token: write       # OIDC for trusted publishing
-  attestations: write   # supply-chain provenance
+  contents: read
 
 concurrency:
   group: publish-pypi-${{ inputs.tag }}
@@ -87,6 +85,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: testpypi
+    permissions:
+      id-token: write       # OIDC for trusted publishing
+      attestations: write   # supply-chain provenance
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
@@ -148,6 +149,9 @@ jobs:
     needs: publish-testpypi
     runs-on: ubuntu-latest
     environment: pypi
+    permissions:
+      id-token: write
+      attestations: write
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
@@ -168,6 +172,8 @@ jobs:
   github-release:
     needs: publish-pypi
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create GitHub release, upload assets
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
