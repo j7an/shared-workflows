@@ -13,6 +13,11 @@ on:
           - patch
           - minor
           - major
+      tag-prefix:
+        description: "Tag prefix (e.g. 'v' for v1.2.3, 'tools/v' for tools/v1.2.3)"
+        type: string
+        required: false
+        default: "v"
   workflow_call:
     inputs:
       bump:
@@ -20,6 +25,11 @@ on:
         required: false
         default: auto
         description: "Semver bump (auto/patch/minor/major)"
+      tag-prefix:
+        type: string
+        required: false
+        default: "v"
+        description: "Tag prefix (e.g. 'v' for v1.2.3, 'tools/v' for tools/v1.2.3)"
     secrets:
       RELEASE_BOT_PRIVATE_KEY:
         required: true
@@ -92,13 +102,23 @@ jobs:
         id: compute
         env:
           CHOICE: ${{ inputs.bump }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
         run: |
+          PREFIX="${TAG_PREFIX:-v}"
+
+          # Reject prefixes containing characters that would break `git tag -l`
+          # globbing or shell expansion. Allow alnum, '/', '-', '_', '.'.
+          if ! printf '%s' "$PREFIX" | grep -qE '^[A-Za-z0-9._/-]+$'; then
+            echo "::error::Invalid tag-prefix '$PREFIX' (must match [A-Za-z0-9._/-]+)"
+            exit 1
+          fi
+
           # --- Find previous tag ---
-          LATEST=$(git tag -l 'v*.*.*' --sort=-version:refname | head -1)
+          LATEST=$(git tag -l "${PREFIX}*.*.*" --sort=-version:refname | head -1)
           if [ -z "$LATEST" ]; then
-            LATEST="v0.0.0"
+            LATEST="${PREFIX}0.0.0"
             FIRST_RELEASE="true"
-            echo "No existing semver tags — bootstrapping from v0.0.0"
+            echo "No existing semver tags — bootstrapping from ${LATEST}"
           else
             FIRST_RELEASE="false"
             echo "Latest tag: $LATEST"
@@ -162,7 +182,7 @@ jobs:
           fi
 
           # --- Compute next version ---
-          VERSION="${LATEST#v}"
+          VERSION="${LATEST#"${PREFIX}"}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
 
           case "$CHOSEN" in
@@ -175,7 +195,7 @@ jobs:
               ;;
           esac
 
-          NEXT_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          NEXT_TAG="${PREFIX}${MAJOR}.${MINOR}.${PATCH}"
           echo "Next tag: $NEXT_TAG"
           echo "next_tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
 
@@ -199,6 +219,7 @@ jobs:
       - name: Bump version files
         env:
           NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
         run: |
           # --- Bump version files (opt-in via .version-bump.json) ---
           CONFIG=".version-bump.json"
@@ -212,7 +233,8 @@ jobs:
             exit 1
           fi
 
-          VERSION="${NEXT_TAG#v}"   # v0.2.0 -> 0.2.0
+          PREFIX="${TAG_PREFIX:-v}"
+          VERSION="${NEXT_TAG#"${PREFIX}"}"   # tools/v0.2.0 -> 0.2.0, v0.2.0 -> 0.2.0
           CHANGED=false
           SUMMARY=""
 
