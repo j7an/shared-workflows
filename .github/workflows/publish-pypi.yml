@@ -37,7 +37,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  noop:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "scaffold — real jobs added in later tasks"
+      - name: Harden runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout at tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tag is ancestor of main
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          TAG_SHA=$(git rev-list -n1 "$TAG")
+          git fetch origin main --depth=0 2>/dev/null || git fetch origin main
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "::error::Tag ${TAG} (${TAG_SHA}) is not an ancestor of origin/main — refusing to publish"
+            exit 1
+          fi
+          echo "Tag ${TAG} (${TAG_SHA}) is an ancestor of main — proceeding."
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Build wheel + sdist
+        working-directory: ${{ inputs.package-dir }}
+        run: |
+          uv build
+          ls dist/*.whl >/dev/null
+          ls dist/*.tar.gz >/dev/null
+          echo "Built artifacts:"
+          ls -lh dist/
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi-dist
+          path: ${{ inputs.package-dir }}/dist/
+          if-no-files-found: error
+          retention-days: 7
