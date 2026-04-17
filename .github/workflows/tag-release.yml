@@ -102,13 +102,23 @@ jobs:
         id: compute
         env:
           CHOICE: ${{ inputs.bump }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
         run: |
+          PREFIX="${TAG_PREFIX:-v}"
+
+          # Reject prefixes containing characters that would break `git tag -l`
+          # globbing or shell expansion. Allow alnum, '/', '-', '_', '.'.
+          if ! printf '%s' "$PREFIX" | grep -qE '^[A-Za-z0-9._/-]+$'; then
+            echo "::error::Invalid tag-prefix '$PREFIX' (must match [A-Za-z0-9._/-]+)"
+            exit 1
+          fi
+
           # --- Find previous tag ---
-          LATEST=$(git tag -l 'v*.*.*' --sort=-version:refname | head -1)
+          LATEST=$(git tag -l "${PREFIX}*.*.*" --sort=-version:refname | head -1)
           if [ -z "$LATEST" ]; then
-            LATEST="v0.0.0"
+            LATEST="${PREFIX}0.0.0"
             FIRST_RELEASE="true"
-            echo "No existing semver tags — bootstrapping from v0.0.0"
+            echo "No existing semver tags — bootstrapping from ${LATEST}"
           else
             FIRST_RELEASE="false"
             echo "Latest tag: $LATEST"
@@ -172,7 +182,7 @@ jobs:
           fi
 
           # --- Compute next version ---
-          VERSION="${LATEST#v}"
+          VERSION="${LATEST#"${PREFIX}"}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
 
           case "$CHOSEN" in
@@ -185,7 +195,7 @@ jobs:
               ;;
           esac
 
-          NEXT_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          NEXT_TAG="${PREFIX}${MAJOR}.${MINOR}.${PATCH}"
           echo "Next tag: $NEXT_TAG"
           echo "next_tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
 
