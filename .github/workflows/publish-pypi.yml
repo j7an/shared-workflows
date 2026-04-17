@@ -54,7 +54,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           TAG_SHA=$(git rev-list -n1 "$TAG")
-          git fetch origin main --depth=0 2>/dev/null || git fetch origin main
+          git fetch origin main
           if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
             echo "::error::Tag ${TAG} (${TAG_SHA}) is not an ancestor of origin/main — refusing to publish"
             exit 1
