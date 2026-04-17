@@ -1,0 +1,43 @@
+name: Publish PyPI
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+        description: "Semver tag to publish (e.g. 'tools/v0.1.0' or 'v1.2.3')"
+      package-dir:
+        type: string
+        required: false
+        default: "."
+        description: "Directory containing pyproject.toml (relative to repo root)"
+      testpypi-package:
+        type: string
+        required: true
+        description: "Distribution name on TestPyPI for install verification"
+      draft-release:
+        type: boolean
+        required: false
+        default: false
+        description: "Create the GitHub release as a draft"
+      attach-assets:
+        type: boolean
+        required: false
+        default: true
+        description: "Attach wheel + sdist to the GitHub release"
+
+permissions:
+  contents: write       # create GitHub release, upload assets
+  id-token: write       # OIDC for trusted publishing
+  attestations: write   # supply-chain provenance
+
+concurrency:
+  group: publish-pypi-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "scaffold — real jobs added in later tasks"
