@@ -13,6 +13,11 @@ on:
           - patch
           - minor
           - major
+      tag-prefix:
+        description: "Tag prefix (e.g. 'v' for v1.2.3, 'tools/v' for tools/v1.2.3)"
+        type: string
+        required: false
+        default: "v"
   workflow_call:
     inputs:
       bump:
@@ -20,6 +25,11 @@ on:
         required: false
         default: auto
         description: "Semver bump (auto/patch/minor/major)"
+      tag-prefix:
+        type: string
+        required: false
+        default: "v"
+        description: "Tag prefix (e.g. 'v' for v1.2.3, 'tools/v' for tools/v1.2.3)"
     secrets:
       RELEASE_BOT_PRIVATE_KEY:
         required: true
