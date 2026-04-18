@@ -178,18 +178,57 @@ The workflow manages two labels on Dependabot PRs. **Both are reconciled on ever
 
 The reconciliation is authoritative — a PR that was dirty at first scan and clean after rebase will have neither label at merge time.
 
-## Recommended: scheduled re-scan for long-pending PRs
+## Scheduled re-scan for long-pending PRs (v2.4.0+)
 
-If a PR sits in `cooldown-pending` for multiple days, it will unblock automatically on the next push or `@dependabot rebase`. Consumers wanting time-based automatic re-scan (without waiting for a push) can add a `schedule:` trigger to their caller workflow:
+A Dependabot PR that opens *during* its dependency's cooldown window scans once and then sits in the `pending` gate state until either Dependabot rebases or a human prods `@dependabot recreate`. To rescan automatically on a schedule, consumers can add a thin caller workflow that invokes `cooldown-rescan.yml`:
 
 ```yaml
+# .github/workflows/dependency-cooldown-rescan.yml
+name: Dependency Cooldown Rescan
+
 on:
-  pull_request:
   schedule:
-    - cron: '0 */6 * * *'   # every 6 hours
+    - cron: "0 6 * * *"   # daily at 06:00 UTC; tune per consumer
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+  statuses: read
+
+jobs:
+  rescan:
+    uses: j7an/shared-workflows/.github/workflows/cooldown-rescan.yml@v2
 ```
 
-This is intentionally not shipped in the reusable workflow itself — cadence preferences vary per consumer. A 6-hour cadence handles a 7-day cooldown comfortably; tune as needed.
+How it works: on each invocation, the rescan workflow lists open Dependabot PRs in the caller repo, finds those whose `dependency-cooldown / gate` commit status is `pending`, and reruns the most recent `dependency-cooldown.yml` workflow run for each via `gh run rerun`. The replayed run uses the original `pull_request` payload (so the head SHA is stable) but with the current runtime clock — release-age gates re-evaluate freshly.
+
+The workflow only triggers PRs with a `pending` gate. PRs in `success` or `failure` are left alone.
+
+### Cadence
+
+Cadence is owned by the caller. Sweep at least once per cooldown-window step (e.g., a 7-day cooldown is comfortably handled by a daily sweep; a 1-day cooldown wants every-few-hours). GitHub may delay scheduled runs by up to ~30 minutes under load, so use `workflow_dispatch:` as the manual escape hatch.
+
+### Dry-run rollout
+
+For initial validation, pass `dry_run: true` so the sweep logs decisions without calling `gh run rerun`:
+
+```yaml
+jobs:
+  rescan:
+    uses: j7an/shared-workflows/.github/workflows/cooldown-rescan.yml@v2
+    with:
+      dry_run: true
+```
+
+Trigger via `workflow_dispatch`, inspect the `$GITHUB_STEP_SUMMARY` table, then remove the `with:` block once the filter logic looks right.
+
+### Inputs
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `dry_run` | boolean | `false` | When `true`, log decisions to `$GITHUB_STEP_SUMMARY` but do not call `gh run rerun`. Use for initial-rollout validation and incident diagnostics. |
 
 ## Security Analysis (Zizmor)
 
