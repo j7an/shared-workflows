@@ -1,0 +1,146 @@
+name: Dependency Cooldown Rescan
+
+on:
+  workflow_call:
+    inputs:
+      dry_run:
+        type: boolean
+        default: false
+        description: "When true, log decisions to the step summary but do not call `gh run rerun`. Use for initial-rollout validation and incident diagnostics."
+
+concurrency:
+  group: cooldown-rescan-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  rescan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+      statuses: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - name: Rerun pending cooldown scans
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -uo pipefail
+
+          # Sweep open Dependabot PRs and rerun any whose `dependency-cooldown / gate`
+          # commit status is `pending`. Per-PR work uses `set +e` so one PR's failure
+          # never aborts the sweep.
+
+          {
+            echo "## Cooldown Rescan Sweep"
+            echo ""
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "_Dry-run mode: no \`gh run rerun\` calls will be made._"
+              echo ""
+            fi
+            echo "| PR | Head SHA | Gate | Action | Result |"
+            echo "|----|----------|------|--------|--------|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 1) List open Dependabot PRs (loud failure on outer error).
+          if ! PRS_JSON=$(gh pr list \
+              --repo "$GH_REPO" \
+              --author app/dependabot \
+              --state open \
+              --json number,headRefName,headRefOid 2>&1); then
+            echo "FATAL: gh pr list failed: $PRS_JSON" >&2
+            exit 1
+          fi
+
+          PR_COUNT=$(echo "$PRS_JSON" | jq 'length')
+          if [ "$PR_COUNT" -eq 0 ]; then
+            echo "| — | — | — | no-prs | no Dependabot PRs to sweep |" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # 2) Per-PR loop. Pipe-to-while runs in a subshell, which is fine
+          # since we don't need to carry state out of the loop.
+          echo "$PRS_JSON" | jq -c '.[]' | while read -r PR; do
+            PR_NUM=$(echo "$PR" | jq -r '.number')
+            HEAD_REF=$(echo "$PR" | jq -r '.headRefName')
+            HEAD_SHA=$(echo "$PR" | jq -r '.headRefOid')
+            HEAD_SHA_SHORT="${HEAD_SHA:0:7}"
+
+            set +e
+
+            # 2a) Combined commit status — find the cooldown gate context.
+            STATUS_JSON=$(gh api "repos/${GH_REPO}/commits/${HEAD_SHA}/status" 2>&1)
+            if [ $? -ne 0 ]; then
+              echo "| #${PR_NUM} | ${HEAD_SHA_SHORT} | — | skip | status-fetch-failed |" >> "$GITHUB_STEP_SUMMARY"
+              set -e
+              continue
+            fi
+
+            GATE=$(echo "$STATUS_JSON" | jq -r \
+              '.statuses[] | select(.context == "dependency-cooldown / gate") | .state' \
+              | head -1)
+
+            if [ -z "$GATE" ]; then
+              echo "| #${PR_NUM} | ${HEAD_SHA_SHORT} | — | skip | no-gate-status |" >> "$GITHUB_STEP_SUMMARY"
+              set -e
+              continue
+            fi
+
+            if [ "$GATE" != "pending" ]; then
+              echo "| #${PR_NUM} | ${HEAD_SHA_SHORT} | ${GATE} | skip | gate-not-pending |" >> "$GITHUB_STEP_SUMMARY"
+              set -e
+              continue
+            fi
+
+            # 2b) Find the most recent dependency-cooldown.yml run for this branch.
+            RUN_JSON=$(gh run list \
+              --repo "$GH_REPO" \
+              --workflow=.github/workflows/dependency-cooldown.yml \
+              --branch="$HEAD_REF" \
+              --limit 1 \
+              --json databaseId,status,conclusion 2>&1)
+            if [ $? -ne 0 ]; then
+              echo "| #${PR_NUM} | ${HEAD_SHA_SHORT} | pending | skip | run-list-failed |" >> "$GITHUB_STEP_SUMMARY"
+              set -e
+              continue
+            fi
+
+            RUN_ID=$(echo "$RUN_JSON" | jq -r '.[0].databaseId // empty')
+            RUN_STATUS=$(echo "$RUN_JSON" | jq -r '.[0].status // empty')
+
+            if [ -z "$RUN_ID" ]; then
+              echo "| #${PR_NUM} | ${HEAD_SHA_SHORT} | pending | skip | no-prior-run |" >> "$GITHUB_STEP_SUMMARY"
+              set -e
+              continue
+            fi
+
+            if [ "$RUN_STATUS" != "completed" ]; then
+              echo "| #${PR_NUM} | ${HEAD_SHA_SHORT} | pending | skip | run-in-progress |" >> "$GITHUB_STEP_SUMMARY"
+              set -e
+              continue
+            fi
+
+            # 2c) Rerun (or echo in dry-run).
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "| #${PR_NUM} | ${HEAD_SHA_SHORT} | pending | dry-run | would-rerun-${RUN_ID} |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              RERUN_OUT=$(gh run rerun "$RUN_ID" --repo "$GH_REPO" 2>&1)
+              if [ $? -eq 0 ]; then
+                echo "| #${PR_NUM} | ${HEAD_SHA_SHORT} | pending | rerun | run-${RUN_ID}-rerun |" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "| #${PR_NUM} | ${HEAD_SHA_SHORT} | pending | rerun | rerun-failed |" >> "$GITHUB_STEP_SUMMARY"
+                echo "rerun failure detail for PR #${PR_NUM}: ${RERUN_OUT}" >&2
+              fi
+            fi
+
+            set -e
+          done
+
+          exit 0
