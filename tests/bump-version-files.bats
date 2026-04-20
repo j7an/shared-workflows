@@ -276,3 +276,33 @@ JSON
   # invalid.json is part of the targets fixture set (copied by setup())
   # and remains untouched
 }
+
+# === Step-summary table format ===
+
+@test "summary: path_expr entry renders the full path in the Path column" {
+  run_bumper "valid/path-expr-nested.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "| \`server.json\` | \`.packages[0].version\` | \`0.0.0\` -> \`1.2.3\` | updated |" ]]
+}
+
+@test "summary: legacy field='version' renders as '.version' (unified display)" {
+  run_bumper "valid/legacy-field.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "| \`package.json\` | \`.version\` | \`0.0.0\` -> \`1.2.3\` | updated |" ]]
+}
+
+# === Multi-entry interleaving — the 'partial progress' guarantee ===
+
+@test "interleaving: one valid entry + one invalid path_expr — valid still applied" {
+  run_bumper "valid/one-good-one-bad.json" "1.2.3"
+  # Exit 0 because at least one entry was modified (the valid one)
+  [ "$status" -eq 0 ]
+  # Valid entry: package.json updated
+  [ "$(jq -r .version package.json)" = "1.2.3" ]
+  # Invalid entry: server.json untouched
+  [ "$(jq -r .version server.json)" = "0.0.0" ]
+  [ "$(jq -r '.packages[0].version' server.json)" = "0.0.0" ]
+  # Both rows appear in the summary
+  [[ "$output" =~ "| \`package.json\` | \`.version\` |" ]]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
