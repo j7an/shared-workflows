@@ -306,3 +306,15 @@ JSON
   [[ "$output" =~ "| \`package.json\` | \`.version\` |" ]]
   [[ "$output" =~ "skipped (invalid path_expr)" ]]
 }
+
+# === Acceptance: bracket-quoted string keys (#45) ===
+
+@test "path_expr: quoted-key '[\"@scope/pkg\"]' bumps scoped dependency" {
+  run_bumper "valid/path-expr-quoted-key-scoped.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.dependencies["@scope/pkg"].version' package-scoped.json)" = "1.2.3" ]
+  # Confirm the other dependency was NOT touched
+  [ "$(jq -r '.dependencies["eslint-config-airbnb"].version' package-scoped.json)" = "0.0.0" ]
+  # Confirm the top-level .version was NOT touched
+  [ "$(jq -r '.version' package-scoped.json)" = "1.0.0" ]
+}

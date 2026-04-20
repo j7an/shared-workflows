@@ -21,11 +21,10 @@
 
 set -euo pipefail
 
-# Strict allowlist: identifiers + integer indices.
-# Bracket-quoted string keys (e.g. .["kebab-case"]) and wildcards [*] are
-# reserved for future minor releases — see follow-up issues filed at
-# PR-merge time.
-PATH_EXPR_RE='^\.[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])*$'
+# Strict allowlist: identifiers, integer indices, and bracket-quoted string
+# keys (npm/composer style: kebab-case, @scope/pkg, dotted paths). The jq []
+# iterator is reserved for a follow-up minor release in this PR.
+PATH_EXPR_RE='^\.[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\]|\["[A-Za-z0-9._@/-]+"\])*$'
 
 validate_path_expr() {
   local expr="$1"
