@@ -339,3 +339,53 @@ JSON
   # Sibling dependency was NOT touched
   [ "$(jq -r '.dependencies["@scope/pkg"].version' package-scoped.json)" = "0.0.0" ]
 }
+
+# === Hardening: rejection of malformed new forms ===
+
+@test "rejection: empty quoted key '[\"\"]' is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/empty-quoted-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: whitespace in quoted key is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/whitespace-in-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: injection char ';' in quoted key is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/injection-in-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: single-quoted key is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/single-quoted-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: unclosed quoted key is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/unclosed-quoted-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: spaced wildcard '[ ]' is rejected" {
+  ORIG=$(cat server.json)
+  run_bumper "invalid-path-expr/whitespace-wildcard.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat server.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
