@@ -130,13 +130,13 @@ Each entry must contain exactly one of `field` or `path_expr` (mutually exclusiv
 - `.identifier[]` — jq iterator; updates every element of an array (`.packages[].version` sets `.version` on every package entry)
 - Combinations (`.packages[0].version`, `.foo.bar[2].baz`, `.dependencies["lodash.debounce"].version`, `.packages[].version`)
 
-The first segment must be `.identifier`. Identifiers follow `[A-Za-z_][A-Za-z0-9_]*`. Bracket-quoted keys and the `[]` iterator can appear anywhere after the first segment.
+The first segment must be `.identifier`. Identifiers follow `[A-Za-z_][A-Za-z0-9_]*`. Bracket-quoted string keys and the `[]` iterator can appear anywhere after the first segment.
 
 #### Rejected syntax (security boundary)
 
-The validator rejects pipes (`|`), JSONPath-style wildcards (`[*]`), slices (`[2:5]`), negative indices (`[-1]`), recursive descent (`..`), variable references (`$ENV`), format strings (`@sh`), parens, arithmetic, dot-quoted keys (`."weird-key"`), and single-quoted keys (`['key']`). Empty or whitespace-containing quoted keys (`[""]`, `["a b"]`) are also rejected. Path expressions originate from repo-committed config but are still validated as a defense-in-depth measure.
+The validator rejects pipes (`|`), JSONPath-style wildcards (`[*]`), slices (`[2:5]`), negative indices (`[-1]`), recursive descent (`..`), variable references (`$ENV`), format strings (`@sh`), parens, arithmetic, dot-quoted keys (`."weird-key"`), leading-bracket keys at the root (`.["key"]`), and single-quoted keys (`['key']`). Empty or whitespace-containing quoted keys (`[""]`, `["a b"]`) are also rejected. Path expressions originate from repo-committed config but are still validated as a defense-in-depth measure.
 
-**Note on `[*]` vs. `[]`:** jq's iterate-all operator is `[]`, not `[*]` (the latter is JSONPath, not jq). Use `.foo[]` to update every element of an array.
+**Note on `[*]` vs. `[]`:** jq's iterate-all operator is `[]`, not `[*]` (the latter is JSONPath, not jq). Use `.packages[].version` to update every element's `.version` (or `.foo[]` in general).
 
 #### Step summary
 
