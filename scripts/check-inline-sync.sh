@@ -13,6 +13,7 @@ set -euo pipefail
 INLINE_PAIRS=(
   ".github/workflows/dependency-cooldown.yml:scripts/extract-deps.sh"
   ".github/workflows/dependency-cooldown.yml:scripts/check-release-age.sh"
+  ".github/workflows/tag-release.yml:scripts/bump-version-files.sh"
 )
 
 YAML_INDENT="          "  # exactly 10 spaces — matches the `run: |` indent
