@@ -39,3 +39,41 @@ run_bumper() {
   [ "$status" -eq 2 ]
   [[ "$output" =~ "already up to date" ]]
 }
+
+# === Acceptance: path_expr codepath ===
+
+@test "path_expr: '.version' bumps top-level (equivalent to legacy field)" {
+  run_bumper "valid/path-expr-simple.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .version package.json)" = "1.2.3" ]
+}
+
+@test "path_expr: '.packages[0].version' bumps nested array element" {
+  run_bumper "valid/path-expr-nested.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.packages[0].version' server.json)" = "1.2.3" ]
+  # Confirm the top-level .version was NOT touched
+  [ "$(jq -r .version server.json)" = "0.0.0" ]
+}
+
+@test "path_expr: '.packages[1].version' touches only that index" {
+  run_bumper "valid/path-expr-indexed.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.packages[0].version' multi-pkg-server.json)" = "0.0.0" ]
+  [ "$(jq -r '.packages[1].version' multi-pkg-server.json)" = "1.2.3" ]
+  [ "$(jq -r '.packages[2].version' multi-pkg-server.json)" = "0.0.0" ]
+  [ "$(jq -r '.version' multi-pkg-server.json)" = "0.0.0" ]
+}
+
+# === Security boundary smoke (I4 mitigation — full coverage in T8/T9) ===
+
+@test "validator: rejects path_expr with pipe (smoke; T8 has full coverage)" {
+  cat > .version-bump.json <<'JSON'
+{ "files": [ { "path": "package.json", "path_expr": ".version | input_filename" } ] }
+JSON
+  ORIG=$(cat package.json)
+  run bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 1.2.3
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
