@@ -80,7 +80,7 @@ Each entry must contain exactly one of `field` or `path_expr` (mutually exclusiv
 |---|---|
 | `path` | Path relative to repo root. Must end in `.json`. Absolute paths and `..` traversal rejected. |
 | `field` | Top-level key to update. Shorthand for `path_expr: ".<field>"`. Any string value safe (passed to jq as a literal). |
-| `path_expr` | jq-style path expression. Validated against an identifier+integer-index allowlist before use. |
+| `path_expr` | jq-style path expression. Validated against a strict allowlist before use — see "Allowed path_expr syntax" below. |
 
 #### Examples
 
@@ -101,20 +101,42 @@ Each entry must contain exactly one of `field` or `path_expr` (mutually exclusiv
 }
 ```
 
+**Scoped or hyphenated dependency keys** (npm, Composer, Helm):
+
+```json
+{
+  "files": [
+    { "path": "package.json", "path_expr": ".dependencies[\"@scope/pkg\"].version" }
+  ]
+}
+```
+
+**Update every element of an array** (jq's `[]` iterator):
+
+```json
+{
+  "files": [
+    { "path": "server.json", "path_expr": ".packages[].version" }
+  ]
+}
+```
+
 #### Allowed `path_expr` syntax
 
 - `.identifier` — top-level key (`.version`, `._private`)
 - `.identifier.identifier` — nested key (`.metadata.semver`)
 - `.identifier[N]` — non-negative integer index (`.packages[0]`)
-- Combinations (`.packages[0].version`, `.foo.bar[2].baz`)
+- `.identifier["string-key"]` — bracket-quoted string key (`.dependencies["@scope/pkg"]`). Content allowlist: letters, digits, `.`, `_`, `@`, `/`, `-`. Covers npm scoped packages, Composer `vendor/package`, Helm kebab-case values.
+- `.identifier[]` — jq iterator; updates every element of an array (`.packages[].version` sets `.version` on every package entry)
+- Combinations (`.packages[0].version`, `.foo.bar[2].baz`, `.dependencies["lodash.debounce"].version`, `.packages[].version`)
 
-The first segment must be `.identifier`. Identifiers follow `[A-Za-z_][A-Za-z0-9_]*`.
+The first segment must be `.identifier`. Identifiers follow `[A-Za-z_][A-Za-z0-9_]*`. Bracket-quoted keys and the `[]` iterator can appear anywhere after the first segment.
 
 #### Rejected syntax (security boundary)
 
-The validator rejects pipes (`|`), wildcards (`[*]`), slices (`[2:5]`), negative indices (`[-1]`), recursive descent (`..`), variable references (`$ENV`), format strings (`@sh`), parens, arithmetic, and quoted-string keys (`."weird-key"`, `["weird-key"]`). Path expressions originate from repo-committed config but are still validated as a defense-in-depth measure.
+The validator rejects pipes (`|`), JSONPath-style wildcards (`[*]`), slices (`[2:5]`), negative indices (`[-1]`), recursive descent (`..`), variable references (`$ENV`), format strings (`@sh`), parens, arithmetic, dot-quoted keys (`."weird-key"`), and single-quoted keys (`['key']`). Empty or whitespace-containing quoted keys (`[""]`, `["a b"]`) are also rejected. Path expressions originate from repo-committed config but are still validated as a defense-in-depth measure.
 
-For files whose schemas require quoted-string keys (e.g. `package.json` `.dependencies."@scope/pkg".version`), file an issue — quoted-string support is a documented future extension.
+**Note on `[*]` vs. `[]`:** jq's iterate-all operator is `[]`, not `[*]` (the latter is JSONPath, not jq). Use `.foo[]` to update every element of an array.
 
 #### Step summary
 
