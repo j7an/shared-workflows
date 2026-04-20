@@ -291,6 +291,12 @@ JSON
   [[ "$output" =~ "| \`package.json\` | \`.version\` | \`0.0.0\` -> \`1.2.3\` | updated |" ]]
 }
 
+@test "summary: '[]' iterator renders verbatim in step-summary path column" {
+  run_bumper "valid/path-expr-iterate-all.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "| \`multi-pkg-server.json\` | \`.packages[].version\` |" ]]
+}
+
 # === Multi-entry interleaving — the 'partial progress' guarantee ===
 
 @test "interleaving: one valid entry + one invalid path_expr — valid still applied" {
