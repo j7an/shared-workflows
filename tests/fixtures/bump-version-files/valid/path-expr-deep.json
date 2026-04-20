@@ -1,0 +1,1 @@
+{ "files": [ { "path": "deeply-nested.json", "path_expr": ".metadata.release.semver" } ] }

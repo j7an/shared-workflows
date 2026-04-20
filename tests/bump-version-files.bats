@@ -77,3 +77,23 @@ JSON
   [ "$(cat package.json)" = "$ORIG" ]
   [[ "$output" =~ "skipped (invalid path_expr)" ]]
 }
+
+@test "path_expr: deeply nested (3+ levels) is bumped" {
+  run_bumper "valid/path-expr-deep.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.metadata.release.semver' deeply-nested.json)" = "1.2.3" ]
+}
+
+@test "multi-entry: two path_expr entries against same file write both" {
+  run_bumper "valid/multi-entry-same-file.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.version' server.json)" = "1.2.3" ]
+  [ "$(jq -r '.packages[0].version' server.json)" = "1.2.3" ]
+}
+
+@test "mixed: legacy field entry + path_expr entry both apply" {
+  run_bumper "valid/mixed-old-and-new.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .version package.json)" = "1.2.3" ]
+  [ "$(jq -r '.packages[0].version' server.json)" = "1.2.3" ]
+}
