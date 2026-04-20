@@ -97,3 +97,32 @@ JSON
   [ "$(jq -r .version package.json)" = "1.2.3" ]
   [ "$(jq -r '.packages[0].version' server.json)" = "1.2.3" ]
 }
+
+# === Schema validation: hard errors (exit 1, fails workflow) ===
+
+@test "schema: entry with both 'field' and 'path_expr' fails workflow" {
+  run_bumper "invalid-schema/both-keys.json" "1.2.3"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "mutually exclusive" ]]
+  # Target file MUST be untouched (schema error fails BEFORE apply pass)
+  [ "$(jq -r .version package.json)" = "0.0.0" ]
+}
+
+@test "schema: entry with neither 'field' nor 'path_expr' fails workflow" {
+  run_bumper "invalid-schema/neither-key.json" "1.2.3"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "neither 'field' nor 'path_expr'" ]]
+  [ "$(jq -r .version package.json)" = "0.0.0" ]
+}
+
+@test "schema: entry missing 'path' fails workflow" {
+  run_bumper "invalid-schema/missing-path.json" "1.2.3"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "missing 'path'" ]]
+}
+
+@test "schema: missing 'files' array fails workflow" {
+  run_bumper "invalid-schema/missing-files-array.json" "1.2.3"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "invalid 'files' array" ]]
+}
