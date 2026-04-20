@@ -21,10 +21,11 @@
 
 set -euo pipefail
 
-# Strict allowlist: identifiers, integer indices, and bracket-quoted string
-# keys (npm/composer style: kebab-case, @scope/pkg, dotted paths). The jq []
-# iterator is reserved for a follow-up minor release in this PR.
-PATH_EXPR_RE='^\.[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\]|\["[A-Za-z0-9._@/-]+"\])*$'
+# Strict allowlist: identifiers, integer indices, bracket-quoted string keys
+# (npm/composer style: kebab-case, @scope/pkg, dotted paths), and the []
+# iterator (applies-to-every). The jq [*] form is NOT valid jq grammar and
+# stays rejected.
+PATH_EXPR_RE='^\.[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\]|\["[A-Za-z0-9._@/-]+"\]|\[\])*$'
 
 validate_path_expr() {
   local expr="$1"

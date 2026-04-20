@@ -1,0 +1,1 @@
+{ "files": [ { "path": "multi-pkg-server.json", "path_expr": ".packages[].version" } ] }

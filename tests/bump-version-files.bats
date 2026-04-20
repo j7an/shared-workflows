@@ -318,3 +318,16 @@ JSON
   # Confirm the top-level .version was NOT touched
   [ "$(jq -r '.version' package-scoped.json)" = "1.0.0" ]
 }
+
+# === Acceptance: [] iterator (#46) ===
+
+@test "path_expr: '[]' iterator updates every array element" {
+  run_bumper "valid/path-expr-iterate-all.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  # All three .packages[*].version entries are updated
+  [ "$(jq -r '.packages[0].version' multi-pkg-server.json)" = "1.2.3" ]
+  [ "$(jq -r '.packages[1].version' multi-pkg-server.json)" = "1.2.3" ]
+  [ "$(jq -r '.packages[2].version' multi-pkg-server.json)" = "1.2.3" ]
+  # Top-level .version is NOT touched
+  [ "$(jq -r '.version' multi-pkg-server.json)" = "0.0.0" ]
+}
