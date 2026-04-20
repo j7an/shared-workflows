@@ -1,0 +1,1 @@
+{ "files": [ { "path": "package.json", "path_expr": ".[\"version\"]" } ] }

@@ -1,0 +1,11 @@
+{
+  "name": "test-server",
+  "version": "0.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "test-pkg",
+      "version": "0.0.0"
+    }
+  ]
+}

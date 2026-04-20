@@ -1,0 +1,8 @@
+{
+  "version": "0.0.0",
+  "packages": [
+    { "name": "pkg-a", "version": "0.0.0" },
+    { "name": "pkg-b", "version": "0.0.0" },
+    { "name": "pkg-c", "version": "0.0.0" }
+  ]
+}

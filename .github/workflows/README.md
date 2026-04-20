@@ -57,6 +57,75 @@ jobs:
 
 The two streams compute next-version independently — `tools/v` callers see only `tools/v*.*.*` tags when looking up the previous version, never `v*.*.*`.
 
+### Version file bumping (`.version-bump.json`)
+
+Optional. If a file named `.version-bump.json` exists at the repo root, the workflow updates the listed JSON files with the new version *before* creating the tag. The bumped files are committed and pushed to `main` as a separate `chore(release): bump version files to <version>` commit. The new tag points at that commit.
+
+If `.version-bump.json` is absent, the bumper step is a no-op.
+
+#### Schema
+
+```json
+{
+  "files": [
+    { "path": "<relative-path>", "field": "<top-level-key>" },
+    { "path": "<relative-path>", "path_expr": "<jq-path>" }
+  ]
+}
+```
+
+Each entry must contain exactly one of `field` or `path_expr` (mutually exclusive).
+
+| Key | Purpose |
+|---|---|
+| `path` | Path relative to repo root. Must end in `.json`. Absolute paths and `..` traversal rejected. |
+| `field` | Top-level key to update. Shorthand for `path_expr: ".<field>"`. Any string value safe (passed to jq as a literal). |
+| `path_expr` | jq-style path expression. Validated against an identifier+integer-index allowlist before use. |
+
+#### Examples
+
+**Top-level field (legacy form):**
+
+```json
+{ "files": [ { "path": "package.json", "field": "version" } ] }
+```
+
+**Nested path — same file, multiple locations:**
+
+```json
+{
+  "files": [
+    { "path": "server.json", "path_expr": ".version" },
+    { "path": "server.json", "path_expr": ".packages[0].version" }
+  ]
+}
+```
+
+#### Allowed `path_expr` syntax
+
+- `.identifier` — top-level key (`.version`, `._private`)
+- `.identifier.identifier` — nested key (`.metadata.semver`)
+- `.identifier[N]` — non-negative integer index (`.packages[0]`)
+- Combinations (`.packages[0].version`, `.foo.bar[2].baz`)
+
+The first segment must be `.identifier`. Identifiers follow `[A-Za-z_][A-Za-z0-9_]*`.
+
+#### Rejected syntax (security boundary)
+
+The validator rejects pipes (`|`), wildcards (`[*]`), slices (`[2:5]`), negative indices (`[-1]`), recursive descent (`..`), variable references (`$ENV`), format strings (`@sh`), parens, arithmetic, and quoted-string keys (`."weird-key"`, `["weird-key"]`). Path expressions originate from repo-committed config but are still validated as a defense-in-depth measure.
+
+For files whose schemas require quoted-string keys (e.g. `package.json` `.dependencies."@scope/pkg".version`), file an issue — quoted-string support is a documented future extension.
+
+#### Step summary
+
+The workflow run summary includes a per-entry table:
+
+| File | Path | Version | Status |
+|---|---|---|---|
+| `server.json` | `.version` | `0.8.1` -> `0.10.0` | updated |
+| `server.json` | `.packages[0].version` | `0.8.1` -> `0.10.0` | updated |
+| `package.json` | `.version` | `0.10.0` | already up to date |
+
 ## `publish-pypi.yml`
 
 Builds a Python package with `uv build`, stages on TestPyPI with install verification, promotes to production PyPI via OIDC trusted publishing, and creates a GitHub Release.

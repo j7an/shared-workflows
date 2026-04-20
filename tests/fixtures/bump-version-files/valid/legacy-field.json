@@ -1,0 +1,5 @@
+{
+  "files": [
+    { "path": "package.json", "field": "version" }
+  ]
+}
