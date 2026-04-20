@@ -238,3 +238,41 @@ JSON
   [ "$status" -eq 2 ]
   [ "$(cat package.json)" = "$ORIG" ]
 }
+
+# === Filesystem-path safety (regression coverage from inline bumper) ===
+
+@test "filesystem: absolute path is skipped with warning" {
+  run_bumper "valid/absolute-path.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [[ "$output" =~ "skipped (unsafe path)" ]]
+}
+
+@test "filesystem: traversal '..' is skipped with warning" {
+  run_bumper "valid/traversal-path.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [[ "$output" =~ "skipped (unsafe path)" ]]
+}
+
+@test "filesystem: missing target file is skipped" {
+  run_bumper "valid/missing-target.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [[ "$output" =~ "skipped (file not found)" ]]
+}
+
+@test "filesystem: non-JSON file is skipped" {
+  # Create a Cargo.toml in the temp dir for this test
+  echo 'version = "0.0.0"' > Cargo.toml
+  run_bumper "valid/non-json-target.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [[ "$output" =~ "skipped (not JSON)" ]]
+  # Cargo.toml must be untouched
+  [ "$(cat Cargo.toml)" = 'version = "0.0.0"' ]
+}
+
+@test "filesystem: invalid-JSON target is skipped (NEW behavior)" {
+  run_bumper "valid/invalid-json-target.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [[ "$output" =~ "skipped (invalid JSON)" ]]
+  # invalid.json is part of the targets fixture set (copied by setup())
+  # and remains untouched
+}
