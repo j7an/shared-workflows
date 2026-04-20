@@ -324,10 +324,18 @@ JSON
 @test "path_expr: '[]' iterator updates every array element" {
   run_bumper "valid/path-expr-iterate-all.json" "1.2.3"
   [ "$status" -eq 0 ]
-  # All three .packages[*].version entries are updated
+  # All three .packages[].version entries are updated
   [ "$(jq -r '.packages[0].version' multi-pkg-server.json)" = "1.2.3" ]
   [ "$(jq -r '.packages[1].version' multi-pkg-server.json)" = "1.2.3" ]
   [ "$(jq -r '.packages[2].version' multi-pkg-server.json)" = "1.2.3" ]
   # Top-level .version is NOT touched
   [ "$(jq -r '.version' multi-pkg-server.json)" = "0.0.0" ]
+}
+
+@test "path_expr: quoted-key with kebab-case hyphens is bumped" {
+  run_bumper "valid/path-expr-quoted-key-kebab.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.dependencies["eslint-config-airbnb"].version' package-scoped.json)" = "1.2.3" ]
+  # Sibling dependency was NOT touched
+  [ "$(jq -r '.dependencies["@scope/pkg"].version' package-scoped.json)" = "0.0.0" ]
 }
