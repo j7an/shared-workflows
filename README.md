@@ -416,6 +416,10 @@ jobs:
       tag: ${{ needs.tag.outputs.tag }}
 ```
 
+### Auto-bumping version files at release time
+
+If your repo has version strings in committed JSON files (e.g. `server.json`, `package.json`), `tag-release.yml` can rewrite them as part of the release commit. Add a `.version-bump.json` at repo root listing the files and locations to update. See [`.github/workflows/README.md` › Version file bumping](.github/workflows/README.md#version-file-bumping-version-bumpjson) for the schema, examples, and security model.
+
 ### Required downstream setup
 
 1. **Create a `release` GitHub Environment**, restricted to the `main` branch via deployment branch policy (Settings → Environments → New environment → Deployment branches → Selected branches → `main`).
