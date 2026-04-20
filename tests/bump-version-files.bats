@@ -126,3 +126,77 @@ JSON
   [ "$status" -eq 1 ]
   [[ "$output" =~ "invalid 'files' array" ]]
 }
+
+# === Path-expression rejection (per-entry skip; security boundary) ===
+
+@test "rejection: pipe '|' is rejected, file untouched" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/pipe.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: wildcard '[*]' is rejected" {
+  ORIG=$(cat server.json)
+  run_bumper "invalid-path-expr/wildcard.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat server.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: slice '[0:1]' is rejected" {
+  ORIG=$(cat server.json)
+  run_bumper "invalid-path-expr/slice.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat server.json)" = "$ORIG" ]
+}
+
+@test "rejection: negative index '[-1]' is rejected" {
+  ORIG=$(cat server.json)
+  run_bumper "invalid-path-expr/negative-index.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat server.json)" = "$ORIG" ]
+}
+
+@test "rejection: recursive descent '..' is rejected" {
+  ORIG=$(cat server.json)
+  run_bumper "invalid-path-expr/recursive-descent.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat server.json)" = "$ORIG" ]
+}
+
+@test "rejection: parens '()' are rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/parens.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+}
+
+@test "rejection: arithmetic '+' is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/arithmetic.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+}
+
+@test "rejection: format string '@sh' is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/format-string.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+}
+
+@test "rejection: variable reference '\$ENV' is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/variable-ref.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+}
+
+@test "rejection: quoted-string key '[\"x\"]' is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/quoted-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+}
