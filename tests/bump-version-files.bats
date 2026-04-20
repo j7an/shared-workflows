@@ -200,3 +200,41 @@ JSON
   [ "$status" -eq 2 ]
   [ "$(cat package.json)" = "$ORIG" ]
 }
+
+# === Anchor-bypass attempts (^ and $ on the regex) ===
+
+@test "anchor: leading whitespace cannot bypass validator" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/leading-whitespace.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+}
+
+@test "anchor: trailing whitespace cannot bypass validator" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/trailing-whitespace.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+}
+
+@test "anchor: unanchored prefix 'xxx.version' rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/unanchored-prefix.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+}
+
+@test "anchor: empty path_expr is treated as missing — schema error" {
+  run_bumper "invalid-path-expr/empty.json" "1.2.3"
+  # Empty path_expr is jq-extracted as "" — same as not present —
+  # so schema validation catches it as "neither field nor path_expr"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "neither 'field' nor 'path_expr'" ]]
+}
+
+@test "anchor: injection suffix '.version; rm -rf /' is rejected as a whole" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/injection-suffix.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+}
