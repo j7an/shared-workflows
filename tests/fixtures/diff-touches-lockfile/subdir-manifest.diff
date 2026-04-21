@@ -1,0 +1,7 @@
+diff --git a/services/api/pyproject.toml b/services/api/pyproject.toml
+index 1234..5678 100644
+--- a/services/api/pyproject.toml
++++ b/services/api/pyproject.toml
+@@ -10,3 +10,3 @@
+-    "requests>=2.31.0",
++    "requests>=2.32.0",
