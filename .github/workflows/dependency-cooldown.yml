@@ -885,7 +885,20 @@ jobs:
           reconcile_label "security-review-needed" "$_needs_security" "$LABEL_COLOR_security_review_needed" "$LABEL_DESC_security_review_needed"
           reconcile_label "cooldown-pending"       "$_needs_cooldown" "$LABEL_COLOR_cooldown_pending"       "$LABEL_DESC_cooldown_pending"
 
-          if [ "$TOTAL" -gt 0 ]; then
+          # Guard-triggered runs must not compose a clean-scan narrative — the
+          # gate state machine below flips status to `error`, and the comment
+          # needs to agree (rather than claim "No known exploits" + auto-merge
+          # enabled on a run we refused to scan). The EXTRACTION_WARNING_SECTION
+          # prepended later (~line 960) still carries the detailed path list.
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            RESULTS_HEADER="Dependency extraction failed — manual review required."
+            TABLE_HDR="| Source | Vulnerabilities |"
+            TABLE_SEP="|--------|----------------|"
+            ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
+            ROW2="| OSV.dev | (not scanned) |"
+            RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
+            RESULTS_FOOTER="> Auto-merge not enabled — parser could not determine target versions from diff or PR body."
+          elif [ "$TOTAL" -gt 0 ]; then
             RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
             TABLE_HDR="| ID | Severity | Summary | Source |"
             TABLE_SEP="|----|----------|---------|--------|"
