@@ -204,14 +204,16 @@ jobs:
 
           # --- BEGIN inline:scripts/diff-touches-lockfile.sh ---
           diff_touches_lockfile() (
-          # diff-touches-lockfile.sh — detect dependency lockfile/manifest edits in a
-          # unified diff. Used by dependency-cooldown.yml's fail-loud guard to refuse
-          # green gates when the dep extractor returns zero rows on a lockfile bump.
+          # diff-touches-lockfile.sh — detect dependency-relevant file edits in a
+          # unified diff (lockfiles, manifests, and GitHub Actions workflow YAMLs).
+          # Used by dependency-cooldown.yml's fail-loud guard to refuse green gates
+          # when the dep extractor returns zero rows on a diff that touches files
+          # which *should* have produced deps.
           #
           # Input:  unified diff on stdin
           # Output: matched paths (b/ side of diff --git headers), sorted & deduped,
           #         one per line; empty stdout if nothing matched.
-          # Exit:   0 if any lockfile/manifest touched, 1 if none, 2 on malformed input.
+          # Exit:   0 if any dependency-relevant path touched, 1 if none, 2 on malformed input.
 
           set -euo pipefail
 
@@ -233,6 +235,14 @@ jobs:
             case "$base" in
               *.lock|requirements*.txt|pyproject.toml|Pipfile|go.mod|Cargo.toml \
                 |package.json|package-lock.json|yarn.lock|pnpm-lock.yaml)
+                matches+=("$path")
+                continue
+                ;;
+            esac
+            # GitHub Actions workflow YAMLs are dependency declarations (uses: lines).
+            # Matched by full path, not basename, to avoid over-triggering on any *.yml.
+            case "$path" in
+              .github/workflows/*.yml|.github/workflows/*.yaml)
                 matches+=("$path")
                 ;;
             esac

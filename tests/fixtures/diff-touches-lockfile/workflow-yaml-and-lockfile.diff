@@ -1,0 +1,14 @@
+diff --git a/.github/workflows/release.yaml b/.github/workflows/release.yaml
+index aaaa..bbbb 100644
+--- a/.github/workflows/release.yaml
++++ b/.github/workflows/release.yaml
+@@ -1 +1 @@
+-uses: actions/checkout@v3
++uses: actions/checkout@v4
+diff --git a/uv.lock b/uv.lock
+index cccc..dddd 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1 +1 @@
+-version = "1.0.0"
++version = "1.1.0"

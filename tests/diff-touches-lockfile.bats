@@ -30,6 +30,18 @@
   [ -z "$output" ]
 }
 
+@test "workflow YAML touched (.yml) — exit 0, prints path" {
+  run bash scripts/diff-touches-lockfile.sh < tests/fixtures/diff-touches-lockfile/workflow-yaml-touched.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = ".github/workflows/ci.yml" ]
+}
+
+@test "workflow YAML (.yaml) and lockfile mixed — both paths emitted" {
+  run bash scripts/diff-touches-lockfile.sh < tests/fixtures/diff-touches-lockfile/workflow-yaml-and-lockfile.diff
+  [ "$status" -eq 0 ]
+  diff <(echo "$output") <(printf '.github/workflows/release.yaml\nuv.lock\n')
+}
+
 @test "empty input — exit 1, empty stdout" {
   run bash scripts/diff-touches-lockfile.sh < tests/fixtures/diff-touches-lockfile/empty.diff
   [ "$status" -eq 1 ]
