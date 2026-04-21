@@ -1,0 +1,1 @@
+Bumps [pydantic](https://github.com/pydantic/pydantic) from 2.12.5 to 2.13.0.

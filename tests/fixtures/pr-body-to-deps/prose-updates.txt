@@ -1,0 +1,2 @@
+Updates `pydantic` from 2.12.5 to 2.13.0
+Updates `mypy` from 1.20.0 to 1.20.1
