@@ -1,9 +1,11 @@
 #!/usr/bin/env bats
 
-@test "pattern A — single Bumps line emits 1 row" {
+@test "pattern A — single Bumps line with f-in-URL emits 1 row" {
+  # Regression: previously [^f]* stopped at any 'f' in the URL,
+  # silently dropping names like `ruff` with `f` in the repo slug.
   run bash scripts/pr-body-to-deps.sh pypi < tests/fixtures/pr-body-to-deps/single-bumps.txt
   [ "$status" -eq 0 ]
-  [ "$output" = $'pydantic\t2.13.0\tpypi' ]
+  [ "$output" = $'ruff\t0.15.10\tpypi' ]
 }
 
 @test "pattern B — prose Updates emits sorted rows" {

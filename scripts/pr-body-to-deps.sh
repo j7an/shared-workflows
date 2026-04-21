@@ -24,8 +24,10 @@ VER='[0-9][0-9A-Za-z.+!\-]*'
 
 # Regex patterns stored in variables — bash 3.2 on macOS cannot parse certain
 # metacharacters (like `)`) inline within [[ =~ ]] conditionals.
-# Pattern A — Bumps [name](url) ... from X to Y
-re_a="^Bumps[[:space:]]\[([^]]+)\][^f]*from[[:space:]]+${VER}[[:space:]]+to[[:space:]]+(${VER})"
+# Pattern A — Bumps [name](url) from X to Y. The URL is consumed explicitly
+# via \([^)]+\) rather than a character class, because earlier attempts using
+# [^f]* silently dropped any bump whose URL contained `f` (e.g. `ruff`).
+re_a="^Bumps[[:space:]]\[([^]]+)\]\([^)]+\)[[:space:]]+from[[:space:]]+${VER}[[:space:]]+to[[:space:]]+(${VER})"
 # Pattern B — Updates `name` from X to Y (anchored at column 0 to avoid
 # matching blockquote/release-notes content which is typically indented)
 re_b="^Updates[[:space:]]\`([^\`]+)\`[[:space:]]+from[[:space:]]+${VER}[[:space:]]+to[[:space:]]+(${VER})"
