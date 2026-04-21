@@ -76,21 +76,40 @@ jobs:
           # Output: <name>\t<version>\t<ecosystem>  where ecosystem ∈ {actions, pypi}
           # Exit:   0 on success (possibly zero rows), 2 on malformed input
           #
-          # Handles BOTH GitHub Actions shapes observed in real PR diffs:
-          #   +        uses: owner/repo@sha # vX.Y.Z        (no list marker)
-          #   +      - uses: owner/repo@sha # vX.Y.Z        (YAML list marker)
+          # Handles THREE shapes observed in real PR diffs:
+          #   1. GitHub Actions `uses:` lines (single-line name@version)
+          #   2. pip/requirements `name==version` single-line format
+          #   3. TOML lockfile [[package]] stanzas (uv.lock, poetry.lock) where the
+          #      name line may be on an unchanged context line while only the version
+          #      is `+`-prefixed — section-aware parsing required.
           #
-          # The missing list-marker support in the v2.0.1 regex `^\+\s+uses:` is the
-          # root cause of issue #27 (astral-sh/setup-uv silently dropped from
-          # nexus-mcp#160's cooldown scan).
+          # The TOML lockfile parser addresses issue #52: Dependabot bumps to uv.lock
+          # and poetry.lock previously yielded zero rows, cascading to silent-green
+          # cooldown gates on unscanned code.
 
           set -euo pipefail
 
+          # pypi-shape lockfiles only. Cargo.lock / package-lock.json would need
+          # downstream ecosystem support (registry clients, OSV enums) before rows
+          # could be scanned — the fail-loud guard in dependency-cooldown.yml covers
+          # unhandled lockfiles.
+          filename_to_ecosystem() {
+            case "$1" in
+              uv.lock|poetry.lock) echo "pypi" ;;
+              *) echo "" ;;
+            esac
+          }
+
           # Dedup sentinel: newline-delimited list of "ecosystem:name" keys.
-          # Using a plain string (not `declare -A`) for bash 3.2 compatibility, since
-          # macOS's system bash is still 3.2 and the bats test invokes `bash` directly.
+          # Plain string (not `declare -A`) for bash 3.2 compatibility — macOS ships
+          # bash 3.2 and bats invokes bash directly.
           seen=$'\n'
           rows=()
+
+          # Lockfile parser state
+          current_file=""
+          current_name=""
+          current_ecosystem=""
 
           input=$(cat)
 
@@ -99,9 +118,8 @@ jobs:
             exit 0
           fi
 
-          # Malformed input detection: if non-empty and has none of the unified-diff
-          # markers, reject with exit 2. Use a here-string instead of a pipeline so
-          # large valid diffs cannot trip SIGPIPE under `pipefail`.
+          # Malformed input detection: here-string (not pipeline) to avoid SIGPIPE
+          # under pipefail on large valid diffs (issue #50).
           if ! grep -qE '^(\+\+\+|---|@@|diff --git)' <<< "$input"; then
             echo "extract-deps.sh: input is not a unified diff" >&2
             exit 2
@@ -111,22 +129,48 @@ jobs:
             # Strip CR for CRLF-encoded diffs
             line="${line%$'\r'}"
 
+            # --- Branch 1: diff --git file header — track current file/ecosystem ---
+            if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
+              current_file="${BASH_REMATCH[2]##*/}"
+              current_ecosystem=$(filename_to_ecosystem "$current_file")
+              current_name=""
+              continue
+            fi
+
             # Skip diff file headers (+++ b/path)
             [[ "$line" == +++* ]] && continue
 
-            # --- GitHub Actions parser ---
-            # Matches both "+ uses: foo@..." and "+ - uses: foo@..."
+            # --- Branch 3: [[package]] stanza boundary (context or +, not -) ---
+            if [ -n "$current_ecosystem" ] && [[ "$line" =~ ^[+\ ][[:space:]]*\[\[package\]\] ]]; then
+              current_name=""
+              continue
+            fi
+
+            # --- Branch 4: name = "..." line (context or +, not -) ---
+            if [ -n "$current_ecosystem" ] && [[ "$line" =~ ^[+\ ][[:space:]]*name[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+              current_name="${BASH_REMATCH[1]}"
+              continue
+            fi
+
+            # --- Branch 5: + version = "..." line (only + lines emit rows) ---
+            if [ -n "$current_ecosystem" ] && [ -n "$current_name" ] \
+               && [[ "$line" =~ ^\+[[:space:]]*version[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+              key="$current_ecosystem:$current_name"
+              case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+              seen="${seen}${key}"$'\n'
+              rows+=("$current_name"$'\t'"${BASH_REMATCH[1]}"$'\t'"$current_ecosystem")
+              continue
+            fi
+
+            # --- GitHub Actions parser (existing, unchanged) ---
             if [[ "$line" =~ ^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+([^[:space:]@]+)@[^[:space:]]+(.*)$ ]]; then
               name="${BASH_REMATCH[2]}"
               rest="${BASH_REMATCH[3]}"
 
-              # Skip local and docker actions
               [[ "$name" == ./* ]] && continue
               [[ "$name" == docker://* ]] && continue
 
               version=""
-              # Capture version from trailing comment: " # v1.2.3" or " # 1.2.3"
-              # The `v?` is OUTSIDE the capture group so we strip the leading v.
               if [[ "$rest" =~ \#[[:space:]]*v?([0-9][0-9.]*) ]]; then
                 version="${BASH_REMATCH[1]}"
               fi
@@ -138,8 +182,7 @@ jobs:
               continue
             fi
 
-            # --- Python deps parser ---
-            # Skip Python-style comment lines first
+            # --- Python deps parser (existing, unchanged) ---
             [[ "$line" =~ ^\+[[:space:]]*# ]] && continue
 
             if [[ "$line" =~ ^\+[[:space:]]*([a-zA-Z][a-zA-Z0-9_.\-]*)[[:space:]]*(==|\>=|\<=|~=|\!=|\>|\<)[[:space:]]*([0-9][0-9a-zA-Z.\-]*) ]]; then
@@ -158,6 +201,129 @@ jobs:
           fi
           )
           # --- END inline:scripts/extract-deps.sh ---
+
+          # --- BEGIN inline:scripts/diff-touches-lockfile.sh ---
+          diff_touches_lockfile() (
+          # diff-touches-lockfile.sh — detect dependency-relevant file edits in a
+          # unified diff (lockfiles, manifests, and GitHub Actions workflow YAMLs).
+          # Used by dependency-cooldown.yml's fail-loud guard to refuse green gates
+          # when the dep extractor returns zero rows on a diff that touches files
+          # which *should* have produced deps.
+          #
+          # Input:  unified diff on stdin
+          # Output: matched paths (b/ side of diff --git headers), sorted & deduped,
+          #         one per line; empty stdout if nothing matched.
+          # Exit:   0 if any dependency-relevant path touched, 1 if none, 2 on malformed input.
+
+          set -euo pipefail
+
+          input=$(cat)
+
+          if [ -z "$input" ]; then
+            exit 1
+          fi
+
+          if ! grep -qE '^diff --git ' <<< "$input"; then
+            echo "diff-touches-lockfile.sh: input is not a unified diff" >&2
+            exit 2
+          fi
+
+          matches=()
+          while IFS= read -r path; do
+            base="${path##*/}"
+            # Add new lockfile/manifest filename patterns to this case list as needed.
+            case "$base" in
+              *.lock|requirements*.txt|pyproject.toml|Pipfile|go.mod|Cargo.toml \
+                |package.json|package-lock.json|yarn.lock|pnpm-lock.yaml)
+                matches+=("$path")
+                continue
+                ;;
+            esac
+            # GitHub Actions workflow YAMLs are dependency declarations (uses: lines).
+            # Matched by full path, not basename, to avoid over-triggering on any *.yml.
+            case "$path" in
+              .github/workflows/*.yml|.github/workflows/*.yaml)
+                matches+=("$path")
+                ;;
+            esac
+          done < <(grep -oE '^diff --git a/[^ ]+ b/[^ ]+' <<< "$input" \
+                   | sed -E 's|^diff --git a/[^ ]+ b/||')
+
+          if [ ${#matches[@]} -eq 0 ]; then
+            exit 1
+          fi
+
+          printf '%s\n' "${matches[@]}" | sort -u
+          )
+          # --- END inline:scripts/diff-touches-lockfile.sh ---
+
+          # --- BEGIN inline:scripts/pr-body-to-deps.sh ---
+          pr_body_to_deps() (
+          # pr-body-to-deps.sh — extract Dependabot dep bumps from a PR body, emit TSV.
+          # Defense-in-depth fallback for when extract-deps.sh returns zero rows.
+          #
+          # Arg:    <ecosystem>  — 'pypi' or 'actions'; emitted verbatim in TSV col 3.
+          # Input:  PR body text on stdin.
+          # Output: <name>\t<version>\t<ecosystem>  sorted, deduplicated.
+          # Exit:   0 on success (including zero rows), 2 if ecosystem arg invalid.
+
+          set -euo pipefail
+
+          ecosystem="${1:-}"
+          case "$ecosystem" in
+            pypi|actions) ;;
+            *) echo "pr-body-to-deps.sh: ecosystem must be 'pypi' or 'actions'" >&2; exit 2 ;;
+          esac
+
+          input=$(cat)
+          [ -z "$input" ] && exit 0
+
+          seen=$'\n'
+          rows=()
+          VER='[0-9][0-9A-Za-z.+!\-]*'
+
+          # Regex patterns stored in variables — bash 3.2 on macOS cannot parse certain
+          # metacharacters (like `)`) inline within [[ =~ ]] conditionals.
+          # Pattern A — Bumps [name](url) from X to Y. The URL is consumed explicitly
+          # via \([^)]+\) rather than a character class, because earlier attempts using
+          # [^f]* silently dropped any bump whose URL contained `f` (e.g. `ruff`).
+          re_a="^Bumps[[:space:]]\[([^]]+)\]\([^)]+\)[[:space:]]+from[[:space:]]+${VER}[[:space:]]+to[[:space:]]+(${VER})"
+          # Pattern B — Updates `name` from X to Y (anchored at column 0 to avoid
+          # matching blockquote/release-notes content which is typically indented)
+          re_b="^Updates[[:space:]]\`([^\`]+)\`[[:space:]]+from[[:space:]]+${VER}[[:space:]]+to[[:space:]]+(${VER})"
+          # Pattern C — | [name](url) | `fromVer` | `toVer` |
+          re_c="^\|[[:space:]]+\[([^]]+)\]\([^)]+\)[[:space:]]+\|[[:space:]]+\`${VER}\`[[:space:]]+\|[[:space:]]+\`(${VER})\`[[:space:]]+\|"
+
+          while IFS= read -r line; do
+            line="${line%$'\r'}"
+            name=""
+            version=""
+
+            if [[ "$line" =~ $re_a ]]; then
+              name="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+            elif [[ "$line" =~ $re_b ]]; then
+              name="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+            elif [[ "$line" =~ $re_c ]]; then
+              name="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+            fi
+
+            [ -z "$name" ] && continue
+
+            # Strip trailing sentence punctuation from the version (e.g. "2.13.0."
+            # in Pattern A's "Bumps ... from X to Y." lines).
+            version="${version%.}"
+
+            key="$ecosystem:$name"
+            case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+            seen="${seen}${key}"$'\n'
+            rows+=("$name"$'\t'"$version"$'\t'"$ecosystem")
+          done <<< "$input"
+
+          if [ ${#rows[@]} -gt 0 ]; then
+            printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1
+          fi
+          )
+          # --- END inline:scripts/pr-body-to-deps.sh ---
 
           # --- BEGIN inline:scripts/check-release-age.sh ---
           check_release_age() (
@@ -326,6 +492,44 @@ jobs:
           # --- Extract dependencies via standalone script (Task 8) ---
           DEPS_TSV=$(echo "$DIFF" | extract_deps)
 
+          # --- Layer 2: PR-body fallback (defense in depth for issue #52) ---
+          TOUCHED_PATHS=""
+          if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
+            TOUCHED_PATHS=$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)
+            # Keep the pypi regex below in sync with filename_to_ecosystem() in
+            # scripts/extract-deps.sh — ONLY lockfiles the parser actually handles
+            # should route to the pypi fallback. Cargo.lock, yarn.lock, etc. are
+            # emitted by diff_touches_lockfile (for guard detection) but must NOT
+            # route here — they fall through and trip the fail-loud guard instead.
+            # Mixed-touch policy: if a PR touches BOTH a pypi lockfile AND an actions
+            # workflow YAML, pypi wins. The fallback parser handles one ecosystem per
+            # PR; actions bumps (if any) fall through to the guard and will refuse green.
+            ECO_HINT=""
+            if echo "$TOUCHED_PATHS" | grep -qE '((^|/)(uv|poetry)\.lock$|requirements[^/]*\.txt$|pyproject\.toml$|Pipfile$)'; then
+              ECO_HINT="pypi"
+            elif echo "$TOUCHED_PATHS" | grep -qE '\.github/workflows/.*\.ya?ml$'; then
+              ECO_HINT="actions"
+            fi
+            if [ -n "$ECO_HINT" ]; then
+              DEPS_TSV=$(echo "$PR_BODY" | pr_body_to_deps "$ECO_HINT" 2>/dev/null || true)
+              [ -n "$(echo "$DEPS_TSV" | sed '/^$/d')" ] && \
+                echo "Recovered $(echo "$DEPS_TSV" | wc -l | tr -d ' ') dep(s) via PR-body fallback (${ECO_HINT})"
+            fi
+          fi
+
+          # --- Layer 3: Fail-loud guard (fix for issue #52) ---
+          GUARD_TRIGGERED=false
+          if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
+            # Defense-in-depth: Layer 2 always sets TOUCHED_PATHS when it runs, but the
+            # ${:-} default guards against future refactors that might skip Layer 2.
+            TOUCHED_PATHS="${TOUCHED_PATHS:-$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)}"
+            if [ -n "$TOUCHED_PATHS" ]; then
+              GUARD_TRIGGERED=true
+              TOUCHED_LIST=$(echo "$TOUCHED_PATHS" | paste -sd, -)
+              EXTRACTION_WARNING="⚠️ Parser could not extract dependencies from this diff (touched: ${TOUCHED_LIST}). Manual review required before merge."
+            fi
+          fi
+
           # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
           # so the existing advisory-scan loops below can consume them unchanged.
           ACTIONS=""
@@ -374,9 +578,12 @@ jobs:
             | grep -vE '^(\./|docker://)' \
             | sort -u | wc -l | tr -d ' ')
           EXTRACTED_ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | wc -l | tr -d ' ')
-          EXTRACTION_WARNING=""
-          if [ "$EXPECTED_ACTIONS" != "$EXTRACTED_ACTIONS" ]; then
-            EXTRACTION_WARNING="⚠️ Extraction mismatch: diff contains ${EXPECTED_ACTIONS} unique action(s), extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
+          # Do not overwrite a guard-set EXTRACTION_WARNING.
+          if [ -z "${EXTRACTION_WARNING:-}" ]; then
+            EXTRACTION_WARNING=""
+            if [ "$EXPECTED_ACTIONS" != "$EXTRACTED_ACTIONS" ]; then
+              EXTRACTION_WARNING="⚠️ Extraction mismatch: diff contains ${EXPECTED_ACTIONS} unique action(s), extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
+            fi
           fi
 
           # --- Check release age via standalone script (Task 9 — phase 2) ---
@@ -678,7 +885,20 @@ jobs:
           reconcile_label "security-review-needed" "$_needs_security" "$LABEL_COLOR_security_review_needed" "$LABEL_DESC_security_review_needed"
           reconcile_label "cooldown-pending"       "$_needs_cooldown" "$LABEL_COLOR_cooldown_pending"       "$LABEL_DESC_cooldown_pending"
 
-          if [ "$TOTAL" -gt 0 ]; then
+          # Guard-triggered runs must not compose a clean-scan narrative — the
+          # gate state machine below flips status to `error`, and the comment
+          # needs to agree (rather than claim "No known exploits" + auto-merge
+          # enabled on a run we refused to scan). The EXTRACTION_WARNING_SECTION
+          # prepended later (~line 960) still carries the detailed path list.
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            RESULTS_HEADER="Dependency extraction failed — manual review required."
+            TABLE_HDR="| Source | Vulnerabilities |"
+            TABLE_SEP="|--------|----------------|"
+            ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
+            ROW2="| OSV.dev | (not scanned) |"
+            RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
+            RESULTS_FOOTER="> Auto-merge not enabled — parser could not determine target versions from diff or PR body."
+          elif [ "$TOTAL" -gt 0 ]; then
             RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
             TABLE_HDR="| ID | Severity | Summary | Source |"
             TABLE_SEP="|----|----------|---------|--------|"
@@ -831,7 +1051,14 @@ jobs:
           fi
 
           # --- Gate state machine (Task 11 — combines advisory + cooldown verdicts) ---
-          if [ "$TOTAL" -gt 0 ]; then
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            # Fail-loud guard: parser could not extract deps from a lockfile-touching
+            # diff, and the PR-body fallback also produced nothing. Refuse to issue
+            # a green gate — manual review required (fix for issue #52).
+            GATE_STATE="error"
+            STATUS_DESC="Could not extract dependencies from diff. Manual review required."
+            AUTO_MERGE_OK=false
+          elif [ "$TOTAL" -gt 0 ]; then
             # Advisory failure wins — strictest signal (existing v2.0.1 semantic: gate=success with "review needed")
             GATE_STATE="success"
             STATUS_DESC="${TOTAL} advisory/ies found (version-filtered). Manual review required."

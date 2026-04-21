@@ -1,0 +1,11 @@
+diff --git a/go.mod b/go.mod
+index 3333333..4444444 100644
+--- a/go.mod
++++ b/go.mod
+@@ -5,7 +5,7 @@ go 1.22
+
+ require (
+-	github.com/spf13/cobra v1.8.0
++	github.com/spf13/cobra v1.8.1
+ 	github.com/stretchr/testify v1.9.0
+ )

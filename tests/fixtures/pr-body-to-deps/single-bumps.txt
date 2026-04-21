@@ -1,0 +1,1 @@
+Bumps [ruff](https://github.com/astral-sh/ruff) from 0.15.9 to 0.15.10.

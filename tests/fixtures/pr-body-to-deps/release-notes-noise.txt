@@ -1,0 +1,9 @@
+Bumps [pydantic](https://github.com/pydantic/pydantic) from 2.12.5 to 2.13.0.
+
+<details>
+<summary>Release notes</summary>
+<blockquote>
+<p>Sourced from pydantic's releases.</p>
+<p>Updates `jiter` from 0.13.0 to 0.14.0 for musl Linux fix.</p>
+</blockquote>
+</details>
