@@ -202,6 +202,117 @@ jobs:
           )
           # --- END inline:scripts/extract-deps.sh ---
 
+          # --- BEGIN inline:scripts/diff-touches-lockfile.sh ---
+          diff_touches_lockfile() (
+          # diff-touches-lockfile.sh — detect dependency lockfile/manifest edits in a
+          # unified diff. Used by dependency-cooldown.yml's fail-loud guard to refuse
+          # green gates when the dep extractor returns zero rows on a lockfile bump.
+          #
+          # Input:  unified diff on stdin
+          # Output: matched paths (b/ side of diff --git headers), sorted & deduped,
+          #         one per line; empty stdout if nothing matched.
+          # Exit:   0 if any lockfile/manifest touched, 1 if none, 2 on malformed input.
+
+          set -euo pipefail
+
+          input=$(cat)
+
+          if [ -z "$input" ]; then
+            exit 1
+          fi
+
+          if ! grep -qE '^diff --git ' <<< "$input"; then
+            echo "diff-touches-lockfile.sh: input is not a unified diff" >&2
+            exit 2
+          fi
+
+          matches=()
+          while IFS= read -r path; do
+            base="${path##*/}"
+            # Add new lockfile/manifest filename patterns to this case list as needed.
+            case "$base" in
+              *.lock|requirements*.txt|pyproject.toml|Pipfile|go.mod|Cargo.toml \
+                |package.json|package-lock.json|yarn.lock|pnpm-lock.yaml)
+                matches+=("$path")
+                ;;
+            esac
+          done < <(grep -oE '^diff --git a/[^ ]+ b/[^ ]+' <<< "$input" \
+                   | sed -E 's|^diff --git a/[^ ]+ b/||')
+
+          if [ ${#matches[@]} -eq 0 ]; then
+            exit 1
+          fi
+
+          printf '%s\n' "${matches[@]}" | sort -u
+          )
+          # --- END inline:scripts/diff-touches-lockfile.sh ---
+
+          # --- BEGIN inline:scripts/pr-body-to-deps.sh ---
+          pr_body_to_deps() (
+          # pr-body-to-deps.sh — extract Dependabot dep bumps from a PR body, emit TSV.
+          # Defense-in-depth fallback for when extract-deps.sh returns zero rows.
+          #
+          # Arg:    <ecosystem>  — 'pypi' or 'actions'; emitted verbatim in TSV col 3.
+          # Input:  PR body text on stdin.
+          # Output: <name>\t<version>\t<ecosystem>  sorted, deduplicated.
+          # Exit:   0 on success (including zero rows), 2 if ecosystem arg invalid.
+
+          set -euo pipefail
+
+          ecosystem="${1:-}"
+          case "$ecosystem" in
+            pypi|actions) ;;
+            *) echo "pr-body-to-deps.sh: ecosystem must be 'pypi' or 'actions'" >&2; exit 2 ;;
+          esac
+
+          input=$(cat)
+          [ -z "$input" ] && exit 0
+
+          seen=$'\n'
+          rows=()
+          VER='[0-9][0-9A-Za-z.+!\-]*'
+
+          # Regex patterns stored in variables — bash 3.2 on macOS cannot parse certain
+          # metacharacters (like `)`) inline within [[ =~ ]] conditionals.
+          # Pattern A — Bumps [name](url) ... from X to Y
+          re_a="^Bumps[[:space:]]\[([^]]+)\][^f]*from[[:space:]]+${VER}[[:space:]]+to[[:space:]]+(${VER})"
+          # Pattern B — Updates `name` from X to Y (anchored at column 0 to avoid
+          # matching blockquote/release-notes content which is typically indented)
+          re_b="^Updates[[:space:]]\`([^\`]+)\`[[:space:]]+from[[:space:]]+${VER}[[:space:]]+to[[:space:]]+(${VER})"
+          # Pattern C — | [name](url) | `fromVer` | `toVer` |
+          re_c="^\|[[:space:]]+\[([^]]+)\]\([^)]+\)[[:space:]]+\|[[:space:]]+\`${VER}\`[[:space:]]+\|[[:space:]]+\`(${VER})\`[[:space:]]+\|"
+
+          while IFS= read -r line; do
+            line="${line%$'\r'}"
+            name=""
+            version=""
+
+            if [[ "$line" =~ $re_a ]]; then
+              name="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+            elif [[ "$line" =~ $re_b ]]; then
+              name="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+            elif [[ "$line" =~ $re_c ]]; then
+              name="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+            fi
+
+            [ -z "$name" ] && continue
+
+            # Strip trailing sentence punctuation from the version (e.g. "2.13.0."
+            # in Pattern A's "Bumps ... from X to Y." lines).
+            version="${version%.}"
+
+            key="$ecosystem:$name"
+            case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+            seen="${seen}${key}"$'\n'
+            rows+=("$name"$'\t'"$version"$'\t'"$ecosystem")
+          done <<< "$input"
+
+          if [ ${#rows[@]} -gt 0 ]; then
+            printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1
+          fi
+          )
+          # --- END inline:scripts/pr-body-to-deps.sh ---
+
           # --- BEGIN inline:scripts/check-release-age.sh ---
           check_release_age() (
           # check-release-age.sh — read dep TSV on stdin, emit verdict TSV on stdout
@@ -369,6 +480,44 @@ jobs:
           # --- Extract dependencies via standalone script (Task 8) ---
           DEPS_TSV=$(echo "$DIFF" | extract_deps)
 
+          # --- Layer 2: PR-body fallback (defense in depth for issue #52) ---
+          TOUCHED_PATHS=""
+          if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
+            TOUCHED_PATHS=$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)
+            # Keep the pypi regex below in sync with filename_to_ecosystem() in
+            # scripts/extract-deps.sh — ONLY lockfiles the parser actually handles
+            # should route to the pypi fallback. Cargo.lock, yarn.lock, etc. are
+            # emitted by diff_touches_lockfile (for guard detection) but must NOT
+            # route here — they fall through and trip the fail-loud guard instead.
+            # Mixed-touch policy: if a PR touches BOTH a pypi lockfile AND an actions
+            # workflow YAML, pypi wins. The fallback parser handles one ecosystem per
+            # PR; actions bumps (if any) fall through to the guard and will refuse green.
+            ECO_HINT=""
+            if echo "$TOUCHED_PATHS" | grep -qE '((^|/)(uv|poetry)\.lock$|requirements[^/]*\.txt$|pyproject\.toml$|Pipfile$)'; then
+              ECO_HINT="pypi"
+            elif echo "$TOUCHED_PATHS" | grep -qE '\.github/workflows/.*\.ya?ml$'; then
+              ECO_HINT="actions"
+            fi
+            if [ -n "$ECO_HINT" ]; then
+              DEPS_TSV=$(echo "$PR_BODY" | pr_body_to_deps "$ECO_HINT" 2>/dev/null || true)
+              [ -n "$(echo "$DEPS_TSV" | sed '/^$/d')" ] && \
+                echo "Recovered $(echo "$DEPS_TSV" | wc -l | tr -d ' ') dep(s) via PR-body fallback (${ECO_HINT})"
+            fi
+          fi
+
+          # --- Layer 3: Fail-loud guard (fix for issue #52) ---
+          GUARD_TRIGGERED=false
+          if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
+            # Defense-in-depth: Layer 2 always sets TOUCHED_PATHS when it runs, but the
+            # ${:-} default guards against future refactors that might skip Layer 2.
+            TOUCHED_PATHS="${TOUCHED_PATHS:-$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)}"
+            if [ -n "$TOUCHED_PATHS" ]; then
+              GUARD_TRIGGERED=true
+              TOUCHED_LIST=$(echo "$TOUCHED_PATHS" | paste -sd, -)
+              EXTRACTION_WARNING="⚠️ Parser could not extract dependencies from this diff (touched: ${TOUCHED_LIST}). Manual review required before merge."
+            fi
+          fi
+
           # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
           # so the existing advisory-scan loops below can consume them unchanged.
           ACTIONS=""
@@ -417,9 +566,12 @@ jobs:
             | grep -vE '^(\./|docker://)' \
             | sort -u | wc -l | tr -d ' ')
           EXTRACTED_ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | wc -l | tr -d ' ')
-          EXTRACTION_WARNING=""
-          if [ "$EXPECTED_ACTIONS" != "$EXTRACTED_ACTIONS" ]; then
-            EXTRACTION_WARNING="⚠️ Extraction mismatch: diff contains ${EXPECTED_ACTIONS} unique action(s), extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
+          # Do not overwrite a guard-set EXTRACTION_WARNING.
+          if [ -z "${EXTRACTION_WARNING:-}" ]; then
+            EXTRACTION_WARNING=""
+            if [ "$EXPECTED_ACTIONS" != "$EXTRACTED_ACTIONS" ]; then
+              EXTRACTION_WARNING="⚠️ Extraction mismatch: diff contains ${EXPECTED_ACTIONS} unique action(s), extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
+            fi
           fi
 
           # --- Check release age via standalone script (Task 9 — phase 2) ---
@@ -874,7 +1026,14 @@ jobs:
           fi
 
           # --- Gate state machine (Task 11 — combines advisory + cooldown verdicts) ---
-          if [ "$TOTAL" -gt 0 ]; then
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            # Fail-loud guard: parser could not extract deps from a lockfile-touching
+            # diff, and the PR-body fallback also produced nothing. Refuse to issue
+            # a green gate — manual review required (fix for issue #52).
+            GATE_STATE="error"
+            STATUS_DESC="Could not extract dependencies from diff. Manual review required."
+            AUTO_MERGE_OK=false
+          elif [ "$TOTAL" -gt 0 ]; then
             # Advisory failure wins — strictest signal (existing v2.0.1 semantic: gate=success with "review needed")
             GATE_STATE="success"
             STATUS_DESC="${TOTAL} advisory/ies found (version-filtered). Manual review required."
