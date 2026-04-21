@@ -291,6 +291,12 @@ JSON
   [[ "$output" =~ "| \`package.json\` | \`.version\` | \`0.0.0\` -> \`1.2.3\` | updated |" ]]
 }
 
+@test "summary: '[]' iterator renders verbatim in step-summary path column" {
+  run_bumper "valid/path-expr-iterate-all.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "| \`multi-pkg-server.json\` | \`.packages[].version\` |" ]]
+}
+
 # === Multi-entry interleaving — the 'partial progress' guarantee ===
 
 @test "interleaving: one valid entry + one invalid path_expr — valid still applied" {
@@ -304,5 +310,88 @@ JSON
   [ "$(jq -r '.packages[0].version' server.json)" = "0.0.0" ]
   # Both rows appear in the summary
   [[ "$output" =~ "| \`package.json\` | \`.version\` |" ]]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+# === Acceptance: bracket-quoted string keys (#45) ===
+
+@test "path_expr: quoted-key '[\"@scope/pkg\"]' bumps scoped dependency" {
+  run_bumper "valid/path-expr-quoted-key-scoped.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.dependencies["@scope/pkg"].version' package-scoped.json)" = "1.2.3" ]
+  # Confirm the other dependency was NOT touched
+  [ "$(jq -r '.dependencies["eslint-config-airbnb"].version' package-scoped.json)" = "0.0.0" ]
+  # Confirm the top-level .version was NOT touched
+  [ "$(jq -r '.version' package-scoped.json)" = "1.0.0" ]
+}
+
+# === Acceptance: [] iterator (#46) ===
+
+@test "path_expr: '[]' iterator updates every array element" {
+  run_bumper "valid/path-expr-iterate-all.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  # All three .packages[].version entries are updated
+  [ "$(jq -r '.packages[0].version' multi-pkg-server.json)" = "1.2.3" ]
+  [ "$(jq -r '.packages[1].version' multi-pkg-server.json)" = "1.2.3" ]
+  [ "$(jq -r '.packages[2].version' multi-pkg-server.json)" = "1.2.3" ]
+  # Top-level .version is NOT touched
+  [ "$(jq -r '.version' multi-pkg-server.json)" = "0.0.0" ]
+}
+
+@test "path_expr: quoted-key with kebab-case hyphens is bumped" {
+  run_bumper "valid/path-expr-quoted-key-kebab.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.dependencies["eslint-config-airbnb"].version' package-scoped.json)" = "1.2.3" ]
+  # Sibling dependency was NOT touched
+  [ "$(jq -r '.dependencies["@scope/pkg"].version' package-scoped.json)" = "0.0.0" ]
+}
+
+# === Hardening: rejection of malformed new forms ===
+
+@test "rejection: empty quoted key '[\"\"]' is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/empty-quoted-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: whitespace in quoted key is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/whitespace-in-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: injection char ';' in quoted key is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/injection-in-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: single-quoted key is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/single-quoted-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: unclosed quoted key is rejected" {
+  ORIG=$(cat package.json)
+  run_bumper "invalid-path-expr/unclosed-quoted-key.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat package.json)" = "$ORIG" ]
+  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+@test "rejection: spaced wildcard '[ ]' is rejected" {
+  ORIG=$(cat server.json)
+  run_bumper "invalid-path-expr/whitespace-wildcard.json" "1.2.3"
+  [ "$status" -eq 2 ]
+  [ "$(cat server.json)" = "$ORIG" ]
   [[ "$output" =~ "skipped (invalid path_expr)" ]]
 }

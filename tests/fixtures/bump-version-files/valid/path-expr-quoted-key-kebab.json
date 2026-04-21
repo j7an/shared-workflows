@@ -1,0 +1,1 @@
+{ "files": [ { "path": "package-scoped.json", "path_expr": ".dependencies[\"eslint-config-airbnb\"].version" } ] }
