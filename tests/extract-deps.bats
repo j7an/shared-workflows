@@ -18,14 +18,26 @@
   [ -z "$output" ]
 }
 
-@test "large valid diff extracts Python deps without false malformed-input failure (regression for #50)" {
-  run bash scripts/extract-deps.sh < tests/fixtures/extract-deps/large-uv-lock.diff
+@test "large valid diff does not trip SIGPIPE under pipefail (regression for #50)" {
+  run bash scripts/extract-deps.sh < tests/fixtures/extract-deps/large-valid.diff
   [ "$status" -eq 0 ]
-  diff <(printf '%s\n' "$output") tests/fixtures/extract-deps/large-uv-lock.tsv
+  diff <(printf '%s\n' "$output") tests/fixtures/extract-deps/large-valid.tsv
 }
 
 @test "non-empty malformed input exits 2 with unified diff error" {
   run bash scripts/extract-deps.sh < tests/fixtures/extract-deps/not-a-diff.txt
   [ "$status" -eq 2 ]
   [ "$output" = "extract-deps.sh: input is not a unified diff" ]
+}
+
+@test "extracts 6 deps from uv.lock multi-package diff (issue #52)" {
+  run bash scripts/extract-deps.sh < tests/fixtures/extract-deps/uv-lock-multi.diff
+  [ "$status" -eq 0 ]
+  diff <(echo "$output") tests/fixtures/extract-deps/uv-lock-multi.tsv
+}
+
+@test "extracts 3 deps from poetry.lock diff (format-awareness beyond uv.lock)" {
+  run bash scripts/extract-deps.sh < tests/fixtures/extract-deps/poetry-lock.diff
+  [ "$status" -eq 0 ]
+  diff <(echo "$output") tests/fixtures/extract-deps/poetry-lock.tsv
 }

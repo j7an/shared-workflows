@@ -1,0 +1,6 @@
+mypy	1.20.1	pypi
+pydantic	2.13.0	pypi
+pydantic-core	2.46.0	pypi
+pytest	9.0.3	pypi
+respx	0.23.1	pypi
+ruff	0.15.10	pypi
