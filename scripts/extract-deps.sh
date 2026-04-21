@@ -28,8 +28,9 @@ if [ -z "$input" ]; then
 fi
 
 # Malformed input detection: if non-empty and has none of the unified-diff
-# markers, reject with exit 2.
-if ! printf '%s\n' "$input" | grep -qE '^(\+\+\+|---|@@|diff --git)'; then
+# markers, reject with exit 2. Use a here-string instead of a pipeline so
+# large valid diffs cannot trip SIGPIPE under `pipefail`.
+if ! grep -qE '^(\+\+\+|---|@@|diff --git)' <<< "$input"; then
   echo "extract-deps.sh: input is not a unified diff" >&2
   exit 2
 fi
