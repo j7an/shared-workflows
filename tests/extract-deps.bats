@@ -17,3 +17,15 @@
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+@test "large valid diff extracts Python deps without false malformed-input failure (regression for #50)" {
+  run bash scripts/extract-deps.sh < tests/fixtures/extract-deps/large-uv-lock.diff
+  [ "$status" -eq 0 ]
+  diff <(printf '%s\n' "$output") tests/fixtures/extract-deps/large-uv-lock.tsv
+}
+
+@test "non-empty malformed input exits 2 with unified diff error" {
+  run bash scripts/extract-deps.sh < tests/fixtures/extract-deps/not-a-diff.txt
+  [ "$status" -eq 2 ]
+  [ "$output" = "extract-deps.sh: input is not a unified diff" ]
+}
