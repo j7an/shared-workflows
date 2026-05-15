@@ -21,6 +21,13 @@
 
 set -euo pipefail
 
+# Manifest file path — the unique set of modified paths, consumed by
+# tag-release.yml's Git Data API tree builder. Overridable so parallel
+# test runs and concurrent script invocations don't clobber one
+# another through a shared /tmp file (the default preserves prior
+# behavior).
+BUMP_MODIFIED_FILE="${BUMP_MODIFIED_FILE:-/tmp/bump.modified}"
+
 # Strict allowlist: identifiers, integer indices, bracket-quoted string keys
 # (npm/composer style: kebab-case, @scope/pkg, dotted paths), and the []
 # iterator (applies-to-every). The jq [*] form is NOT valid jq grammar and
@@ -105,7 +112,7 @@ bump_entry() {
   fi
 
   write_value "$file_path" "$field" "$path_expr" "$version"
-  printf '%s\n' "$file_path" >> /tmp/bump.modified
+  printf '%s\n' "$file_path" >> "$BUMP_MODIFIED_FILE"
   printf '| `%s` | `%s` | `%s` -> `%s` | updated |\n' \
     "$file_path" "$disp" "$current" "$version"
   return 0
@@ -121,7 +128,7 @@ version="${2:-${VERSION:-}}"
 # Git Data API path to build POST /git/trees). Truncate-or-create at
 # start so the file is always a fresh, well-defined snapshot of THIS
 # invocation's modifications. De-dup happens at end of apply pass.
-: > /tmp/bump.modified
+: > "$BUMP_MODIFIED_FILE"
 
 if [ ! -f "$config" ]; then
   echo "No $config found, skipping version file bump"
@@ -168,8 +175,8 @@ done < <(jq -c '.files[]' "$config")
 # .version-bump.json has multiple entries against it (see test
 # `multi-entry: two path_expr entries against same file write both`).
 # sort -u keeps the contract that /tmp/bump.modified is a unique set.
-if [ -s /tmp/bump.modified ]; then
-  sort -u /tmp/bump.modified -o /tmp/bump.modified
+if [ -s "$BUMP_MODIFIED_FILE" ]; then
+  sort -u "$BUMP_MODIFIED_FILE" -o "$BUMP_MODIFIED_FILE"
 fi
 
 if [ "$changed" -eq 1 ]; then
