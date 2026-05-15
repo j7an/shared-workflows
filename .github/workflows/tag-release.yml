@@ -465,10 +465,14 @@ jobs:
                 -F force=false
 
               # Acceptance criterion #2 (spec §6): bump commit MUST verify.
+              # Note jq path: GET /git/commits/{sha} returns the raw Git commit
+              # object with `verification` at the TOP level. The higher-level
+              # /commits/{sha} endpoint (no `git/` prefix) wraps it as
+              # `.commit.verification` — do NOT confuse the two.
               VERIFIED=$(gh api "repos/${REPO}/git/commits/${NEW_COMMIT_SHA}" \
-                --jq '.commit.verification.verified')
+                --jq '.verification.verified')
               REASON=$(gh api "repos/${REPO}/git/commits/${NEW_COMMIT_SHA}" \
-                --jq '.commit.verification.reason')
+                --jq '.verification.reason')
               if [ "$VERIFIED" != "true" ]; then
                 echo "::error::Bump commit ${NEW_COMMIT_SHA} did not auto-sign (verified=${VERIFIED} reason=${REASON})"
                 echo "::error::This means the API rewrite is not satisfying the required_signatures rule — investigate before proceeding."
