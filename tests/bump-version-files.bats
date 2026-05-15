@@ -413,10 +413,11 @@ JSON
 @test "manifest: /tmp/bump.modified contains all unique modified paths in mixed run" {
   run_bumper "valid/mixed-old-and-new.json" "1.2.3"
   [ "$status" -eq 0 ]
-  # mixed-old-and-new.json bumps package.json (legacy field) AND server.json (path_expr)
+  # mixed-old-and-new.json bumps package.json (legacy field) AND server.json (path_expr).
+  # `< file` redirect makes the assertion fail loudly if the manifest is missing,
+  # rather than passing a stray empty string into the comparison.
   expected=$(printf 'package.json\nserver.json\n')
-  actual=$(sort /tmp/bump.modified)
-  [ "$actual" = "$expected" ]
+  [ "$(sort < /tmp/bump.modified)" = "$expected" ]
 }
 
 @test "manifest: /tmp/bump.modified is empty when no entries are updated (idempotent rerun)" {
@@ -432,12 +433,16 @@ JSON
   # Run 1: bump multi-entry-same-file (writes "server.json")
   run_bumper "valid/multi-entry-same-file.json" "1.2.3"
   [ "$status" -eq 0 ]
-  # Run 2: no-op (legacy-field already at 0.0.0, bump to same version - actually different)
-  # Use idempotent rerun: run legacy-field twice
+  # Run 2: idempotent rerun of legacy-field. First bump 0.0.0 -> 9.9.9 succeeds;
+  # second bump 9.9.9 -> 9.9.9 is a no-op (exit 2). The manifest after run 2
+  # must still be truncated (empty) AND must NOT carry server.json across.
   cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" .version-bump.json
   bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 9.9.9  # First bump
   run bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 9.9.9  # Idempotent rerun
   [ "$status" -eq 2 ]
-  # /tmp/bump.modified must NOT contain server.json from the earlier multi-entry run
+  # File-existence guard prevents this from passing vacuously when the
+  # script doesn't yet create the manifest (red phase): grep on a missing
+  # file returns 1, and `! grep` would silently succeed without it.
+  [ -f /tmp/bump.modified ]
   ! grep -q server.json /tmp/bump.modified
 }
