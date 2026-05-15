@@ -395,3 +395,49 @@ JSON
   [ "$(cat server.json)" = "$ORIG" ]
   [[ "$output" =~ "skipped (invalid path_expr)" ]]
 }
+
+# === Manifest emission: /tmp/bump.modified contract (#issue-cross-agent-12) ===
+# Manifest must be a UNIQUE PATH SET — see spec §3.1 step 2. The Git Data API
+# rewrite of tag-release.yml consumes this file to build POST /git/trees;
+# duplicates would produce duplicate tree[] entries with undefined behavior.
+
+@test "manifest: /tmp/bump.modified is unique path set after multi-entry-same-file run" {
+  run_bumper "valid/multi-entry-same-file.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/bump.modified ]
+  # Exactly one line: server.json (despite TWO entries targeting it)
+  [ "$(wc -l < /tmp/bump.modified)" -eq 1 ]
+  [ "$(cat /tmp/bump.modified)" = "server.json" ]
+}
+
+@test "manifest: /tmp/bump.modified contains all unique modified paths in mixed run" {
+  run_bumper "valid/mixed-old-and-new.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  # mixed-old-and-new.json bumps package.json (legacy field) AND server.json (path_expr)
+  expected=$(printf 'package.json\nserver.json\n')
+  actual=$(sort /tmp/bump.modified)
+  [ "$actual" = "$expected" ]
+}
+
+@test "manifest: /tmp/bump.modified is empty when no entries are updated (idempotent rerun)" {
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" .version-bump.json
+  bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 1.2.3  # First run: bumps
+  run bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 1.2.3  # Second run: no-op
+  [ "$status" -eq 2 ]
+  [ -f /tmp/bump.modified ]
+  [ ! -s /tmp/bump.modified ]  # File exists but is empty
+}
+
+@test "manifest: /tmp/bump.modified is truncated on each invocation (no cross-run pollution)" {
+  # Run 1: bump multi-entry-same-file (writes "server.json")
+  run_bumper "valid/multi-entry-same-file.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  # Run 2: no-op (legacy-field already at 0.0.0, bump to same version - actually different)
+  # Use idempotent rerun: run legacy-field twice
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" .version-bump.json
+  bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 9.9.9  # First bump
+  run bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 9.9.9  # Idempotent rerun
+  [ "$status" -eq 2 ]
+  # /tmp/bump.modified must NOT contain server.json from the earlier multi-entry run
+  ! grep -q server.json /tmp/bump.modified
+}
