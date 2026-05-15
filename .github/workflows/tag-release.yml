@@ -220,6 +220,7 @@ jobs:
         env:
           NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           PREFIX="${TAG_PREFIX:-v}"
           VERSION="${NEXT_TAG#"${PREFIX}"}"
@@ -414,21 +415,82 @@ jobs:
 
           case "$BUMP_EXIT" in
             0)
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              for entry in $(jq -r '.files[] | .path' .version-bump.json); do
-                git add "$entry"
-              done
-              git commit -m "chore(release): bump version files to $VERSION"
-              git push origin HEAD:main
-              RESULT="Committed and pushed version file updates"
+              # --- Git Data API rewrite (spec §3.1) ---
+              # BASE_SHA is the workflow's runtime view of the repo HEAD —
+              # the SHA actions/checkout checked out. Reading refs/heads/main
+              # fresh here would race with concurrent pushes (spec §2).
+              REPO="${GITHUB_REPOSITORY}"
+              BASE_SHA="${GITHUB_SHA}"
+
+              # Step 4 (spec): read parent tree SHA from BASE_SHA's commit.
+              PARENT_TREE_SHA=$(gh api "repos/${REPO}/git/commits/${BASE_SHA}" --jq '.tree.sha')
+
+              # Steps 3+5: create blobs for each modified file, accumulate
+              # tree[] entries, then create the tree.
+              TREE_ENTRIES='[]'
+              while IFS= read -r modified_path; do
+                [ -z "$modified_path" ] && continue
+                blob_content_b64=$(base64 < "$modified_path" | tr -d '\n')
+                blob_sha=$(jq -nc \
+                  --arg c "$blob_content_b64" \
+                  '{content: $c, encoding: "base64"}' \
+                  | gh api -X POST "repos/${REPO}/git/blobs" --input - --jq '.sha')
+                TREE_ENTRIES=$(jq --arg p "$modified_path" --arg s "$blob_sha" \
+                  '. + [{path: $p, mode: "100644", type: "blob", sha: $s}]' \
+                  <<<"$TREE_ENTRIES")
+              done < /tmp/bump.modified
+
+              TREE_SHA=$(jq -nc \
+                --arg base "$PARENT_TREE_SHA" \
+                --argjson entries "$TREE_ENTRIES" \
+                '{base_tree: $base, tree: $entries}' \
+                | gh api -X POST "repos/${REPO}/git/trees" --input - --jq '.sha')
+
+              # Step 6: create commit. NO author/committer fields — GitHub
+              # auto-signs with the bot/web-flow key only when the request is
+              # authenticated as the App AND the body has no identity overrides
+              # (spec §3.3).
+              NEW_COMMIT_SHA=$(jq -nc \
+                --arg msg "chore(release): bump version files to $VERSION" \
+                --arg tree "$TREE_SHA" \
+                --arg parent "$BASE_SHA" \
+                '{message: $msg, tree: $tree, parents: [$parent]}' \
+                | gh api -X POST "repos/${REPO}/git/commits" --input - --jq '.sha')
+
+              # Step 7: fast-forward main to the new commit. force=false (default).
+              # 422 = non-fast-forward = main moved past BASE_SHA after checkout
+              # → fail the run loudly (spec §3.1 step 7, race-detection backstop).
+              gh api -X PATCH "repos/${REPO}/git/refs/heads/main" \
+                -f sha="$NEW_COMMIT_SHA" \
+                -F force=false
+
+              # Acceptance criterion #2 (spec §6): bump commit MUST verify.
+              VERIFIED=$(gh api "repos/${REPO}/git/commits/${NEW_COMMIT_SHA}" \
+                --jq '.commit.verification.verified')
+              REASON=$(gh api "repos/${REPO}/git/commits/${NEW_COMMIT_SHA}" \
+                --jq '.commit.verification.reason')
+              if [ "$VERIFIED" != "true" ]; then
+                echo "::error::Bump commit ${NEW_COMMIT_SHA} did not auto-sign (verified=${VERIFIED} reason=${REASON})"
+                echo "::error::This means the API rewrite is not satisfying the required_signatures rule — investigate before proceeding."
+                exit 1
+              fi
+
+              # Export TAG_TARGET_SHA for the Create-and-push-tag step.
+              echo "TAG_TARGET_SHA=${NEW_COMMIT_SHA}" >> "$GITHUB_ENV"
+              RESULT="Committed and pushed version file updates via Git Data API (sha: ${NEW_COMMIT_SHA}, verified: true, reason: ${REASON})"
               ;;
             1)
               echo "::error::Bump version files step failed due to .version-bump.json error"
               exit 1
               ;;
             2)
-              RESULT="No changes — config absent, all up to date, or all entries skipped"
+              # No bump created — set TAG_TARGET_SHA from main HEAD via API
+              # (spec §3.2 conditional). Covers fresh-no-bump-needed AND
+              # rerun-after-partial-failure. NEVER read local checkout state.
+              REPO="${GITHUB_REPOSITORY}"
+              MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+              echo "TAG_TARGET_SHA=${MAIN_SHA}" >> "$GITHUB_ENV"
+              RESULT="No changes — config absent, all up to date, or all entries skipped (tag will point at current main: ${MAIN_SHA})"
               ;;
             *)
               echo "::error::bump-version-files.sh exited with unexpected code $BUMP_EXIT"
