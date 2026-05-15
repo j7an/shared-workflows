@@ -60,10 +60,39 @@ extract_step_body() {
   if printf '%s' "$body" | grep -qF 'git push origin HEAD:main'; then
     skip "Phase A baseline — bump step still uses git push; check applies after Phase B"
   fi
-  printf '%s' "$body" | grep -qF 'GITHUB_SHA' || {
-    echo "VIOLATION: rewritten Bump step does not reference GITHUB_SHA (spec §2 / §3.1 step 1)"
+  # Assert the full load-bearing chain, not merely that GITHUB_SHA appears
+  # somewhere — a stray `echo "$GITHUB_SHA"` must NOT satisfy this test:
+  #   GITHUB_SHA  ->  BASE_SHA  ->  jq --arg parent  ->  commit payload
+  printf '%s' "$body" | grep -qF 'BASE_SHA="${GITHUB_SHA}"' || {
+    echo "VIOLATION: bump step does not bind BASE_SHA to GITHUB_SHA (spec §2 / §3.1 step 1)"
     false
   }
+  # `--` ends grep option parsing so the leading `--arg` is treated as a
+  # pattern, not a flag.
+  printf '%s' "$body" | grep -qF -- '--arg parent "$BASE_SHA"' || {
+    echo "VIOLATION: commit-create jq call does not wire its parent arg from BASE_SHA"
+    false
+  }
+  printf '%s' "$body" | grep -qF 'parents: [$parent]' || {
+    echo "VIOLATION: commit payload does not build parents from the \$parent arg"
+    false
+  }
+}
+
+@test "invariant: 'Bump version files' step never reads a live ref for the tag target" {
+  body=$(extract_step_body "Bump version files")
+  [ -n "$body" ]
+  # Spec §2 / review Finding 1: the no-bump (exit 2) path must tag the
+  # semver-analyzed commit (GITHUB_SHA), never a fresh `GET /git/ref/heads/...`
+  # read — that races with concurrent pushes and can tag an unanalyzed commit.
+  # The discriminator is the singular/plural ref endpoint form: the legitimate
+  # fast-forward PATCH uses the PLURAL `git/refs/heads/main`; only the
+  # SINGULAR-`ref` GET form (`git/ref/heads/`) is forbidden here.
+  if printf '%s' "$body" | grep -qF 'git/ref/heads/'; then
+    echo "VIOLATION: Bump step performs a live 'GET .../git/ref/heads/' read (spec §2 / Finding 1)"
+    printf '%s' "$body" | grep -nF 'git/ref/heads/'
+    false
+  fi
 }
 
 @test "invariant: bump-commit and tag payloads omit author/committer/tagger fields" {
