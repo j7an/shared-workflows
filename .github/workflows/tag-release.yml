@@ -492,6 +492,16 @@ jobs:
               # (default). 422 = non-fast-forward = main moved past BASE_SHA
               # after checkout → fail the run loudly (spec §3.1 step 7,
               # race-detection backstop).
+              #
+              # RECOVERY NOTE: this PATCH is the point of no return for main.
+              # If the run fails AFTER this succeeds but before the tag is
+              # created, do NOT use GitHub's "Re-run failed jobs" — it reuses
+              # the original GITHUB_SHA, recreates a sibling bump commit
+              # (different timestamp → different SHA), and this non-force PATCH
+              # will 422 (non-fast-forward). Recover with a fresh
+              # `workflow_dispatch` from main: its GITHUB_SHA is then the
+              # bumped HEAD, so the bump step takes the no-bump path and tags
+              # it directly.
               gh api -X PATCH "repos/${REPO}/git/refs/heads/main" \
                 -f sha="$NEW_COMMIT_SHA" \
                 -F force=false
@@ -541,7 +551,8 @@ jobs:
           # --- Git Data API rewrite (spec §3.2) ---
           # TAG_TARGET_SHA is set by the prior "Bump version files" step:
           #   - case 0: the new bump commit's SHA (returned by POST /git/commits)
-          #   - case 2: current refs/heads/main SHA (read via GET /git/ref/heads/main)
+          #   - case 2: GITHUB_SHA — the semver-analyzed commit, no ref read
+          #            (spec §2 / review Finding 1)
           # Either way, NEVER from local checkout state (spec §2).
           REPO="${GITHUB_REPOSITORY}"
 
