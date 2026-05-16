@@ -11,6 +11,10 @@ setup() {
   REPO_ROOT="$BATS_TEST_DIRNAME/.."
   cp "$REPO_ROOT"/tests/fixtures/bump-version-files/targets/*.json "$TMPDIR/"
   cd "$TMPDIR"
+  # Per-test manifest path. The script defaults to a shared /tmp/bump.modified;
+  # pinning it inside this test's unique TMPDIR keeps parallel/concurrent runs
+  # from clobbering one another (teardown's rm -rf cleans it up).
+  export BUMP_MODIFIED_FILE="$TMPDIR/bump.modified"
 }
 
 teardown() {
@@ -394,4 +398,57 @@ JSON
   [ "$status" -eq 2 ]
   [ "$(cat server.json)" = "$ORIG" ]
   [[ "$output" =~ "skipped (invalid path_expr)" ]]
+}
+
+# === Manifest emission: bump.modified contract (#issue-cross-agent-12) ===
+# Manifest must be a UNIQUE PATH SET — see spec §3.1 step 2. The Git Data API
+# rewrite of tag-release.yml consumes this file to build POST /git/trees;
+# duplicates would produce duplicate tree[] entries with undefined behavior.
+# Each test reads $BUMP_MODIFIED_FILE (a per-test path exported in setup),
+# not the shared /tmp default, so concurrent runs stay isolated.
+
+@test "manifest: bump.modified is unique path set after multi-entry-same-file run" {
+  run_bumper "valid/multi-entry-same-file.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  [ -f "$BUMP_MODIFIED_FILE" ]
+  # Exactly one line: server.json (despite TWO entries targeting it)
+  [ "$(wc -l < "$BUMP_MODIFIED_FILE")" -eq 1 ]
+  [ "$(cat "$BUMP_MODIFIED_FILE")" = "server.json" ]
+}
+
+@test "manifest: bump.modified contains all unique modified paths in mixed run" {
+  run_bumper "valid/mixed-old-and-new.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  # mixed-old-and-new.json bumps package.json (legacy field) AND server.json (path_expr).
+  # `< file` redirect makes the assertion fail loudly if the manifest is missing,
+  # rather than passing a stray empty string into the comparison.
+  expected=$(printf 'package.json\nserver.json\n')
+  [ "$(sort < "$BUMP_MODIFIED_FILE")" = "$expected" ]
+}
+
+@test "manifest: bump.modified is empty when no entries are updated (idempotent rerun)" {
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" .version-bump.json
+  bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 1.2.3  # First run: bumps
+  run bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 1.2.3  # Second run: no-op
+  [ "$status" -eq 2 ]
+  [ -f "$BUMP_MODIFIED_FILE" ]
+  [ ! -s "$BUMP_MODIFIED_FILE" ]  # File exists but is empty
+}
+
+@test "manifest: bump.modified is truncated on each invocation (no cross-run pollution)" {
+  # Run 1: bump multi-entry-same-file (writes "server.json")
+  run_bumper "valid/multi-entry-same-file.json" "1.2.3"
+  [ "$status" -eq 0 ]
+  # Run 2: idempotent rerun of legacy-field. First bump 0.0.0 -> 9.9.9 succeeds;
+  # second bump 9.9.9 -> 9.9.9 is a no-op (exit 2). The manifest after run 2
+  # must still be truncated (empty) AND must NOT carry server.json across.
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" .version-bump.json
+  bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 9.9.9  # First bump
+  run bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 9.9.9  # Idempotent rerun
+  [ "$status" -eq 2 ]
+  # File-existence guard prevents this from passing vacuously when the
+  # script doesn't yet create the manifest (red phase): grep on a missing
+  # file returns 1, and `! grep` would silently succeed without it.
+  [ -f "$BUMP_MODIFIED_FILE" ]
+  ! grep -q server.json "$BUMP_MODIFIED_FILE"
 }
