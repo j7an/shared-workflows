@@ -499,9 +499,15 @@ jobs:
               # the original GITHUB_SHA, recreates a sibling bump commit
               # (different timestamp → different SHA), and this non-force PATCH
               # will 422 (non-fast-forward). Recover with a fresh
-              # `workflow_dispatch` from main: its GITHUB_SHA is then the
-              # bumped HEAD, so the bump step takes the no-bump path and tags
-              # it directly.
+              # `workflow_dispatch` from main, using the SAME `bump` and
+              # `tag-prefix` inputs as the failed run. "Compute release"
+              # derives the version from the last *tag* — still unchanged,
+              # since the tag was never created — so a different `bump` (e.g.
+              # `auto` in place of an explicit override) or `tag-prefix` would
+              # recompute a different version and create a second, wrong bump
+              # commit instead of taking the no-bump path. With the same
+              # inputs the recomputed version matches the already-bumped
+              # files: the bump step takes the no-bump path, tag points at it.
               gh api -X PATCH "repos/${REPO}/git/refs/heads/main" \
                 -f sha="$NEW_COMMIT_SHA" \
                 -F force=false
@@ -509,6 +515,11 @@ jobs:
               # Export TAG_TARGET_SHA for the Create-and-push-tag step.
               echo "TAG_TARGET_SHA=${NEW_COMMIT_SHA}" >> "$GITHUB_ENV"
               RESULT="Committed and pushed version file updates via Git Data API (sha: ${NEW_COMMIT_SHA}, verified: true, reason: ${REASON})"
+              # Operator-facing recovery guidance, surfaced in the step summary
+              # below. Set only on this path — case 0 is the only one that
+              # advances main, so it is the only partial-failure-recoverable
+              # state. See the RECOVERY NOTE on the PATCH above.
+              RECOVERY_HINT="> **Partial-failure recovery:** \`main\` now carries this bump commit. If a later step fails, do NOT use GitHub's \"Re-run failed jobs\" — start a fresh \`workflow_dispatch\` from \`main\` with the **same \`bump\` and \`tag-prefix\` inputs** used for this run."
               ;;
             1)
               echo "::error::Bump version files step failed due to .version-bump.json error"
@@ -541,6 +552,10 @@ jobs:
             cat /tmp/bump.summary
             echo ""
             echo "$RESULT"
+            if [ -n "${RECOVERY_HINT:-}" ]; then
+              echo ""
+              echo "$RECOVERY_HINT"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create and push tag
