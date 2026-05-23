@@ -1,4 +1,4 @@
-name: Dependency Cool-Down
+name: Dependency Safety
 
 on:
   pull_request:
@@ -12,11 +12,11 @@ permissions:
   issues: write
 
 concurrency:
-  group: cooldown-${{ github.event.pull_request.number }}
+  group: safety-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  cooldown:
-    uses: ./.github/workflows/dependency-cooldown.yml
+  safety:
+    uses: ./.github/workflows/dependency-safety.yml
     with:
       auto_merge: true
