@@ -949,7 +949,11 @@ jobs:
           # needs to agree (rather than claim "No known exploits" + auto-merge
           # enabled on a run we refused to scan). The EXTRACTION_WARNING_SECTION
           # prepended later (~line 960) still carries the detailed path list.
-          if [ "$GUARD_TRIGGERED" = "true" ]; then
+          if [ "$GUARD_TRIGGERED" = "true" ] && [ "$TOTAL" -eq 0 ]; then
+            # Extraction failed AND no advisories from any subset that did get scanned.
+            # With the issue #62 fix the guard can ALSO fire on a partial-extraction PR
+            # where DEPS_TSV is non-empty and scans found advisories — that case falls
+            # through to the TOTAL>0 branch so the actual advisory IDs are preserved.
             RESULTS_HEADER="Dependency extraction failed — manual review required."
             TABLE_HDR="| Source | Vulnerabilities |"
             TABLE_SEP="|--------|----------------|"
@@ -962,7 +966,13 @@ jobs:
             TABLE_HDR="| ID | Severity | Summary | Source |"
             TABLE_SEP="|----|----------|---------|--------|"
             RESULTS_TABLE="$(printf '%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$SCAN_RESULTS")"
-            RESULTS_FOOTER="> Review the advisories above before deciding to merge."
+            if [ "$GUARD_TRIGGERED" = "true" ]; then
+              # Partial extraction: scans of the supported subset DID surface advisories.
+              # Cross-reference so the partial-coverage signal isn't lost.
+              RESULTS_FOOTER="> Review the advisories above before deciding to merge."$'\n'"> Note: part of the diff could not be scanned (parser does not support all touched files). Manual review required."
+            else
+              RESULTS_FOOTER="> Review the advisories above before deciding to merge."
+            fi
           elif [ -n "$HAS_ERROR" ]; then
             gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
               -f state=error \

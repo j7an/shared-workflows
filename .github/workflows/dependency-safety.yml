@@ -1169,8 +1169,12 @@ jobs:
           # shows both signals: header per priority, table reflecting actual scan data.
 
           # ---- Results table (from scan state only) ----
-          if [ "$GUARD_TRIGGERED" = "true" ]; then
-            # Extraction failed — no scan ran.
+          if [ "$GUARD_TRIGGERED" = "true" ] && [ "$TOTAL" -eq 0 ]; then
+            # Extraction failed AND no advisories from any subset that did get scanned:
+            # show "(not scanned)". With the issue #62 fix the guard can ALSO fire on a
+            # partial-extraction PR where DEPS_TSV is non-empty and scans found
+            # advisories — that case falls through to the TOTAL>0 branch so the actual
+            # advisory IDs are preserved.
             TABLE_HDR="| Source | Vulnerabilities |"
             TABLE_SEP="|--------|----------------|"
             ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
@@ -1202,6 +1206,11 @@ jobs:
           if [ "$GUARD_TRIGGERED" = "true" ]; then
             RESULTS_HEADER="Dependency extraction failed — manual review required."
             RESULTS_FOOTER="> Parser could not extract dependencies. Manual review required."
+            if [ "$TOTAL" -gt 0 ]; then
+              # Partial extraction: scans of the supported subset DID surface advisories.
+              # Cross-reference so the IDs aren't lost under the guard header.
+              RESULTS_FOOTER="${RESULTS_FOOTER}"$'\n'"> Also: ${TOTAL} advisory/ies were found in the scanned subset — see table above."
+            fi
           elif [ "$HAS_SAFETY_ERROR" = "true" ]; then
             RESULTS_HEADER="Scan completed with errors — see workflow logs."
             RESULTS_FOOTER="> Scan errors prevented a clean verdict. Re-run or push to retry."
