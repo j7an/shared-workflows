@@ -10,4 +10,4 @@ updates:
     commit-message:
       prefix: "deps"
     cooldown:
-      default-days: 7
+      default-days: 5
