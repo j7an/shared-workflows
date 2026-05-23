@@ -1,0 +1,1095 @@
+name: Dependency Safety
+
+on:
+  workflow_call:
+    inputs:
+      enable_scorecard:
+        type: boolean
+        default: true
+        description: "Include OpenSSF Scorecard in scan results"
+      auto_merge:
+        type: boolean
+        default: false
+        description: "Auto-merge clean PRs after scan completes"
+      cooldown_days:
+        type: number
+        default: 7
+        description: "Minimum release age in days before auto-merge is allowed. 0 disables the release-age gate entirely (pre-v2.0.2 behavior)."
+      fail_on_cooldown:
+        type: boolean
+        default: false
+        description: "If true, cooldown blocks set the gate to failure instead of pending. Use when branch protection requires a hard-red blocker."
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    # Gate discipline (see #29): `Set initial status` must be the first
+    # step after `Harden runner`. Every subsequent step must carry
+    # `if: steps.gate.outputs.skip == 'false'` unless it is itself part
+    # of the gate. This avoids making non-bot PRs pay for fallible work
+    # (cross-repo fetches, API calls, script execution) that would only
+    # be used for Dependabot PRs.
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: audit
+
+      - name: Set initial status
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          if [[ "$PR_AUTHOR" != "dependabot[bot]" ]]; then
+            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+              -f state="success" \
+              -f context="dependency-safety / gate" \
+              -f description="Non-bot PR — no cool-down required"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+              -f state="pending" \
+              -f context="dependency-safety / gate" \
+              -f description="Scanning dependencies for known exploits..."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Scan and report
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ENABLE_SCORECARD: ${{ inputs.enable_scorecard }}
+          AUTO_MERGE: ${{ inputs.auto_merge }}
+          COOLDOWN_DAYS: ${{ inputs.cooldown_days }}
+          FAIL_ON_COOLDOWN: ${{ inputs.fail_on_cooldown }}
+        run: |
+          # --- BEGIN inline:scripts/extract-deps.sh ---
+          extract_deps() (
+          # extract-deps.sh — parse unified diff on stdin, emit dependency TSV on stdout
+          #
+          # Output: <name>\t<version>\t<ecosystem>  where ecosystem ∈ {actions, pypi}
+          # Exit:   0 on success (possibly zero rows), 2 on malformed input
+          #
+          # Handles THREE shapes observed in real PR diffs:
+          #   1. GitHub Actions `uses:` lines (single-line name@version)
+          #   2. pip/requirements `name==version` single-line format
+          #   3. TOML lockfile [[package]] stanzas (uv.lock, poetry.lock) where the
+          #      name line may be on an unchanged context line while only the version
+          #      is `+`-prefixed — section-aware parsing required.
+          #
+          # The TOML lockfile parser addresses issue #52: Dependabot bumps to uv.lock
+          # and poetry.lock previously yielded zero rows, cascading to silent-green
+          # cooldown gates on unscanned code.
+
+          set -euo pipefail
+
+          # pypi-shape lockfiles only. Cargo.lock / package-lock.json would need
+          # downstream ecosystem support (registry clients, OSV enums) before rows
+          # could be scanned — the fail-loud guard in dependency-cooldown.yml covers
+          # unhandled lockfiles.
+          filename_to_ecosystem() {
+            case "$1" in
+              uv.lock|poetry.lock) echo "pypi" ;;
+              *) echo "" ;;
+            esac
+          }
+
+          # Dedup sentinel: newline-delimited list of "ecosystem:name" keys.
+          # Plain string (not `declare -A`) for bash 3.2 compatibility — macOS ships
+          # bash 3.2 and bats invokes bash directly.
+          seen=$'\n'
+          rows=()
+
+          # Lockfile parser state
+          current_file=""
+          current_name=""
+          current_ecosystem=""
+
+          input=$(cat)
+
+          # Empty input → exit 0 with no output
+          if [ -z "$input" ]; then
+            exit 0
+          fi
+
+          # Malformed input detection: here-string (not pipeline) to avoid SIGPIPE
+          # under pipefail on large valid diffs (issue #50).
+          if ! grep -qE '^(\+\+\+|---|@@|diff --git)' <<< "$input"; then
+            echo "extract-deps.sh: input is not a unified diff" >&2
+            exit 2
+          fi
+
+          while IFS= read -r line; do
+            # Strip CR for CRLF-encoded diffs
+            line="${line%$'\r'}"
+
+            # --- Branch 1: diff --git file header — track current file/ecosystem ---
+            if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
+              current_file="${BASH_REMATCH[2]##*/}"
+              current_ecosystem=$(filename_to_ecosystem "$current_file")
+              current_name=""
+              continue
+            fi
+
+            # Skip diff file headers (+++ b/path)
+            [[ "$line" == +++* ]] && continue
+
+            # --- Branch 3: [[package]] stanza boundary (context or +, not -) ---
+            if [ -n "$current_ecosystem" ] && [[ "$line" =~ ^[+\ ][[:space:]]*\[\[package\]\] ]]; then
+              current_name=""
+              continue
+            fi
+
+            # --- Branch 4: name = "..." line (context or +, not -) ---
+            if [ -n "$current_ecosystem" ] && [[ "$line" =~ ^[+\ ][[:space:]]*name[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+              current_name="${BASH_REMATCH[1]}"
+              continue
+            fi
+
+            # --- Branch 5: + version = "..." line (only + lines emit rows) ---
+            if [ -n "$current_ecosystem" ] && [ -n "$current_name" ] \
+               && [[ "$line" =~ ^\+[[:space:]]*version[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+              key="$current_ecosystem:$current_name"
+              case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+              seen="${seen}${key}"$'\n'
+              rows+=("$current_name"$'\t'"${BASH_REMATCH[1]}"$'\t'"$current_ecosystem")
+              continue
+            fi
+
+            # --- GitHub Actions parser (existing, unchanged) ---
+            if [[ "$line" =~ ^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+([^[:space:]@]+)@[^[:space:]]+(.*)$ ]]; then
+              name="${BASH_REMATCH[2]}"
+              rest="${BASH_REMATCH[3]}"
+
+              [[ "$name" == ./* ]] && continue
+              [[ "$name" == docker://* ]] && continue
+
+              version=""
+              if [[ "$rest" =~ \#[[:space:]]*v?([0-9][0-9.]*) ]]; then
+                version="${BASH_REMATCH[1]}"
+              fi
+
+              key="actions:$name"
+              case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+              seen="${seen}${key}"$'\n'
+              rows+=("$name"$'\t'"$version"$'\t'"actions")
+              continue
+            fi
+
+            # --- Python deps parser (existing, unchanged) ---
+            [[ "$line" =~ ^\+[[:space:]]*# ]] && continue
+
+            if [[ "$line" =~ ^\+[[:space:]]*([a-zA-Z][a-zA-Z0-9_.\-]*)[[:space:]]*(==|\>=|\<=|~=|\!=|\>|\<)[[:space:]]*([0-9][0-9a-zA-Z.\-]*) ]]; then
+              name="${BASH_REMATCH[1]}"
+              version="${BASH_REMATCH[3]}"
+              key="pypi:$name"
+              case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+              seen="${seen}${key}"$'\n'
+              rows+=("$name"$'\t'"$version"$'\t'"pypi")
+              continue
+            fi
+          done <<< "$input"
+
+          if [ ${#rows[@]} -gt 0 ]; then
+            printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1
+          fi
+          )
+          # --- END inline:scripts/extract-deps.sh ---
+
+          # --- BEGIN inline:scripts/diff-touches-lockfile.sh ---
+          diff_touches_lockfile() (
+          # diff-touches-lockfile.sh — detect dependency-relevant file edits in a
+          # unified diff (lockfiles, manifests, and GitHub Actions workflow YAMLs).
+          # Used by dependency-cooldown.yml's fail-loud guard to refuse green gates
+          # when the dep extractor returns zero rows on a diff that touches files
+          # which *should* have produced deps.
+          #
+          # Input:  unified diff on stdin
+          # Output: matched paths (b/ side of diff --git headers), sorted & deduped,
+          #         one per line; empty stdout if nothing matched.
+          # Exit:   0 if any dependency-relevant path touched, 1 if none, 2 on malformed input.
+
+          set -euo pipefail
+
+          input=$(cat)
+
+          if [ -z "$input" ]; then
+            exit 1
+          fi
+
+          if ! grep -qE '^diff --git ' <<< "$input"; then
+            echo "diff-touches-lockfile.sh: input is not a unified diff" >&2
+            exit 2
+          fi
+
+          matches=()
+          while IFS= read -r path; do
+            base="${path##*/}"
+            # Add new lockfile/manifest filename patterns to this case list as needed.
+            case "$base" in
+              *.lock|requirements*.txt|pyproject.toml|Pipfile|go.mod|Cargo.toml \
+                |package.json|package-lock.json|yarn.lock|pnpm-lock.yaml)
+                matches+=("$path")
+                continue
+                ;;
+            esac
+            # GitHub Actions workflow YAMLs are dependency declarations (uses: lines).
+            # Matched by full path, not basename, to avoid over-triggering on any *.yml.
+            case "$path" in
+              .github/workflows/*.yml|.github/workflows/*.yaml)
+                matches+=("$path")
+                ;;
+            esac
+          done < <(grep -oE '^diff --git a/[^ ]+ b/[^ ]+' <<< "$input" \
+                   | sed -E 's|^diff --git a/[^ ]+ b/||')
+
+          if [ ${#matches[@]} -eq 0 ]; then
+            exit 1
+          fi
+
+          printf '%s\n' "${matches[@]}" | sort -u
+          )
+          # --- END inline:scripts/diff-touches-lockfile.sh ---
+
+          # --- BEGIN inline:scripts/pr-body-to-deps.sh ---
+          pr_body_to_deps() (
+          # pr-body-to-deps.sh — extract Dependabot dep bumps from a PR body, emit TSV.
+          # Defense-in-depth fallback for when extract-deps.sh returns zero rows.
+          #
+          # Arg:    <ecosystem>  — 'pypi' or 'actions'; emitted verbatim in TSV col 3.
+          # Input:  PR body text on stdin.
+          # Output: <name>\t<version>\t<ecosystem>  sorted, deduplicated.
+          # Exit:   0 on success (including zero rows), 2 if ecosystem arg invalid.
+
+          set -euo pipefail
+
+          ecosystem="${1:-}"
+          case "$ecosystem" in
+            pypi|actions) ;;
+            *) echo "pr-body-to-deps.sh: ecosystem must be 'pypi' or 'actions'" >&2; exit 2 ;;
+          esac
+
+          input=$(cat)
+          [ -z "$input" ] && exit 0
+
+          seen=$'\n'
+          rows=()
+          VER='[0-9][0-9A-Za-z.+!\-]*'
+
+          # Regex patterns stored in variables — bash 3.2 on macOS cannot parse certain
+          # metacharacters (like `)`) inline within [[ =~ ]] conditionals.
+          # Pattern A — Bumps [name](url) from X to Y. The URL is consumed explicitly
+          # via \([^)]+\) rather than a character class, because earlier attempts using
+          # [^f]* silently dropped any bump whose URL contained `f` (e.g. `ruff`).
+          re_a="^Bumps[[:space:]]\[([^]]+)\]\([^)]+\)[[:space:]]+from[[:space:]]+${VER}[[:space:]]+to[[:space:]]+(${VER})"
+          # Pattern B — Updates `name` from X to Y (anchored at column 0 to avoid
+          # matching blockquote/release-notes content which is typically indented)
+          re_b="^Updates[[:space:]]\`([^\`]+)\`[[:space:]]+from[[:space:]]+${VER}[[:space:]]+to[[:space:]]+(${VER})"
+          # Pattern C — | [name](url) | `fromVer` | `toVer` |
+          re_c="^\|[[:space:]]+\[([^]]+)\]\([^)]+\)[[:space:]]+\|[[:space:]]+\`${VER}\`[[:space:]]+\|[[:space:]]+\`(${VER})\`[[:space:]]+\|"
+
+          while IFS= read -r line; do
+            line="${line%$'\r'}"
+            name=""
+            version=""
+
+            if [[ "$line" =~ $re_a ]]; then
+              name="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+            elif [[ "$line" =~ $re_b ]]; then
+              name="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+            elif [[ "$line" =~ $re_c ]]; then
+              name="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+            fi
+
+            [ -z "$name" ] && continue
+
+            # Strip trailing sentence punctuation from the version (e.g. "2.13.0."
+            # in Pattern A's "Bumps ... from X to Y." lines).
+            version="${version%.}"
+
+            key="$ecosystem:$name"
+            case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+            seen="${seen}${key}"$'\n'
+            rows+=("$name"$'\t'"$version"$'\t'"$ecosystem")
+          done <<< "$input"
+
+          if [ ${#rows[@]} -gt 0 ]; then
+            printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1
+          fi
+          )
+          # --- END inline:scripts/pr-body-to-deps.sh ---
+
+          # --- BEGIN inline:scripts/check-release-age.sh ---
+          check_release_age() (
+          # check-release-age.sh — read dep TSV on stdin, emit verdict TSV on stdout
+          #
+          # Schema:
+          #   in:  <name>\t<version>\t<ecosystem>
+          #   out: <name>\t<version>\t<ecosystem>\t<published_iso>\t<age_days>\t<verdict>\t<reason>
+          #
+          # Verdicts: pass | fail | error
+          # Exit: always 0; failures are per-row.
+          #
+          # Bash 3.2 compatible (macOS system bash).
+
+          set -uo pipefail
+
+          : "${COOLDOWN_DAYS:?COOLDOWN_DAYS env var is required}"
+          : "${NOW_EPOCH:=$(date +%s)}"
+
+          # iso_to_epoch <iso> — print unix epoch on stdout, return 1 on parse failure.
+          # Handles both GitHub ("2026-03-29T12:00:00Z") and PyPI ("2026-03-29T12:00:00")
+          # ISO variants across GNU and BSD date.
+          iso_to_epoch() {
+            local iso="$1"
+            # GNU date: accepts the ISO string as-is (with or without Z).
+            date -u -d "$iso" +%s 2>/dev/null && return 0
+            # GNU date: append Z for naive PyPI upload_time.
+            date -u -d "${iso}Z" +%s 2>/dev/null && return 0
+            # BSD date (macOS): strip trailing Z and parse via -jf.
+            local stripped="${iso%Z}"
+            date -u -jf '%Y-%m-%dT%H:%M:%S' "$stripped" +%s 2>/dev/null && return 0
+            return 1
+          }
+
+          # fetch_github <owner> <repo> <version> — print published_at ISO on stdout, return 1 on failure.
+          fetch_github() {
+            local owner="$1" repo="$2" version="$3"
+            if [ -n "${AGE_FIXTURE_DIR:-}" ]; then
+              local fx="$AGE_FIXTURE_DIR/github/$owner/$repo/releases/tags/v$version.json"
+              [ -f "$fx" ] || return 1
+              jq -r '.published_at // empty' "$fx"
+              return 0
+            fi
+            local resp
+            if ! resp=$(gh api "repos/$owner/$repo/releases/tags/v$version" 2>/dev/null); then
+              sleep 2
+              if ! resp=$(gh api "repos/$owner/$repo/releases/tags/v$version" 2>/dev/null); then
+                return 1
+              fi
+            fi
+            printf '%s' "$resp" | jq -r '.published_at // empty'
+          }
+
+          # fetch_pypi <pkg> <version> — print "<upload_time>\t<yanked_bool>" on stdout, return 1 on failure.
+          fetch_pypi() {
+            local pkg="$1" version="$2"
+            local upload yanked
+            if [ -n "${AGE_FIXTURE_DIR:-}" ]; then
+              local fx="$AGE_FIXTURE_DIR/pypi/$pkg/$version.json"
+              [ -f "$fx" ] || return 1
+              upload=$(jq -r '.urls[0].upload_time // empty' "$fx")
+              yanked=$(jq -r '.urls[0].yanked // false' "$fx")
+              printf '%s\t%s\n' "$upload" "$yanked"
+              return 0
+            fi
+            local resp
+            if ! resp=$(curl -sf --max-time 30 "https://pypi.org/pypi/$pkg/$version/json" 2>/dev/null); then
+              sleep 2
+              if ! resp=$(curl -sf --max-time 30 "https://pypi.org/pypi/$pkg/$version/json" 2>/dev/null); then
+                return 1
+              fi
+            fi
+            upload=$(printf '%s' "$resp" | jq -r '.urls[0].upload_time // empty')
+            yanked=$(printf '%s' "$resp" | jq -r '.urls[0].yanked // false')
+            printf '%s\t%s\n' "$upload" "$yanked"
+          }
+
+          # emit name version ecosystem published age verdict reason
+          emit() {
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+          }
+
+          while IFS=$'\t' read -r name version ecosystem || [ -n "${name:-}" ]; do
+            [ -z "${name:-}" ] && continue
+
+            # Escape hatch: COOLDOWN_DAYS=0 → all pass without lookup.
+            if [ "$COOLDOWN_DAYS" -eq 0 ]; then
+              emit "$name" "$version" "$ecosystem" "-" "-" "pass" ""
+              continue
+            fi
+
+            case "$ecosystem" in
+              actions)
+                owner="${name%%/*}"
+                remainder="${name#*/}"
+                repo="${remainder%%/*}"
+                if ! iso=$(fetch_github "$owner" "$repo" "$version"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "tier-1-404"
+                  continue
+                fi
+                if [ -z "$iso" ]; then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "transient-failure"
+                  continue
+                fi
+                if ! pub_epoch=$(iso_to_epoch "$iso"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "parse-failure"
+                  continue
+                fi
+                age_days=$(( (NOW_EPOCH - pub_epoch) / 86400 ))
+                if [ "$age_days" -ge "$COOLDOWN_DAYS" ]; then
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "pass" ""
+                else
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" ""
+                fi
+                ;;
+
+              pypi)
+                if ! result=$(fetch_pypi "$name" "$version"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "pypi-404"
+                  continue
+                fi
+                iso="${result%%$'\t'*}"
+                yanked="${result##*$'\t'}"
+                if [ -z "$iso" ]; then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "transient-failure"
+                  continue
+                fi
+                if ! pub_epoch=$(iso_to_epoch "$iso"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "parse-failure"
+                  continue
+                fi
+                age_days=$(( (NOW_EPOCH - pub_epoch) / 86400 ))
+                if [ "$yanked" = "true" ]; then
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" "yanked"
+                elif [ "$age_days" -ge "$COOLDOWN_DAYS" ]; then
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "pass" ""
+                else
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" ""
+                fi
+                ;;
+
+              *)
+                emit "$name" "$version" "$ecosystem" "-" "-" "error" "unknown-ecosystem"
+                ;;
+            esac
+          done
+
+          exit 0
+          )
+          # --- END inline:scripts/check-release-age.sh ---
+
+          DIFF=$(gh pr diff "$PR_NUMBER" --repo "$GH_REPO")
+
+          DEPS=""
+          SCAN_RESULTS=""
+          GHSA_TOTAL=0
+          OSV_TOTAL=0
+          HAS_ERROR=""
+          declare -A ACTION_VERSIONS PY_VERSIONS
+          FILTERED_RESULTS=""
+          FILTERED_TOTAL=0
+
+          # Fetch PR body for Dependabot version fallback
+          PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json body --jq '.body // ""')
+
+          # --- Extract dependencies via standalone script (Task 8) ---
+          DEPS_TSV=$(echo "$DIFF" | extract_deps)
+
+          # --- Layer 2: PR-body fallback (defense in depth for issue #52) ---
+          TOUCHED_PATHS=""
+          if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
+            TOUCHED_PATHS=$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)
+            # Keep the pypi regex below in sync with filename_to_ecosystem() in
+            # scripts/extract-deps.sh — ONLY lockfiles the parser actually handles
+            # should route to the pypi fallback. Cargo.lock, yarn.lock, etc. are
+            # emitted by diff_touches_lockfile (for guard detection) but must NOT
+            # route here — they fall through and trip the fail-loud guard instead.
+            # Mixed-touch policy: if a PR touches BOTH a pypi lockfile AND an actions
+            # workflow YAML, pypi wins. The fallback parser handles one ecosystem per
+            # PR; actions bumps (if any) fall through to the guard and will refuse green.
+            ECO_HINT=""
+            if echo "$TOUCHED_PATHS" | grep -qE '((^|/)(uv|poetry)\.lock$|requirements[^/]*\.txt$|pyproject\.toml$|Pipfile$)'; then
+              ECO_HINT="pypi"
+            elif echo "$TOUCHED_PATHS" | grep -qE '\.github/workflows/.*\.ya?ml$'; then
+              ECO_HINT="actions"
+            fi
+            if [ -n "$ECO_HINT" ]; then
+              DEPS_TSV=$(echo "$PR_BODY" | pr_body_to_deps "$ECO_HINT" 2>/dev/null || true)
+              [ -n "$(echo "$DEPS_TSV" | sed '/^$/d')" ] && \
+                echo "Recovered $(echo "$DEPS_TSV" | wc -l | tr -d ' ') dep(s) via PR-body fallback (${ECO_HINT})"
+            fi
+          fi
+
+          # --- Layer 3: Fail-loud guard (fix for issue #52) ---
+          GUARD_TRIGGERED=false
+          if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
+            # Defense-in-depth: Layer 2 always sets TOUCHED_PATHS when it runs, but the
+            # ${:-} default guards against future refactors that might skip Layer 2.
+            TOUCHED_PATHS="${TOUCHED_PATHS:-$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)}"
+            if [ -n "$TOUCHED_PATHS" ]; then
+              GUARD_TRIGGERED=true
+              TOUCHED_LIST=$(echo "$TOUCHED_PATHS" | paste -sd, -)
+              EXTRACTION_WARNING="⚠️ Parser could not extract dependencies from this diff (touched: ${TOUCHED_LIST}). Manual review required before merge."
+            fi
+          fi
+
+          # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
+          # so the existing advisory-scan loops below can consume them unchanged.
+          ACTIONS=""
+          PY_DEPS=""
+          while IFS=$'\t' read -r _name _ver _eco; do
+            [ -z "$_name" ] && continue
+            case "$_eco" in
+              actions)
+                ACTIONS="$(printf '%s\n%s' "$ACTIONS" "$_name")"
+                ACTION_VERSIONS["$_name"]="$_ver"
+                ;;
+              pypi)
+                PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_name")"
+                PY_VERSIONS["$_name"]="$_ver"
+                ;;
+            esac
+          done <<< "$DEPS_TSV"
+          ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
+          PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
+
+          # PR-body version fallback for deps without inline version (preserved from v2.0.1)
+          for ACTION in $ACTIONS; do
+            [ -z "$ACTION" ] && continue
+            if [ -z "${ACTION_VERSIONS[$ACTION]:-}" ]; then
+              _dep_ver=$(echo "$PR_BODY" | grep -F "[$ACTION]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
+              ACTION_VERSIONS["$ACTION"]="$_dep_ver"
+            fi
+          done
+          for PKG in $PY_DEPS; do
+            [ -z "$PKG" ] && continue
+            if [ -z "${PY_VERSIONS[$PKG]:-}" ]; then
+              _dep_ver=$(echo "$PR_BODY" | grep -Fi "[$PKG]" | grep -oE 'to [0-9][0-9.]*' | head -1 | sed 's/^to //' || true)
+              PY_VERSIONS["$PKG"]="$_dep_ver"
+            fi
+          done
+
+          # Sanity-check: count UNIQUE action names in the diff vs extracted actions.
+          # Filters ./ (local) and docker:// actions because the extractor at
+          # scripts/extract-deps.sh:51-52 intentionally skips them — counting them
+          # here would produce a false-positive extraction-mismatch warning on any
+          # PR adding a local or docker action reference.
+          # (Task 13c — fixes regression introduced by Task 13b)
+          EXPECTED_ACTIONS=$(echo "$DIFF" \
+            | grep -oE '^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]@]+' \
+            | sed -E 's/^\+[[:space:]]+(-[[:space:]]+)?uses:[[:space:]]+//' \
+            | grep -vE '^(\./|docker://)' \
+            | sort -u | wc -l | tr -d ' ')
+          EXTRACTED_ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | wc -l | tr -d ' ')
+          # Do not overwrite a guard-set EXTRACTION_WARNING.
+          if [ -z "${EXTRACTION_WARNING:-}" ]; then
+            EXTRACTION_WARNING=""
+            if [ "$EXPECTED_ACTIONS" != "$EXTRACTED_ACTIONS" ]; then
+              EXTRACTION_WARNING="⚠️ Extraction mismatch: diff contains ${EXPECTED_ACTIONS} unique action(s), extractor returned ${EXTRACTED_ACTIONS}. This may indicate a silent parsing failure. Please report."
+            fi
+          fi
+
+          # --- Check release age via standalone script (Task 9 — phase 2) ---
+          COOLDOWN_FAILURES=0
+          AGE_TSV=""
+          if [ "$COOLDOWN_DAYS" -gt 0 ]; then
+            # check_release_age must be invoked via command substitution so
+            # bash's parent -e is dropped — this preserves per-row error
+            # tolerance (404s, parse failures, etc. emit error verdicts
+            # instead of killing the step). Do not convert to a direct call.
+            AGE_TSV=$(echo "$DEPS_TSV" | check_release_age)
+            COOLDOWN_FAILURES=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" || $6=="error"' | wc -l | tr -d ' ')
+          fi
+
+          for ACTION in $ACTIONS; do
+            [ -z "$ACTION" ] && continue
+            _ver="${ACTION_VERSIONS[$ACTION]}"
+            if [ -n "$_ver" ]; then
+              DEPS="${DEPS}\`${ACTION}\` (v${_ver}), "
+            else
+              DEPS="${DEPS}\`${ACTION}\`, "
+            fi
+
+            GHSA_RESULT=$(gh api graphql -f query='
+              query($name: String!) {
+                securityVulnerabilities(
+                  ecosystem: ACTIONS
+                  package: $name
+                  first: 10
+                ) {
+                  nodes {
+                    advisory {
+                      ghsaId
+                      severity
+                      summary
+                    }
+                    vulnerableVersionRange
+                    firstPatchedVersion {
+                      identifier
+                    }
+                  }
+                }
+              }
+            ' -f "name=${ACTION}" 2>&1) || {
+              HAS_ERROR="true"
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${ACTION}\`) | - | - | GHSA |"$'\n'
+              GHSA_RESULT=""
+            }
+
+            if [ -n "$GHSA_RESULT" ] && echo "$GHSA_RESULT" | jq -e '.errors' > /dev/null 2>&1; then
+              HAS_ERROR="true"
+              GHSA_ERR=$(echo "$GHSA_RESULT" | jq -r '.errors[0].message // "unknown error"')
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${ACTION}\`: ${GHSA_ERR}) | - | - | GHSA |"$'\n'
+              GHSA_RESULT=""
+            fi
+
+            if [ -n "$GHSA_RESULT" ]; then
+              _target_ver="${ACTION_VERSIONS[$ACTION]}"
+
+              if [ -n "$_target_ver" ]; then
+                while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
+                  [ -z "$_g_id" ] && continue
+                  if [ -n "$_g_patched" ]; then
+                    _lowest=$(printf '%s\n' "$_g_patched" "$_target_ver" | sort -V | head -1)
+                    if [ "$_lowest" = "$_g_patched" ]; then
+                      FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
+                      FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
+                      continue
+                    fi
+                  fi
+                  SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                  GHSA_TOTAL=$((GHSA_TOTAL + 1))
+                done <<< "$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[] |
+                  [.advisory.ghsaId, .advisory.severity, .advisory.summary, ((.firstPatchedVersion.identifier // "") | ltrimstr("v"))] |
+                  @tsv
+                ' 2>/dev/null || true)"
+              else
+                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[] |
+                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
+                ' 2>/dev/null || true)
+
+                if [ -n "$GHSA_VULNS" ]; then
+                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
+                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
+                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                fi
+              fi
+            fi
+
+            _target_ver="${ACTION_VERSIONS[$ACTION]}"
+            if [ -n "$_target_ver" ]; then
+              OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" --arg ver "$_target_ver" \
+                '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
+            else
+              OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" \
+                '{"package":{"name":$name,"ecosystem":$eco}}')
+            fi
+            OSV_RESULT=$(curl -sf --max-time 30 \
+              -X POST "https://api.osv.dev/v1/query" \
+              -H "Content-Type: application/json" \
+              -d "$OSV_BODY" \
+              2>&1) || {
+              HAS_ERROR="true"
+              SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${ACTION}\`) | - | - | OSV |"$'\n'
+              OSV_RESULT=""
+            }
+
+            if [ -n "$OSV_RESULT" ]; then
+              OSV_VULNS=$(echo "$OSV_RESULT" | jq -r '
+                .vulns[]? |
+                "| \(.id) | \(.database_specific.severity // "UNKNOWN") | \(.summary // .details[:80]) | OSV |"
+              ' 2>/dev/null || true)
+
+              if [ -n "$OSV_VULNS" ]; then
+                OSV_COUNT=$(echo "$OSV_VULNS" | wc -l | tr -d ' ')
+                OSV_TOTAL=$((OSV_TOTAL + OSV_COUNT))
+                SCAN_RESULTS="${SCAN_RESULTS}${OSV_VULNS}"$'\n'
+              fi
+            fi
+          done
+
+          for PKG in $PY_DEPS; do
+            [ -z "$PKG" ] && continue
+            _ver="${PY_VERSIONS[$PKG]}"
+            if [ -n "$_ver" ]; then
+              DEPS="${DEPS}\`${PKG}\` (v${_ver}), "
+            else
+              DEPS="${DEPS}\`${PKG}\`, "
+            fi
+
+            GHSA_RESULT=$(gh api graphql -f query='
+              query($name: String!) {
+                securityVulnerabilities(
+                  ecosystem: PIP
+                  package: $name
+                  first: 10
+                ) {
+                  nodes {
+                    advisory {
+                      ghsaId
+                      severity
+                      summary
+                    }
+                    vulnerableVersionRange
+                    firstPatchedVersion {
+                      identifier
+                    }
+                  }
+                }
+              }
+            ' -f "name=${PKG}" 2>&1) || {
+              HAS_ERROR="true"
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${PKG}\`) | - | - | GHSA |"$'\n'
+              GHSA_RESULT=""
+            }
+
+            if [ -n "$GHSA_RESULT" ] && echo "$GHSA_RESULT" | jq -e '.errors' > /dev/null 2>&1; then
+              HAS_ERROR="true"
+              GHSA_ERR=$(echo "$GHSA_RESULT" | jq -r '.errors[0].message // "unknown error"')
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${PKG}\`: ${GHSA_ERR}) | - | - | GHSA |"$'\n'
+              GHSA_RESULT=""
+            fi
+
+            if [ -n "$GHSA_RESULT" ]; then
+              _target_ver="${PY_VERSIONS[$PKG]}"
+
+              if [ -n "$_target_ver" ]; then
+                while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
+                  [ -z "$_g_id" ] && continue
+                  if [ -n "$_g_patched" ]; then
+                    _lowest=$(printf '%s\n' "$_g_patched" "$_target_ver" | sort -V | head -1)
+                    if [ "$_lowest" = "$_g_patched" ]; then
+                      FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
+                      FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
+                      continue
+                    fi
+                  fi
+                  SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                  GHSA_TOTAL=$((GHSA_TOTAL + 1))
+                done <<< "$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[] |
+                  [.advisory.ghsaId, .advisory.severity, .advisory.summary, ((.firstPatchedVersion.identifier // "") | ltrimstr("v"))] |
+                  @tsv
+                ' 2>/dev/null || true)"
+              else
+                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[] |
+                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
+                ' 2>/dev/null || true)
+
+                if [ -n "$GHSA_VULNS" ]; then
+                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
+                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
+                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                fi
+              fi
+            fi
+
+            _target_ver="${PY_VERSIONS[$PKG]}"
+            if [ -n "$_target_ver" ]; then
+              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" --arg ver "$_target_ver" \
+                '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
+            else
+              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" \
+                '{"package":{"name":$name,"ecosystem":$eco}}')
+            fi
+            OSV_RESULT=$(curl -sf --max-time 30 \
+              -X POST "https://api.osv.dev/v1/query" \
+              -H "Content-Type: application/json" \
+              -d "$OSV_BODY" \
+              2>&1) || {
+              HAS_ERROR="true"
+              SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${PKG}\`) | - | - | OSV |"$'\n'
+              OSV_RESULT=""
+            }
+
+            if [ -n "$OSV_RESULT" ]; then
+              OSV_VULNS=$(echo "$OSV_RESULT" | jq -r '
+                .vulns[]? |
+                "| \(.id) | \(.database_specific.severity // "UNKNOWN") | \(.summary // .details[:80]) | OSV |"
+              ' 2>/dev/null || true)
+
+              if [ -n "$OSV_VULNS" ]; then
+                OSV_COUNT=$(echo "$OSV_VULNS" | wc -l | tr -d ' ')
+                OSV_TOTAL=$((OSV_TOTAL + OSV_COUNT))
+                SCAN_RESULTS="${SCAN_RESULTS}${OSV_VULNS}"$'\n'
+              fi
+            fi
+          done
+
+          # --- OpenSSF Scorecard (GitHub Actions only) ---
+          SCORECARD_TABLE=""
+          if [[ "$ENABLE_SCORECARD" == "true" ]]; then
+            for ACTION in $ACTIONS; do
+              [ -z "$ACTION" ] && continue
+              SC_RESULT=$(curl -sf --max-time 30 \
+                "https://api.securityscorecards.dev/projects/github.com/${ACTION}" \
+                2>/dev/null) || SC_RESULT=""
+
+              if [ -z "$SC_RESULT" ]; then
+                SCORECARD_TABLE="${SCORECARD_TABLE}| \`${ACTION}\` | Not available | - |"$'\n'
+              else
+                SC_SCORE=$(echo "$SC_RESULT" | jq -r '.score // "N/A"')
+                SC_URL="https://scorecard.dev/viewer/?uri=github.com/${ACTION}"
+                SCORECARD_TABLE="${SCORECARD_TABLE}| \`${ACTION}\` | ${SC_SCORE}/10 | [View](${SC_URL}) |"$'\n'
+              fi
+            done
+          fi
+
+          SCORECARD_SECTION=""
+          if [ -n "$SCORECARD_TABLE" ]; then
+            SC_HDR="| Action | Score | Details |"
+            SC_SEP="|--------|-------|---------|"
+            SCORECARD_SECTION="$(printf '\n### Project Health (OpenSSF Scorecard)\n\n%s\n%s\n%s' \
+              "$SC_HDR" "$SC_SEP" "$SCORECARD_TABLE")"
+          fi
+
+          # Strip trailing comma-space from DEPS
+          DEPS=$(echo "$DEPS" | sed 's/, $//')
+
+          if [ -z "$DEPS" ]; then
+            DEPS="(no dependencies extracted from diff)"
+          fi
+
+          # --- Build comment body ---
+          TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
+
+          # --- Label reconciliation (Task 13b — authoritative on clean runs, additive-only on HAS_ERROR paths) ---
+          LABEL_COLOR_security_review_needed="B60205"
+          LABEL_DESC_security_review_needed="Dependency scan found advisories — manual review required"
+          LABEL_COLOR_cooldown_pending="FBCA04"
+          LABEL_DESC_cooldown_pending="One or more target versions are within the configured cooldown window"
+
+          reconcile_label() {
+            local label="$1"
+            local should_be_present="$2"
+            local color="$3"
+            local desc="$4"
+            local current has_it
+            current=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json labels --jq '[.labels[].name]')
+            has_it=$(echo "$current" | jq -e --arg l "$label" 'contains([$l])' >/dev/null && echo true || echo false)
+
+            if [ "$should_be_present" = "true" ] && [ "$has_it" = "false" ]; then
+              gh label create "$label" --repo "$GH_REPO" --color "$color" --description "$desc" --force >/dev/null 2>&1 || true
+              gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --add-label "$label" || true
+              echo "Applied label: $label"
+            elif [ "$should_be_present" = "false" ] && [ "$has_it" = "true" ] && [ -z "${HAS_ERROR:-}" ]; then
+              gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --remove-label "$label" || true
+              echo "Removed stale label: $label"
+            elif [ "$should_be_present" = "false" ] && [ "$has_it" = "true" ]; then
+              echo "Preserving label $label: scan had API errors, verdict is unreliable"
+            fi
+          }
+
+          _needs_security=$([ "$TOTAL" -gt 0 ] && echo true || echo false)
+          _needs_cooldown=$([ "$COOLDOWN_FAILURES" -gt 0 ] && echo true || echo false)
+          reconcile_label "security-review-needed" "$_needs_security" "$LABEL_COLOR_security_review_needed" "$LABEL_DESC_security_review_needed"
+          reconcile_label "cooldown-pending"       "$_needs_cooldown" "$LABEL_COLOR_cooldown_pending"       "$LABEL_DESC_cooldown_pending"
+
+          # Guard-triggered runs must not compose a clean-scan narrative — the
+          # gate state machine below flips status to `error`, and the comment
+          # needs to agree (rather than claim "No known exploits" + auto-merge
+          # enabled on a run we refused to scan). The EXTRACTION_WARNING_SECTION
+          # prepended later (~line 960) still carries the detailed path list.
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            RESULTS_HEADER="Dependency extraction failed — manual review required."
+            TABLE_HDR="| Source | Vulnerabilities |"
+            TABLE_SEP="|--------|----------------|"
+            ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
+            ROW2="| OSV.dev | (not scanned) |"
+            RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
+            RESULTS_FOOTER="> Auto-merge not enabled — parser could not determine target versions from diff or PR body."
+          elif [ "$TOTAL" -gt 0 ]; then
+            RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
+            TABLE_HDR="| ID | Severity | Summary | Source |"
+            TABLE_SEP="|----|----------|---------|--------|"
+            RESULTS_TABLE="$(printf '%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$SCAN_RESULTS")"
+            RESULTS_FOOTER="> Review the advisories above before deciding to merge."
+          elif [ -n "$HAS_ERROR" ]; then
+            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+              -f state=error \
+              -f context="dependency-safety / gate" \
+              -f description="Scan failed due to API errors — re-run or push to retry."
+            exit 0
+          else
+            RESULTS_HEADER="No known exploits found affecting the target versions."
+            TABLE_HDR="| Source | Vulnerabilities |"
+            TABLE_SEP="|--------|----------------|"
+            ROW1="| GitHub Advisory (GHSA) | 0 affecting target |"
+            ROW2="| OSV.dev | 0 affecting target |"
+            RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
+            if [[ "$AUTO_MERGE" == "true" ]]; then
+              RESULTS_FOOTER="> Auto-merge has been enabled. This PR will merge once all status checks pass."
+            else
+              RESULTS_FOOTER="> This PR is now eligible for manual review and merge."
+            fi
+          fi
+
+          # Build collapsed historical section (non-blocking, for transparency)
+          HISTORICAL_SECTION=""
+          if [ "$FILTERED_TOTAL" -gt 0 ]; then
+            HIST_HDR="| ID | Severity | Summary | Source | Patched In |"
+            HIST_SEP="|----|----------|---------|--------|------------|"
+            HISTORICAL_SECTION="$(printf '\n\n<details>\n<summary>%d historical advisory/ies (patched at or before target version — not blocking)</summary>\n\n%s\n%s\n%s</details>' \
+              "$FILTERED_TOTAL" "$HIST_HDR" "$HIST_SEP" "$FILTERED_RESULTS")"
+          fi
+
+          # --- Release Age section (Task 12 — fixes #25 UX) ---
+          RELEASE_AGE_SECTION=""
+          if [ -n "$AGE_TSV" ]; then
+            AGE_TABLE_HDR="| Package | Version | Published | Age | Status |"
+            AGE_TABLE_SEP="|---------|---------|-----------|-----|--------|"
+            AGE_ROWS=""
+            MAX_FAIL_EPOCH=0
+            while IFS=$'\t' read -r _name _ver _eco _iso _days _verdict _reason; do
+              [ -z "$_name" ] && continue
+              case "$_verdict" in
+                pass)  _status="✅ passed" ;;
+                fail)  if [ -n "$_reason" ]; then _status="❌ blocked (${_reason})"; else _status="❌ blocked"; fi ;;
+                error) _status="⚠️ error (${_reason})" ;;
+                *)     _status="?" ;;
+              esac
+              if [ "$_iso" = "-" ]; then
+                _published_short="-"
+              else
+                _published_short="${_iso%T*}"
+              fi
+              AGE_ROWS="${AGE_ROWS}| \`${_name}\` | v${_ver} | ${_published_short} | ${_days}d | ${_status} |"$'\n'
+
+              # Track max fail epoch for "earliest unblock" footer
+              if [ "$_verdict" = "fail" ] && [ "$_iso" != "-" ]; then
+                _pub_epoch=$(date -u -d "$_iso" +%s 2>/dev/null \
+                  || date -u -d "${_iso}Z" +%s 2>/dev/null \
+                  || date -u -jf '%Y-%m-%dT%H:%M:%SZ' "$_iso" +%s 2>/dev/null \
+                  || date -u -jf '%Y-%m-%dT%H:%M:%S' "${_iso%Z}" +%s 2>/dev/null \
+                  || echo 0)
+                if [ "$_pub_epoch" -gt "$MAX_FAIL_EPOCH" ]; then
+                  MAX_FAIL_EPOCH="$_pub_epoch"
+                fi
+              fi
+            done <<< "$AGE_TSV"
+
+            AGE_FOOTER=""
+            if [ "$COOLDOWN_FAILURES" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
+              _unblock_epoch=$(( MAX_FAIL_EPOCH + COOLDOWN_DAYS * 86400 ))
+              _unblock_iso=$(date -u -d "@$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
+                || date -u -r "$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
+                || echo "unknown")
+              AGE_FOOTER="$(printf '\n> %d package(s) within cooldown window. Earliest unblock: %s.' "$COOLDOWN_FAILURES" "$_unblock_iso")"
+            fi
+
+            RELEASE_AGE_SECTION="$(printf '\n### Release Age (cooldown: %s days)\n\n%s\n%s\n%s%s' \
+              "$COOLDOWN_DAYS" "$AGE_TABLE_HDR" "$AGE_TABLE_SEP" "$AGE_ROWS" "$AGE_FOOTER")"
+          fi
+
+          # --- Extraction warning section (Task 12 — surfaces #27 silent drops) ---
+          EXTRACTION_WARNING_SECTION=""
+          if [ -n "$EXTRACTION_WARNING" ]; then
+            EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
+          fi
+
+          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s' \
+            "## Dependency Safety Scan" \
+            "$EXTRACTION_WARNING_SECTION" \
+            "**Packages scanned:** ${DEPS}" \
+            "### Results" \
+            "$RESULTS_HEADER" \
+            "$RESULTS_TABLE" \
+            "$RESULTS_FOOTER" \
+            "$HISTORICAL_SECTION" \
+            "$RELEASE_AGE_SECTION" \
+            "$SCORECARD_SECTION")"
+
+          # --- Comment management: update-or-create with change detection ---
+          COMMENTS_JSON=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" --paginate)
+          EXISTING_COMMENT_ID=$(echo "$COMMENTS_JSON" | jq -r "
+            [.[] | select(
+              (.body | contains(\"<!-- dependency-safety-\")) or
+              (.body | contains(\"## Dependency Safety Scan\"))
+            )][0].id // empty")
+
+          PREV_IDS=""
+          if [ -n "$EXISTING_COMMENT_ID" ]; then
+            PREV_BODY=$(echo "$COMMENTS_JSON" | jq -r "
+              [.[] | select(.id == ${EXISTING_COMMENT_ID})][0].body")
+            PREV_ACTIVE=$(echo "$PREV_BODY" | sed '/<details>/,$d')
+            PREV_IDS=$(echo "$PREV_ACTIVE" | \
+              grep -oE '(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|PYSEC-[0-9]+-[0-9]+)' | \
+              sort -u | tr '\n' ',' | sed 's/,$//' || true)
+          fi
+
+          CURRENT_IDS=$(echo "$SCAN_RESULTS" | \
+            grep -oE '(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|PYSEC-[0-9]+-[0-9]+)' | \
+            sort -u | tr '\n' ',' | sed 's/,$//' || true)
+
+          SCAN_MARKER="<!-- dependency-safety-${PR_NUMBER} -->"
+          TIMESTAMP="Last scanned: $(date -u +'%Y-%m-%d %H:%M') UTC"
+          DIVIDER="---"
+          COMMENT_BODY="$(printf '%s\n%s\n\n%s\n_%s_' \
+            "$SCAN_MARKER" \
+            "$COMMENT_BODY" \
+            "$DIVIDER" \
+            "$TIMESTAMP")"
+
+          if [ -n "$EXISTING_COMMENT_ID" ]; then
+            gh api "repos/${GH_REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+              -X PATCH \
+              -f body="$COMMENT_BODY"
+            echo "Updated existing scan comment (ID: ${EXISTING_COMMENT_ID})"
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GH_REPO" \
+              --body "$COMMENT_BODY"
+            echo "Created new scan comment"
+          fi
+
+          if [ -n "$EXISTING_COMMENT_ID" ] && [ "$PREV_IDS" != "$CURRENT_IDS" ]; then
+            CHANGE_NOTE="Advisory status changed since last scan — review updated findings above."
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GH_REPO" \
+              --body "$CHANGE_NOTE"
+            echo "Posted change notification"
+          fi
+
+          # --- Gate state machine (Task 11 — combines advisory + cooldown verdicts) ---
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            # Fail-loud guard: parser could not extract deps from a lockfile-touching
+            # diff, and the PR-body fallback also produced nothing. Refuse to issue
+            # a green gate — manual review required (fix for issue #52).
+            GATE_STATE="error"
+            STATUS_DESC="Could not extract dependencies from diff. Manual review required."
+            AUTO_MERGE_OK=false
+          elif [ "$TOTAL" -gt 0 ]; then
+            # Advisory failure wins — strictest signal (existing v2.0.1 semantic: gate=success with "review needed")
+            GATE_STATE="success"
+            STATUS_DESC="${TOTAL} advisory/ies found (version-filtered). Manual review required."
+            AUTO_MERGE_OK=false
+          elif [ "$COOLDOWN_FAILURES" -gt 0 ]; then
+            if [ "$FAIL_ON_COOLDOWN" = "true" ]; then
+              GATE_STATE="failure"
+            else
+              GATE_STATE="pending"
+            fi
+            STATUS_DESC="${COOLDOWN_FAILURES} package(s) within ${COOLDOWN_DAYS}-day cooldown window. Waiting for age."
+            AUTO_MERGE_OK=false
+          else
+            GATE_STATE="success"
+            STATUS_DESC="Clean scan (version-filtered, cooldown ≥ ${COOLDOWN_DAYS}d). Ready for merge."
+            AUTO_MERGE_OK=true
+          fi
+
+          # --- Conditional auto-merge ---
+          if [ "$AUTO_MERGE" = "true" ] && [ "$AUTO_MERGE_OK" = "true" ]; then
+            if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
+              STATUS_DESC="${STATUS_DESC} Auto-merge enabled."
+              echo "Auto-merge enabled for PR #${PR_NUMBER}"
+            else
+              STATUS_DESC="${STATUS_DESC} Auto-merge unavailable — merge manually."
+              echo "WARNING: gh pr merge failed for PR #${PR_NUMBER}"
+            fi
+          fi
+
+          # --- Set final status ---
+          gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+            -f state="$GATE_STATE" \
+            -f context="dependency-safety / gate" \
+            -f description="$STATUS_DESC"
