@@ -11,14 +11,14 @@ on:
         type: boolean
         default: false
         description: "Auto-merge clean PRs after scan completes"
-      cooldown_days:
+      minimum_release_age_days:
         type: number
-        default: 7
-        description: "Minimum release age in days before auto-merge is allowed. 0 disables the release-age gate entirely (pre-v2.0.2 behavior)."
-      fail_on_cooldown:
+        default: 5
+        description: "Floor for target-version release age. Verified at scan time; should match cooldown.default-days in your dependabot.yml."
+      fail_on_age_violation:
         type: boolean
-        default: false
-        description: "If true, cooldown blocks set the gate to failure instead of pending. Use when branch protection requires a hard-red blocker."
+        default: true
+        description: "If true, age violation sets gate to failure. If false, gate is success with a dependency-age-violation label only. Auto-merge is suppressed in either case."
 
 jobs:
   scan:
@@ -66,8 +66,12 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ENABLE_SCORECARD: ${{ inputs.enable_scorecard }}
           AUTO_MERGE: ${{ inputs.auto_merge }}
-          COOLDOWN_DAYS: ${{ inputs.cooldown_days }}
-          FAIL_ON_COOLDOWN: ${{ inputs.fail_on_cooldown }}
+          # COOLDOWN_DAYS is intentionally named for the inlined check-release-age.sh,
+          # which is shared with dependency-cooldown.yml and requires that env name.
+          # MINIMUM_RELEASE_AGE_DAYS feeds safety-verdict.sh and human-readable strings.
+          COOLDOWN_DAYS: ${{ inputs.minimum_release_age_days }}
+          MINIMUM_RELEASE_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
+          FAIL_ON_AGE_VIOLATION: ${{ inputs.fail_on_age_violation }}
         run: |
           # --- BEGIN inline:scripts/extract-deps.sh ---
           extract_deps() (
@@ -475,6 +479,136 @@ jobs:
           )
           # --- END inline:scripts/check-release-age.sh ---
 
+          # --- BEGIN inline:scripts/safety-verdict.sh ---
+          safety_verdict() (
+          # safety-verdict.sh — translate dependency-safety scan facts to a gate verdict.
+          #
+          # Pure logic: no network, no `gh` calls, no I/O beyond stdin/stdout.
+          # Fail-closed: invalid/missing env → diagnostic on stderr, non-zero exit.
+          # The workflow MUST treat non-zero exit as: gate_state=error,
+          # has_safety_error=true, auto_merge_ok=false.
+          #
+          # Inputs (env vars, all required):
+          #   GUARD_TRIGGERED         true|false
+          #   AGE_ERROR_COUNT         int >=0
+          #   AGE_VIOLATION_COUNT     int >=0
+          #   SCAN_ERROR_COUNT        int >=0  (GHSA/OSV only — scorecard failures excluded)
+          #   ADVISORY_COUNT          int >=0  (post version-aware filtering)
+          #   FAIL_ON_AGE_VIOLATION   true|false
+          #   MINIMUM_RELEASE_AGE_DAYS int >=0
+          #   AUTO_MERGE              true|false
+          #
+          # Output (stdout, single TSV line, six fields, no trailing newline beyond one):
+          #   gate_state\tauto_merge_ok\thas_safety_error\thas_age_violation\thas_security_review\tstatus_desc
+          #
+          # Bash 3.2 compatible (macOS system bash).
+
+          set -uo pipefail
+
+          die() {
+            printf 'safety-verdict.sh: %s\n' "$1" >&2
+            exit 2
+          }
+
+          require_bool() {
+            local name="$1"
+            local val
+            eval "val=\${$name-__unset__}"
+            case "$val" in
+              __unset__) die "missing required env: $name" ;;
+              true|false) ;;
+              *) die "$name must be 'true' or 'false', got: $val" ;;
+            esac
+          }
+
+          require_nonneg_int() {
+            local name="$1"
+            local val
+            eval "val=\${$name-__unset__}"
+            if [ "$val" = "__unset__" ]; then
+              die "missing required env: $name"
+            fi
+            case "$val" in
+              ''|*[!0-9]*) die "$name must be a non-negative integer, got: $val" ;;
+            esac
+          }
+
+          require_bool GUARD_TRIGGERED
+          require_bool FAIL_ON_AGE_VIOLATION
+          require_bool AUTO_MERGE
+          require_nonneg_int AGE_ERROR_COUNT
+          require_nonneg_int AGE_VIOLATION_COUNT
+          require_nonneg_int SCAN_ERROR_COUNT
+          require_nonneg_int ADVISORY_COUNT
+          require_nonneg_int MINIMUM_RELEASE_AGE_DAYS
+
+          error_total=$(( AGE_ERROR_COUNT + SCAN_ERROR_COUNT ))
+
+          # --- gate_state (priority order) ---
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            gate_state="error"
+          elif [ "$error_total" -gt 0 ]; then
+            gate_state="error"
+          elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$FAIL_ON_AGE_VIOLATION" = "true" ]; then
+            gate_state="failure"
+          else
+            gate_state="success"
+          fi
+
+          # --- label booleans (independent facts) ---
+          if [ "$GUARD_TRIGGERED" = "true" ] || [ "$error_total" -gt 0 ]; then
+            has_safety_error="true"
+          else
+            has_safety_error="false"
+          fi
+
+          if [ "$AGE_VIOLATION_COUNT" -gt 0 ]; then
+            has_age_violation="true"
+          else
+            has_age_violation="false"
+          fi
+
+          if [ "$ADVISORY_COUNT" -gt 0 ]; then
+            has_security_review="true"
+          else
+            has_security_review="false"
+          fi
+
+          # --- auto_merge_ok (final boolean) ---
+          if [ "$AUTO_MERGE" = "true" ] \
+             && [ "$GUARD_TRIGGERED" = "false" ] \
+             && [ "$error_total" -eq 0 ] \
+             && [ "$AGE_VIOLATION_COUNT" -eq 0 ] \
+             && [ "$ADVISORY_COUNT" -eq 0 ]; then
+            auto_merge_ok="true"
+          else
+            auto_merge_ok="false"
+          fi
+
+          # --- status_desc (≤140 chars, composed per priority winner) ---
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            status_desc="Could not extract dependencies from diff. Manual review required."
+          elif [ "$error_total" -gt 0 ]; then
+            status_desc="Scan errors: ${AGE_ERROR_COUNT} age lookup(s), ${SCAN_ERROR_COUNT} advisory query/ies. Re-run or push to retry."
+          elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$FAIL_ON_AGE_VIOLATION" = "true" ]; then
+            status_desc="${AGE_VIOLATION_COUNT} package(s) younger than ${MINIMUM_RELEASE_AGE_DAYS}d cooldown — Dependabot native cooldown invariant violated."
+          elif [ "$ADVISORY_COUNT" -gt 0 ]; then
+            status_desc="${ADVISORY_COUNT} advisory/ies found (version-filtered). Manual review required."
+          elif [ "$AGE_VIOLATION_COUNT" -gt 0 ]; then
+            status_desc="${AGE_VIOLATION_COUNT} package(s) below ${MINIMUM_RELEASE_AGE_DAYS}d cooldown (advisory mode). Auto-merge suppressed."
+          elif [ "$auto_merge_ok" = "true" ]; then
+            status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Auto-merge enabled."
+          else
+            status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Ready for merge."
+          fi
+
+          printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$gate_state" "$auto_merge_ok" \
+            "$has_safety_error" "$has_age_violation" "$has_security_review" \
+            "$status_desc"
+          )
+          # --- END inline:scripts/safety-verdict.sh ---
+
           DIFF=$(gh pr diff "$PR_NUMBER" --repo "$GH_REPO")
 
           DEPS=""
@@ -853,6 +987,65 @@ jobs:
           # --- Build comment body ---
           TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
 
+          # --- Compute verdict via safety_verdict (inline copy of scripts/safety-verdict.sh) ---
+          # Split COOLDOWN_FAILURES into age_error_count vs age_violation_count by
+          # re-reading AGE_TSV (verdicts: 'fail' = violation, 'error' = lookup error).
+          AGE_VIOLATION_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail"'  | wc -l | tr -d ' ')
+          AGE_ERROR_COUNT=$(    echo "$AGE_TSV" | awk -F'\t' '$6=="error"' | wc -l | tr -d ' ')
+
+          # SCAN_ERROR_COUNT = GHSA/OSV failures (scorecard failures are NOT blocking).
+          # The existing code sets HAS_ERROR=true on any GHSA/OSV failure but doesn't
+          # count individual failures; we conservatively report 1 if any occurred.
+          if [ -n "${HAS_ERROR:-}" ]; then
+            SCAN_ERROR_COUNT=1
+          else
+            SCAN_ERROR_COUNT=0
+          fi
+
+          # Map GUARD_TRIGGERED to lowercase string the script expects.
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            _gt_bool="true"
+          else
+            _gt_bool="false"
+          fi
+
+          # Call safety_verdict with `if ...; then`. NOT VAR=$(...); RC=$?
+          # — under `bash -e` a failing command substitution can abort the
+          # step before $? is captured, defeating fail-closed semantics.
+          if VERDICT_TSV=$(GUARD_TRIGGERED="$_gt_bool" \
+                           AGE_ERROR_COUNT="$AGE_ERROR_COUNT" \
+                           AGE_VIOLATION_COUNT="$AGE_VIOLATION_COUNT" \
+                           SCAN_ERROR_COUNT="$SCAN_ERROR_COUNT" \
+                           ADVISORY_COUNT="$TOTAL" \
+                           FAIL_ON_AGE_VIOLATION="$FAIL_ON_AGE_VIOLATION" \
+                           MINIMUM_RELEASE_AGE_DAYS="$MINIMUM_RELEASE_AGE_DAYS" \
+                           AUTO_MERGE="$AUTO_MERGE" \
+                           safety_verdict); then
+            VERDICT_RC=0
+          else
+            VERDICT_RC=$?
+          fi
+
+          if [ "$VERDICT_RC" -ne 0 ] || [ -z "$VERDICT_TSV" ]; then
+            # Fail-closed: synthesize an error verdict so the gate is red and
+            # auto-merge is suppressed even if the script crashed unexpectedly.
+            GATE_STATE="error"
+            AUTO_MERGE_OK="false"
+            HAS_SAFETY_ERROR="true"
+            HAS_AGE_VIOLATION="false"
+            HAS_SECURITY_REVIEW="false"
+            STATUS_DESC="Internal: verdict script rejected inputs — see workflow logs."
+          else
+            IFS=$'\t' read -r GATE_STATE AUTO_MERGE_OK HAS_SAFETY_ERROR \
+                              HAS_AGE_VIOLATION HAS_SECURITY_REVIEW STATUS_DESC \
+                              <<< "$VERDICT_TSV"
+          fi
+
+          # Map verdict's HAS_SAFETY_ERROR to the legacy HAS_ERROR variable that
+          # reconcile_label() inspects for the conservative-preserve rule.
+          # Escalates only — never demotes a HAS_ERROR=true that the scan loop set.
+          if [ "$HAS_SAFETY_ERROR" = "true" ]; then HAS_ERROR="true"; fi
+
           # --- Label reconciliation (Task 13b — authoritative on clean runs, additive-only on HAS_ERROR paths) ---
           LABEL_COLOR_security_review_needed="B60205"
           LABEL_DESC_security_review_needed="Dependency scan found advisories — manual review required"
@@ -1050,41 +1243,19 @@ jobs:
             echo "Posted change notification"
           fi
 
-          # --- Gate state machine (Task 11 — combines advisory + cooldown verdicts) ---
-          if [ "$GUARD_TRIGGERED" = "true" ]; then
-            # Fail-loud guard: parser could not extract deps from a lockfile-touching
-            # diff, and the PR-body fallback also produced nothing. Refuse to issue
-            # a green gate — manual review required (fix for issue #52).
-            GATE_STATE="error"
-            STATUS_DESC="Could not extract dependencies from diff. Manual review required."
-            AUTO_MERGE_OK=false
-          elif [ "$TOTAL" -gt 0 ]; then
-            # Advisory failure wins — strictest signal (existing v2.0.1 semantic: gate=success with "review needed")
-            GATE_STATE="success"
-            STATUS_DESC="${TOTAL} advisory/ies found (version-filtered). Manual review required."
-            AUTO_MERGE_OK=false
-          elif [ "$COOLDOWN_FAILURES" -gt 0 ]; then
-            if [ "$FAIL_ON_COOLDOWN" = "true" ]; then
-              GATE_STATE="failure"
-            else
-              GATE_STATE="pending"
-            fi
-            STATUS_DESC="${COOLDOWN_FAILURES} package(s) within ${COOLDOWN_DAYS}-day cooldown window. Waiting for age."
-            AUTO_MERGE_OK=false
-          else
-            GATE_STATE="success"
-            STATUS_DESC="Clean scan (version-filtered, cooldown ≥ ${COOLDOWN_DAYS}d). Ready for merge."
-            AUTO_MERGE_OK=true
-          fi
-
           # --- Conditional auto-merge ---
-          if [ "$AUTO_MERGE" = "true" ] && [ "$AUTO_MERGE_OK" = "true" ]; then
+          # AUTO_MERGE_OK is the FINAL boolean from safety-verdict.sh —
+          # do NOT additionally gate on $AUTO_MERGE here (the script already did).
+          # Sets AUTO_MERGE_COMMENT_NOTE on SETUP failure (consumed by Task 5's
+          # comment composition). "Required checks not yet satisfied" is NOT a
+          # setup failure — that is the normal case --auto handles.
+          AUTO_MERGE_COMMENT_NOTE=""
+          if [ "$AUTO_MERGE_OK" = "true" ]; then
             if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
-              STATUS_DESC="${STATUS_DESC} Auto-merge enabled."
               echo "Auto-merge enabled for PR #${PR_NUMBER}"
             else
-              STATUS_DESC="${STATUS_DESC} Auto-merge unavailable — merge manually."
-              echo "WARNING: gh pr merge failed for PR #${PR_NUMBER}"
+              AUTO_MERGE_COMMENT_NOTE="Auto-merge could not be enabled: gh pr merge --auto rejected the request (auto-merge disabled, insufficient permission, or PR not mergeable). Merge manually."
+              echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — see comment note"
             fi
           fi
 

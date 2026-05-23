@@ -19,6 +19,7 @@ INLINE_PAIRS=(
   ".github/workflows/dependency-safety.yml:scripts/check-release-age.sh"
   ".github/workflows/dependency-safety.yml:scripts/diff-touches-lockfile.sh"
   ".github/workflows/dependency-safety.yml:scripts/pr-body-to-deps.sh"
+  ".github/workflows/dependency-safety.yml:scripts/safety-verdict.sh"
   ".github/workflows/tag-release.yml:scripts/bump-version-files.sh"
 )
 
