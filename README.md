@@ -1,15 +1,15 @@
 # shared-workflows
 
-Reusable GitHub Actions workflows for dependency management and security scanning.
+Reusable GitHub Actions workflows for dependency safety verification and release management.
 
 ## Features
 
-- **Dual-layer cool-down enforcement** — Dependabot's native `cooldown.default-days` gates PR creation; the workflow's `cooldown_days` input enforces release age on every scan, closing the rebase-bypass path that native cool-down alone leaves open
+- **Native-cooldown verification** — Dependabot's native `cooldown.default-days` owns the wait; `dependency-safety.yml` verifies the invariant on every scan and fails deterministically on violation
 - **Version-aware advisory filtering** — advisories already patched at or below the PR's target version are collapsed into a non-blocking "historical" section
 - **GHSA + OSV dual-source scan** — every package is queried against both GitHub Advisory and OSV.dev; mismatches surface both
 - **OpenSSF Scorecard integration** — Scorecard results for each GitHub Action appear in the scan comment
-- **Update-or-create scan comments** — a single stable comment per PR; change detection posts a reply only when advisory IDs actually change
-- **Optional auto-merge** — clean scans flip on `gh pr merge --auto`; dirty scans apply a `security-review-needed` label instead
+- **Update-or-create scan comments** — a single stable comment per PR; change detection posts a top-level PR comment only when advisory IDs actually change
+- **Optional auto-merge** — clean scans flip on `gh pr merge --auto`; dirty scans apply labels (`security-review-needed`, `dependency-age-violation`, or `dependency-safety-error`) instead
 - **Grouped PR support** — handles both single-package and grouped Dependabot PRs
 
 ## Prerequisites
@@ -22,7 +22,7 @@ Reusable GitHub Actions workflows for dependency management and security scannin
 
 ### 1. Configure Dependabot cool-down
 
-The waiting period is owned by Dependabot itself — the workflow only scans PRs once they're already open. Add `cooldown:` to `.github/dependabot.yml`:
+The waiting period is owned by Dependabot itself — the workflow only verifies that the invariant holds. Add `cooldown:` to `.github/dependabot.yml`:
 
 ```yaml
 # .github/dependabot.yml
@@ -33,18 +33,18 @@ updates:
     schedule:
       interval: "weekly"
     cooldown:
-      default-days: 7
+      default-days: 5
 ```
 
 See [Dependabot cool-down docs](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown--) for per-severity and per-ecosystem overrides.
 
 ### 2. Add the caller workflow
 
-One workflow file invokes the reusable scan on every Dependabot PR:
+One workflow file invokes the reusable verifier on every Dependabot PR:
 
 ```yaml
-# .github/workflows/dependency-cooldown.yml
-name: Dependency Cool-Down
+# .github/workflows/dependency-safety.yml
+name: Dependency Safety
 
 on:
   pull_request:
@@ -58,12 +58,12 @@ permissions:
   issues: write
 
 concurrency:
-  group: cooldown-${{ github.event.pull_request.number }}
+  group: safety-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  cooldown:
-    uses: j7an/shared-workflows/.github/workflows/dependency-cooldown.yml@v1
+  safety:
+    uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v2
     secrets: inherit
     with:
       auto_merge: true
@@ -76,9 +76,9 @@ jobs:
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enable_scorecard` | boolean | `true` | Include OpenSSF Scorecard results for GitHub Actions in the scan comment |
-| `auto_merge` | boolean | `false` | On clean scans, enable `gh pr merge --auto`; on dirty scans, apply the `security-review-needed` label |
-| `cooldown_days` | number | `7` | Minimum release age in days before auto-merge is allowed. Set to `0` to disable workflow-side release-age enforcement (pre-v2.0.2 behavior — relies entirely on Dependabot's native cooldown) |
-| `fail_on_cooldown` | boolean | `false` | If `true`, cooldown blocks set the gate status to `failure` instead of `pending`. Use when branch protection requires a hard-red blocker rather than a self-healing pending state |
+| `auto_merge` | boolean | `false` | On clean scans, enable `gh pr merge --auto`; on dirty scans, apply the appropriate label |
+| `minimum_release_age_days` | number | `5` | Floor for target-version release age. Verified at scan time; should match `cooldown.default-days` in `dependabot.yml` |
+| `fail_on_age_violation` | boolean | `true` | If `true`, age violations set the gate status to `failure`. If `false`, the gate is `success` with a `dependency-age-violation` label and a comment; auto-merge is suppressed in either case |
 
 ## Supported Ecosystems
 
@@ -92,21 +92,19 @@ Grouped Dependabot PRs (multiple packages in one PR) are supported — each pack
 ## How It Works
 
 ```
-Dependabot queues an update
+Dependabot's native cooldown holds an update for `cooldown.default-days`
     │
     ▼
-Native cooldown holds it for `default-days`
+Dependabot opens the PR (target version is now ≥ cooldown days old)
     │
     ▼
-Dependabot opens the PR
-    │
-    ▼
-Cool-down workflow fires on pull_request
+dependency-safety.yml fires on pull_request
     ├── Non-dependabot PR? → status "success" (no-op)
-    ├── Status → "pending" ("Scanning dependencies...")
+    ├── Status → "pending" ("Scanning dependencies for safety...")
     ├── Parses diff to extract package names + target versions
     │     ├── Falls back to PR body text when inline versions are absent
     │     └── Supports github-actions, pip, and uv ecosystems
+    ├── Verifies release age — fails if any target < minimum_release_age_days
     ├── For each package:
     │     ├── GHSA GraphQL query (by ecosystem)
     │     ├── OSV.dev POST query (with version if known)
@@ -114,11 +112,12 @@ Cool-down workflow fires on pull_request
     ├── Version-aware filter:
     │     ├── Advisories with firstPatchedVersion ≤ target → historical bucket
     │     └── Advisories affecting target version → blocking bucket
+    ├── Computes deterministic verdict (safety-verdict.sh)
+    ├── Reconciles labels (security-review-needed, dependency-age-violation, dependency-safety-error)
     ├── Update-or-create single scan comment
-    ├── If advisory IDs changed since last scan → post change-notification reply
-    ├── auto_merge=true + 0 blocking advisories → gh pr merge --auto
-    ├── auto_merge=true + ≥1 blocking advisory → label `security-review-needed`
-    └── Status → "success" (description carries the outcome)
+    ├── If advisory IDs changed since last scan → post change-notification top-level PR comment
+    ├── If clean and auto_merge=true → gh pr merge --auto
+    └── Sets final gate status (success / failure / error)
 ```
 
 ### Version-aware filtering
@@ -129,106 +128,46 @@ PR #23 added filtering so that advisories Dependabot has already fixed don't blo
 - Only advisories affecting the *target* version count toward the blocking total.
 - When the target version can't be determined (no inline comment and no match in the PR body), the workflow falls back to reporting all advisories for the package — safer default.
 
-## Cool-down configuration
+## Gate states and labels
 
-The workflow enforces cool-down at two layers, each independently configurable:
+The `dependency-safety / gate` commit status uses three states:
 
-### Layer 1 — Dependabot native cool-down (PR creation)
+| State | When |
+|-------|------|
+| `success` | Clean scan, OR advisories present (label `security-review-needed`), OR age violation in advisory mode (label `dependency-age-violation`, `fail_on_age_violation: false`) |
+| `failure` | Strict age violation (`fail_on_age_violation: true`) — the Dependabot native cooldown invariant was violated |
+| `error` | Dependency extraction failed, or GHSA/OSV/age-lookup APIs errored — the verdict is unreliable; manual review required |
 
-Configured in `.github/dependabot.yml`. Dependabot holds new PRs until the target version is at least `cooldown.default-days` old. This gate runs once, at PR creation. **It does NOT re-check on `@dependabot rebase`** — a rebase re-resolves to the latest version and skips this gate entirely.
-
-```yaml
-# .github/dependabot.yml
-updates:
-  - package-ecosystem: "github-actions"
-    cooldown:
-      default-days: 7
-```
-
-See the [cool-down options reference](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown--) for per-severity (`semver-major-days`, `semver-minor-days`, `semver-patch-days`) and package include/exclude lists.
-
-### Layer 2 — Workflow-side release-age gate (every scan)
-
-Configured via the `cooldown_days` input on the caller workflow (default `7`). The workflow re-evaluates release age on every scan, including after `@dependabot rebase`. If any target version is younger than `cooldown_days`, the workflow:
-
-- Applies the `cooldown-pending` label
-- Sets the `dependency-cooldown / gate` status to `pending` (or `failure` if `fail_on_cooldown: true`)
-- Skips `gh pr merge --auto` even if the advisory scan is clean
-
-Once the next scan finds all versions past the threshold, the label is removed and the gate flips to `success`. To disable workflow-side enforcement entirely (pre-v2.0.2 behavior), set `cooldown_days: 0` in the caller workflow.
-
-### Bypass
-
-There is no per-PR bypass label. To ship a zero-day fix immediately:
-
-- Lower `cooldown.default-days` in `.github/dependabot.yml` for the affected ecosystem, OR
-- Set `cooldown_days: 0` in the caller workflow temporarily, OR
-- Merge manually (the gate state is informational; you control your branch protection rules)
-
-Commit history on `dependabot.yml` and your caller workflow is the audit trail.
-
-## Labels
-
-The workflow manages two labels on Dependabot PRs. **Both are reconciled on every scan** — applied when the condition is true, removed when it becomes false.
+Labels:
 
 | Label | Color | Applied when | Removed when |
 |-------|-------|--------------|--------------|
-| `security-review-needed` | red (`B60205`) | Advisory scan finds vulnerabilities affecting target versions | Re-scan finds zero applicable advisories |
-| `cooldown-pending` | amber (`FBCA04`) | Any target version is younger than `cooldown_days` | Re-scan finds all versions past the threshold |
+| `security-review-needed` | red (`B60205`) | Advisory scan finds vulnerabilities affecting target versions | Re-scan finds zero applicable advisories AND no `error` state |
+| `dependency-age-violation` | amber (`FBCA04`) | Any target version is younger than `minimum_release_age_days` | All versions pass age check AND no `error` state |
+| `dependency-safety-error` | grey (`6E7781`) | Scan extraction failed or API errors occurred | Clean scan completes without errors |
 
-The reconciliation is authoritative — a PR that was dirty at first scan and clean after rebase will have neither label at merge time.
+Reconciliation is authoritative when the scan succeeds. On the `error` path, labels are preserved (not removed) since the verdict is unreliable.
 
-## Scheduled re-scan for long-pending PRs (v2.4.0+)
+## Migration From Legacy Cooldown
 
-A Dependabot PR that opens *during* its dependency's cooldown window scans once and then sits in the `pending` gate state until either Dependabot rebases or a human prods `@dependabot recreate`. To rescan automatically on a schedule, consumers can add a thin caller workflow that invokes `cooldown-rescan.yml`:
+If you're migrating from `dependency-cooldown.yml`:
 
-```yaml
-# .github/workflows/dependency-cooldown-rescan.yml
-name: Dependency Cooldown Rescan
+1. **Add native cooldown** to `.github/dependabot.yml` (`cooldown.default-days: 5` or higher).
+2. **Replace the caller `uses:`** line:
+   ```diff
+   - uses: j7an/shared-workflows/.github/workflows/dependency-cooldown.yml@v2
+   + uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v2
+   ```
+3. **Rename the input** `cooldown_days` → `minimum_release_age_days`.
+4. **Drop `fail_on_cooldown`** — replaced by `fail_on_age_violation` with different semantics (failure-on-violation, not pending-on-violation).
+5. **Remove any caller workflow** that uses `cooldown-rescan.yml` (no rescan companion under the new model — the verifier is single-shot per PR event).
+6. **Optional:** add `rebase-strategy: disabled` to your `dependabot.yml` ecosystem block. This avoids `@dependabot rebase` pulling in newer versions that have not yet aged through native cooldown.
 
-on:
-  schedule:
-    - cron: "0 6 * * *"   # daily at 06:00 UTC; tune per consumer
-  workflow_dispatch:
+After migration, the `cooldown-pending` label (managed by the legacy workflow) will become stale on the PR; the new workflow does not touch it, so remove it manually if desired.
 
-permissions:
-  contents: read
-  pull-requests: read
-  actions: write
-  statuses: read
+## Legacy Workflows
 
-jobs:
-  rescan:
-    uses: j7an/shared-workflows/.github/workflows/cooldown-rescan.yml@v2
-```
-
-How it works: on each invocation, the rescan workflow lists open Dependabot PRs in the caller repo, finds those whose `dependency-cooldown / gate` commit status is `pending`, and reruns the most recent `dependency-cooldown.yml` workflow run for each via `gh run rerun`. The replayed run uses the original `pull_request` payload (so the head SHA is stable) but with the current runtime clock — release-age gates re-evaluate freshly.
-
-The workflow only triggers PRs with a `pending` gate. PRs in `success` or `failure` are left alone.
-
-### Cadence
-
-Cadence is owned by the caller. Sweep at least once per cooldown-window step (e.g., a 7-day cooldown is comfortably handled by a daily sweep; a 1-day cooldown wants every-few-hours). GitHub may delay scheduled runs by up to ~30 minutes under load, so use `workflow_dispatch:` as the manual escape hatch.
-
-### Dry-run rollout
-
-For initial validation, pass `dry_run: true` so the sweep logs decisions without calling `gh run rerun`:
-
-```yaml
-jobs:
-  rescan:
-    uses: j7an/shared-workflows/.github/workflows/cooldown-rescan.yml@v2
-    with:
-      dry_run: true
-```
-
-Trigger via `workflow_dispatch`, inspect the `$GITHUB_STEP_SUMMARY` table, then remove the `with:` block once the filter logic looks right.
-
-### Inputs
-
-| Input | Type | Default | Description |
-|-------|------|---------|-------------|
-| `dry_run` | boolean | `false` | When `true`, log decisions to `$GITHUB_STEP_SUMMARY` but do not call `gh run rerun`. Use for initial-rollout validation and incident diagnostics. |
+`dependency-cooldown.yml` and `cooldown-rescan.yml` implement the pre-2026 workflow-owned waiting model: the workflow itself held PRs in `pending` state for the cooldown window, and a separate rescan workflow swept stale PRs on a schedule. These remain available during the sibling-migration window and will be removed in a future major release once known consumers have moved to `dependency-safety.yml`. See [Migration From Legacy Cooldown](#migration-from-legacy-cooldown) above.
 
 ## Security Analysis (Zizmor)
 
@@ -291,9 +230,7 @@ Tags are managed automatically — merging a PR to this repo creates a semver ta
 
 ## Known caller-side constraints
 
-The reusable workflows in this repo are **self-contained at runtime**: they must
-not fetch `j7an/shared-workflows` source at runtime, and they must not reference
-caller-scoped context variables as if they were reusable-workflow-scoped.
+The reusable workflows in this repo are **self-contained at runtime**: they must not fetch `j7an/shared-workflows` source at runtime, and they must not reference caller-scoped context variables as if they were reusable-workflow-scoped.
 
 The following are forbidden inside any `workflow_call` file:
 
@@ -303,19 +240,9 @@ The following are forbidden inside any `workflow_call` file:
 | `ref: ${{ github.sha }}` | Same problem — resolves to caller context |
 | `ref: ${{ github.ref }}` | Same problem — resolves to caller's branch/tag ref |
 
-This policy exists because violating it caused [#29](https://github.com/j7an/shared-workflows/issues/29):
-v2.0.2 shipped with a broken `actions/checkout` step that failed deterministically
-on every cross-repo consumer PR. The CI gate that should have caught it was
-structurally incapable of doing so, because `ci-cooldown.yml` self-consumes via
-local path (`uses: ./...`), which makes the caller repo the same as the checkout
-target and masks caller-context bugs by coincidence.
+This policy exists because violating it caused [#29](https://github.com/j7an/shared-workflows/issues/29): v2.0.2 shipped with a broken `actions/checkout` step that failed deterministically on every cross-repo consumer PR. The CI gate that should have caught it was structurally incapable of doing so, because `ci-cooldown.yml` self-consumed via local path (`uses: ./...`), which makes the caller repo the same as the checkout target and masks caller-context bugs by coincidence.
 
-If a future reusable workflow needs to execute a script that's under version
-control in this repo, **inline the script into the workflow YAML**. The bats test
-suite under `tests/` provides unit-test coverage against the standalone
-`scripts/*.sh` files, and `scripts/check-inline-sync.sh` verifies the inline
-copies stay in sync — so test feedback is preserved without introducing a runtime
-source-fetch dependency.
+If a future reusable workflow needs to execute a script that's under version control in this repo, **inline the script into the workflow YAML**. The bats test suite under `tests/` provides unit-test coverage against the standalone `scripts/*.sh` files, and `scripts/check-inline-sync.sh` verifies the inline copies stay in sync — so test feedback is preserved without introducing a runtime source-fetch dependency.
 
 ### For authors adding a new reusable workflow
 
