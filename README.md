@@ -18,6 +18,21 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 - **Native cool-down** configured in `.github/dependabot.yml` (see Quick Start)
 - **No Renovate** — this workflow only scans `dependabot[bot]` PRs; other actors are passed through with a success status
 
+> **Scope: version-update PRs.** Dependabot's native `cooldown:` setting applies
+> only to *version updates*, not [security updates][gh-cooldown-scope]. The
+> default `fail_on_age_violation: true` therefore treats young security-fix PRs
+> as invariant violations even though native cooldown never held them. For
+> repos with Dependabot security updates enabled, choose one:
+>
+> - **Advisory mode (interim):** set `fail_on_age_violation: false` so age
+>   violations apply the `dependency-age-violation` label instead of failing
+>   the gate. The trade-off: the strict invariant is weakened for *all*
+>   Dependabot PRs, not just security ones.
+> - **Wait for follow-up detection** that treats security-update PRs as a
+>   distinct class (tracked separately; not in this release).
+>
+> [gh-cooldown-scope]: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown--
+
 ## Quick Start
 
 ### 1. Configure Dependabot cool-down
@@ -70,6 +85,11 @@ jobs:
 ```
 
 `contents: write` is only required when `auto_merge: true`; otherwise `contents: read` is sufficient.
+
+> **Note:** `@v2` resolves to `dependency-safety.yml` only after a release of
+> this repo that contains it. Before that, pin to the explicit tag where the
+> workflow first shipped (`@vX.Y.Z`). Releases in this repo are dispatched
+> manually — see [Versioning](#versioning).
 
 ## Inputs
 
@@ -161,7 +181,8 @@ If you're migrating from `dependency-cooldown.yml`:
 3. **Rename the input** `cooldown_days` → `minimum_release_age_days`.
 4. **Drop `fail_on_cooldown`** — replaced by `fail_on_age_violation` with different semantics (failure-on-violation, not pending-on-violation).
 5. **Remove any caller workflow** that uses `cooldown-rescan.yml` (no rescan companion under the new model — the verifier is single-shot per PR event).
-6. **Optional:** add `rebase-strategy: disabled` to your `dependabot.yml` ecosystem block. This avoids `@dependabot rebase` pulling in newer versions that have not yet aged through native cooldown.
+6. **Update branch protection / rulesets.** The commit-status context changes from `dependency-cooldown / gate` to `dependency-safety / gate`. Required-status-check rules on the old context will wait forever once you cut over. In Settings → Branches (or Rules), remove `dependency-cooldown / gate` from the required checks list and add `dependency-safety / gate` in its place. The two contexts can coexist briefly if you keep both workflows running during a Phase 2 transition.
+7. **Optional:** add `rebase-strategy: disabled` to your `dependabot.yml` ecosystem block. This avoids `@dependabot rebase` pulling in newer versions that have not yet aged through native cooldown.
 
 After migration, the `cooldown-pending` label (managed by the legacy workflow) will become stale on the PR; the new workflow does not touch it, so remove it manually if desired.
 
@@ -226,7 +247,7 @@ jobs:
 | `@vX.Y` | Patch fixes only within minor `X.Y` | Want patches but not new features |
 | `@vX.Y.Z` | Nothing (frozen) | Need exact reproducibility or rollback |
 
-Tags are managed automatically — merging a PR to this repo creates a semver tag based on conventional commit prefixes and updates the floating tags.
+Releases are cut manually via the `release-self.yml` workflow dispatch. Merging a PR to `main` does **not** create a tag on its own. When a maintainer dispatches `release-self.yml` (with `bump: auto`), it scans Conventional Commits since the last tag, computes the next semver tag, and updates the floating `vX` / `vX.Y` tags to point at the new commit.
 
 ## Known caller-side constraints
 
