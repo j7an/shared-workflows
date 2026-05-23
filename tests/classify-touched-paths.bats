@@ -143,3 +143,15 @@
   [ "$status" -eq 0 ]
   diff <(echo "$output") <(printf 'Cargo.toml\npnpm-lock.yaml\n')
 }
+
+@test "input without trailing newline — final record still emitted" {
+  run bash -c 'printf "package-lock.json" | bash scripts/classify-touched-paths.sh'
+  [ "$status" -eq 0 ]
+  [ "$output" = "package-lock.json" ]
+}
+
+@test "multiple records, last without trailing newline — all emitted" {
+  run bash -c 'printf "uv.lock\npackage-lock.json" | bash scripts/classify-touched-paths.sh'
+  [ "$status" -eq 0 ]
+  [ "$output" = "package-lock.json" ]
+}

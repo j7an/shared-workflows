@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-while IFS= read -r path; do
+while IFS= read -r path || [ -n "$path" ]; do
   [ -z "$path" ] && continue
   base="${path##*/}"
 
