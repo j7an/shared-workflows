@@ -616,6 +616,7 @@ jobs:
           GHSA_TOTAL=0
           OSV_TOTAL=0
           HAS_ERROR=""
+          SCAN_ERROR_COUNT=0
           declare -A ACTION_VERSIONS PY_VERSIONS
           FILTERED_RESULTS=""
           FILTERED_TOTAL=0
@@ -763,12 +764,14 @@ jobs:
               }
             ' -f "name=${ACTION}" 2>&1) || {
               HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
               SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${ACTION}\`) | - | - | GHSA |"$'\n'
               GHSA_RESULT=""
             }
 
             if [ -n "$GHSA_RESULT" ] && echo "$GHSA_RESULT" | jq -e '.errors' > /dev/null 2>&1; then
               HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
               GHSA_ERR=$(echo "$GHSA_RESULT" | jq -r '.errors[0].message // "unknown error"')
               SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${ACTION}\`: ${GHSA_ERR}) | - | - | GHSA |"$'\n'
               GHSA_RESULT=""
@@ -823,6 +826,7 @@ jobs:
               -d "$OSV_BODY" \
               2>&1) || {
               HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
               SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${ACTION}\`) | - | - | OSV |"$'\n'
               OSV_RESULT=""
             }
@@ -872,12 +876,14 @@ jobs:
               }
             ' -f "name=${PKG}" 2>&1) || {
               HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
               SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${PKG}\`) | - | - | GHSA |"$'\n'
               GHSA_RESULT=""
             }
 
             if [ -n "$GHSA_RESULT" ] && echo "$GHSA_RESULT" | jq -e '.errors' > /dev/null 2>&1; then
               HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
               GHSA_ERR=$(echo "$GHSA_RESULT" | jq -r '.errors[0].message // "unknown error"')
               SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${PKG}\`: ${GHSA_ERR}) | - | - | GHSA |"$'\n'
               GHSA_RESULT=""
@@ -932,6 +938,7 @@ jobs:
               -d "$OSV_BODY" \
               2>&1) || {
               HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
               SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${PKG}\`) | - | - | OSV |"$'\n'
               OSV_RESULT=""
             }
@@ -993,14 +1000,10 @@ jobs:
           AGE_VIOLATION_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail"'  | wc -l | tr -d ' ')
           AGE_ERROR_COUNT=$(    echo "$AGE_TSV" | awk -F'\t' '$6=="error"' | wc -l | tr -d ' ')
 
-          # SCAN_ERROR_COUNT = GHSA/OSV failures (scorecard failures are NOT blocking).
-          # The existing code sets HAS_ERROR=true on any GHSA/OSV failure but doesn't
-          # count individual failures; we conservatively report 1 if any occurred.
-          if [ -n "${HAS_ERROR:-}" ]; then
-            SCAN_ERROR_COUNT=1
-          else
-            SCAN_ERROR_COUNT=0
-          fi
+          # SCAN_ERROR_COUNT is incremented at each GHSA/OSV failure point in the
+          # scan loops above (scorecard failures are NOT counted — they're not
+          # blocking). HAS_ERROR is preserved alongside as the legacy boolean
+          # consumers below still test for.
 
           # Map GUARD_TRIGGERED to lowercase string the script expects.
           if [ "$GUARD_TRIGGERED" = "true" ]; then
