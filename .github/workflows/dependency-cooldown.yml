@@ -546,18 +546,19 @@ jobs:
           # --- Extract dependencies via standalone script (Task 8) ---
           DEPS_TSV=$(echo "$DIFF" | extract_deps)
 
+          # --- Compute touched paths and unsupported subset ONCE, up front. ---
+          # Both Layer 2 (PR-body fallback) and Layer 3 (fail-loud guard) consume
+          # these. Hoisted from inside Layer 2 to keep the two layers' inputs
+          # identical and to make the guard logic independent of DEPS_TSV being
+          # empty (fix for issue #62 — partial extraction silent-green).
+          TOUCHED_PATHS=$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)
+          UNSUPPORTED_PATHS=$(printf '%s\n' "$TOUCHED_PATHS" | classify_touched_paths 2>/dev/null || true)
+
           # --- Layer 2: PR-body fallback (defense in depth for issue #52) ---
-          TOUCHED_PATHS=""
+          # Routing list unchanged — pyproject.toml and Pipfile remain pypi-routable
+          # here even though Layer 3 will still fire on them, since the guard
+          # reflects extract-deps parser support, not PR-body recovery support.
           if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
-            TOUCHED_PATHS=$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)
-            # Keep the pypi regex below in sync with filename_to_ecosystem() in
-            # scripts/extract-deps.sh — ONLY lockfiles the parser actually handles
-            # should route to the pypi fallback. Cargo.lock, yarn.lock, etc. are
-            # emitted by diff_touches_lockfile (for guard detection) but must NOT
-            # route here — they fall through and trip the fail-loud guard instead.
-            # Mixed-touch policy: if a PR touches BOTH a pypi lockfile AND an actions
-            # workflow YAML, pypi wins. The fallback parser handles one ecosystem per
-            # PR; actions bumps (if any) fall through to the guard and will refuse green.
             ECO_HINT=""
             if echo "$TOUCHED_PATHS" | grep -qE '((^|/)(uv|poetry)\.lock$|requirements[^/]*\.txt$|pyproject\.toml$|Pipfile$)'; then
               ECO_HINT="pypi"
@@ -571,17 +572,21 @@ jobs:
             fi
           fi
 
-          # --- Layer 3: Fail-loud guard (fix for issue #52) ---
+          # --- Layer 3: Fail-loud guard (fixes for issues #52 and #62) ---
+          # Two composed conditions:
+          #  (a) Unsupported paths touched: scan cannot be proven complete (issue #62).
+          #  (b) All touched paths supported but extraction yielded zero rows: parser
+          #      miss on a supported file (issue #52).
+          # Unsupported takes message precedence — it's the more specific diagnosis.
           GUARD_TRIGGERED=false
-          if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
-            # Defense-in-depth: Layer 2 always sets TOUCHED_PATHS when it runs, but the
-            # ${:-} default guards against future refactors that might skip Layer 2.
-            TOUCHED_PATHS="${TOUCHED_PATHS:-$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)}"
-            if [ -n "$TOUCHED_PATHS" ]; then
-              GUARD_TRIGGERED=true
-              TOUCHED_LIST=$(echo "$TOUCHED_PATHS" | paste -sd, -)
-              EXTRACTION_WARNING="⚠️ Parser could not extract dependencies from this diff (touched: ${TOUCHED_LIST}). Manual review required before merge."
-            fi
+          if [ -n "$UNSUPPORTED_PATHS" ]; then
+            GUARD_TRIGGERED=true
+            UNSUPPORTED_LIST=$(echo "$UNSUPPORTED_PATHS" | paste -sd, -)
+            EXTRACTION_WARNING="⚠️ Diff touches dependency files the parser does not support (${UNSUPPORTED_LIST}). Manual review required; the cooldown/safety gate cannot scan these."
+          elif [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ] && [ -n "$TOUCHED_PATHS" ]; then
+            GUARD_TRIGGERED=true
+            TOUCHED_LIST=$(echo "$TOUCHED_PATHS" | paste -sd, -)
+            EXTRACTION_WARNING="⚠️ Parser could not extract dependencies from this diff (touched: ${TOUCHED_LIST}). Manual review required before merge."
           fi
 
           # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
