@@ -1049,8 +1049,10 @@ jobs:
           # --- Label reconciliation (Task 13b — authoritative on clean runs, additive-only on HAS_ERROR paths) ---
           LABEL_COLOR_security_review_needed="B60205"
           LABEL_DESC_security_review_needed="Dependency scan found advisories — manual review required"
-          LABEL_COLOR_cooldown_pending="FBCA04"
-          LABEL_DESC_cooldown_pending="One or more target versions are within the configured cooldown window"
+          LABEL_COLOR_dependency_age_violation="FBCA04"
+          LABEL_DESC_dependency_age_violation="Target version younger than the configured minimum release age (Dependabot native cooldown invariant)"
+          LABEL_COLOR_dependency_safety_error="6E7781"
+          LABEL_DESC_dependency_safety_error="dependency-safety scan could not complete reliably — see scan comment"
 
           reconcile_label() {
             local label="$1"
@@ -1073,10 +1075,15 @@ jobs:
             fi
           }
 
-          _needs_security=$([ "$TOTAL" -gt 0 ] && echo true || echo false)
-          _needs_cooldown=$([ "$COOLDOWN_FAILURES" -gt 0 ] && echo true || echo false)
-          reconcile_label "security-review-needed" "$_needs_security" "$LABEL_COLOR_security_review_needed" "$LABEL_DESC_security_review_needed"
-          reconcile_label "cooldown-pending"       "$_needs_cooldown" "$LABEL_COLOR_cooldown_pending"       "$LABEL_DESC_cooldown_pending"
+          # Label booleans come straight from the verdict (HAS_*) — single source of truth.
+          # The reconcile_label function preserves stale labels when HAS_ERROR is set
+          # (conservative-preserve rule, spec §6.2).
+          #
+          # This workflow MUST NOT touch `cooldown-pending` — that label is owned
+          # exclusively by the legacy dependency-cooldown.yml during Phase 2 migration.
+          reconcile_label "security-review-needed"    "$HAS_SECURITY_REVIEW" "$LABEL_COLOR_security_review_needed"    "$LABEL_DESC_security_review_needed"
+          reconcile_label "dependency-age-violation" "$HAS_AGE_VIOLATION"   "$LABEL_COLOR_dependency_age_violation" "$LABEL_DESC_dependency_age_violation"
+          reconcile_label "dependency-safety-error"  "$HAS_SAFETY_ERROR"    "$LABEL_COLOR_dependency_safety_error"  "$LABEL_DESC_dependency_safety_error"
 
           # Guard-triggered runs must not compose a clean-scan narrative — the
           # gate state machine below flips status to `error`, and the comment
