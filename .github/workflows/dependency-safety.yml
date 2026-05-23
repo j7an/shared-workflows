@@ -1085,43 +1085,92 @@ jobs:
           reconcile_label "dependency-age-violation" "$HAS_AGE_VIOLATION"   "$LABEL_COLOR_dependency_age_violation" "$LABEL_DESC_dependency_age_violation"
           reconcile_label "dependency-safety-error"  "$HAS_SAFETY_ERROR"    "$LABEL_COLOR_dependency_safety_error"  "$LABEL_DESC_dependency_safety_error"
 
-          # Guard-triggered runs must not compose a clean-scan narrative — the
-          # gate state machine below flips status to `error`, and the comment
-          # needs to agree (rather than claim "No known exploits" + auto-merge
-          # enabled on a run we refused to scan). The EXTRACTION_WARNING_SECTION
-          # prepended later (~line 960) still carries the detailed path list.
+          # --- Conditional auto-merge ---
+          # AUTO_MERGE_OK is the FINAL boolean from safety-verdict.sh —
+          # do NOT additionally gate on $AUTO_MERGE here (the script already did).
+          # Sets AUTO_MERGE_COMMENT_NOTE on SETUP failure (consumed by the
+          # comment composition below). "Required checks not yet satisfied" is
+          # NOT a setup failure — that is the normal case --auto handles.
+          # Must run BEFORE comment composition so the comment can attach the note.
+          AUTO_MERGE_COMMENT_NOTE=""
+          if [ "$AUTO_MERGE_OK" = "true" ]; then
+            if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
+              echo "Auto-merge enabled for PR #${PR_NUMBER}"
+            else
+              AUTO_MERGE_COMMENT_NOTE="Auto-merge could not be enabled: gh pr merge --auto rejected the request (auto-merge disabled, insufficient permission, or PR not mergeable). Merge manually."
+              echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — see comment note"
+            fi
+          fi
+
+          # --- Compose results section: table (from scan state) + header/footer (from verdict priority) ---
+          # The two are independent so that a multi-condition PR (e.g. age violation + advisories)
+          # shows both signals: header per priority, table reflecting actual scan data.
+
+          # ---- Results table (from scan state only) ----
           if [ "$GUARD_TRIGGERED" = "true" ]; then
-            RESULTS_HEADER="Dependency extraction failed — manual review required."
+            # Extraction failed — no scan ran.
             TABLE_HDR="| Source | Vulnerabilities |"
             TABLE_SEP="|--------|----------------|"
             ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
             ROW2="| OSV.dev | (not scanned) |"
             RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
-            RESULTS_FOOTER="> Auto-merge not enabled — parser could not determine target versions from diff or PR body."
           elif [ "$TOTAL" -gt 0 ]; then
-            RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
+            # Advisories present — show the actual scan results. This branch wins over
+            # "scan errored with partial results" because partial > nothing.
             TABLE_HDR="| ID | Severity | Summary | Source |"
             TABLE_SEP="|----|----------|---------|--------|"
             RESULTS_TABLE="$(printf '%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$SCAN_RESULTS")"
-            RESULTS_FOOTER="> Review the advisories above before deciding to merge."
-          elif [ -n "$HAS_ERROR" ]; then
-            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
-              -f state=error \
-              -f context="dependency-safety / gate" \
-              -f description="Scan failed due to API errors — re-run or push to retry."
-            exit 0
+          elif [ "$HAS_SAFETY_ERROR" = "true" ]; then
+            # Scan errored AND no advisories tallied — table is empty/unknown.
+            TABLE_HDR="| ID | Severity | Summary | Source |"
+            TABLE_SEP="|----|----------|---------|--------|"
+            RESULTS_TABLE="$(printf '%s\n%s\n| (scan failed — see logs) | - | - | - |' "$TABLE_HDR" "$TABLE_SEP")"
           else
-            RESULTS_HEADER="No known exploits found affecting the target versions."
+            # Clean scan.
             TABLE_HDR="| Source | Vulnerabilities |"
             TABLE_SEP="|--------|----------------|"
             ROW1="| GitHub Advisory (GHSA) | 0 affecting target |"
             ROW2="| OSV.dev | 0 affecting target |"
             RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
-            if [[ "$AUTO_MERGE" == "true" ]]; then
-              RESULTS_FOOTER="> Auto-merge has been enabled. This PR will merge once all status checks pass."
-            else
-              RESULTS_FOOTER="> This PR is now eligible for manual review and merge."
+          fi
+
+          # ---- Header + footer (from verdict priority — must match safety-verdict.sh order) ----
+          # Priority: guard > error > strict-age > advisories > non-strict-age > clean.
+          # Spec §6.1 — keep this order in sync with the script.
+          if [ "$GUARD_TRIGGERED" = "true" ]; then
+            RESULTS_HEADER="Dependency extraction failed — manual review required."
+            RESULTS_FOOTER="> Parser could not extract dependencies. Manual review required."
+          elif [ "$HAS_SAFETY_ERROR" = "true" ]; then
+            RESULTS_HEADER="Scan completed with errors — see workflow logs."
+            RESULTS_FOOTER="> Scan errors prevented a clean verdict. Re-run or push to retry."
+          elif [ "$HAS_AGE_VIOLATION" = "true" ] && [ "$FAIL_ON_AGE_VIOLATION" = "true" ]; then
+            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) younger than ${MINIMUM_RELEASE_AGE_DAYS}-day cooldown — Dependabot native cooldown invariant violated."
+            RESULTS_FOOTER="> Re-run by rebasing or recreating the PR after the age-compliant date below."
+            if [ "$TOTAL" -gt 0 ]; then
+              # Cross-reference: advisories are present too. Don't lose that signal under the age-violation header.
+              RESULTS_FOOTER="${RESULTS_FOOTER}"$'\n'"> Also: ${TOTAL} advisory/ies affect target versions — see table above."
             fi
+          elif [ "$TOTAL" -gt 0 ]; then
+            RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
+            RESULTS_FOOTER="> Review the advisories above before deciding to merge."
+          elif [ "$HAS_AGE_VIOLATION" = "true" ]; then
+            # fail_on_age_violation=false — advisory mode, not blocking.
+            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) below ${MINIMUM_RELEASE_AGE_DAYS}-day cooldown (advisory mode — not blocking)."
+            RESULTS_FOOTER="> Age violation reported in advisory mode (not blocking). Auto-merge suppressed."
+          else
+            RESULTS_HEADER="No known exploits found affecting the target versions."
+            if [ "$AUTO_MERGE_OK" = "true" ]; then
+              RESULTS_FOOTER="> Auto-merge enabled. PR will merge once all required checks pass."
+            else
+              RESULTS_FOOTER="> Ready for manual review and merge."
+            fi
+          fi
+
+          # Attach auto-merge SETUP failure note (from the auto-merge block above) to the footer.
+          # Auto-merge "required checks not satisfied" is NOT an error and not surfaced
+          # here — only SETUP failures (gh pr merge --auto rejected by API).
+          if [ -n "${AUTO_MERGE_COMMENT_NOTE:-}" ]; then
+            RESULTS_FOOTER="${RESULTS_FOOTER}"$'\n'"> ${AUTO_MERGE_COMMENT_NOTE}"
           fi
 
           # Build collapsed historical section (non-blocking, for transparency)
@@ -1169,16 +1218,17 @@ jobs:
             done <<< "$AGE_TSV"
 
             AGE_FOOTER=""
-            if [ "$COOLDOWN_FAILURES" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
-              _unblock_epoch=$(( MAX_FAIL_EPOCH + COOLDOWN_DAYS * 86400 ))
+            if [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
+              _unblock_epoch=$(( MAX_FAIL_EPOCH + MINIMUM_RELEASE_AGE_DAYS * 86400 ))
               _unblock_iso=$(date -u -d "@$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
                 || date -u -r "$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
                 || echo "unknown")
-              AGE_FOOTER="$(printf '\n> %d package(s) within cooldown window. Earliest unblock: %s.' "$COOLDOWN_FAILURES" "$_unblock_iso")"
+              AGE_FOOTER="$(printf '\n> %d package(s) below minimum. Earliest age-compliant date: %s.\n> Re-run by rebasing or recreating the PR after that date.' \
+                "$AGE_VIOLATION_COUNT" "$_unblock_iso")"
             fi
 
-            RELEASE_AGE_SECTION="$(printf '\n### Release Age (cooldown: %s days)\n\n%s\n%s\n%s%s' \
-              "$COOLDOWN_DAYS" "$AGE_TABLE_HDR" "$AGE_TABLE_SEP" "$AGE_ROWS" "$AGE_FOOTER")"
+            RELEASE_AGE_SECTION="$(printf '\n### Release Age (minimum: %s days)\n\n%s\n%s\n%s%s' \
+              "$MINIMUM_RELEASE_AGE_DAYS" "$AGE_TABLE_HDR" "$AGE_TABLE_SEP" "$AGE_ROWS" "$AGE_FOOTER")"
           fi
 
           # --- Extraction warning section (Task 12 — surfaces #27 silent drops) ---
@@ -1248,22 +1298,6 @@ jobs:
               --repo "$GH_REPO" \
               --body "$CHANGE_NOTE"
             echo "Posted change notification"
-          fi
-
-          # --- Conditional auto-merge ---
-          # AUTO_MERGE_OK is the FINAL boolean from safety-verdict.sh —
-          # do NOT additionally gate on $AUTO_MERGE here (the script already did).
-          # Sets AUTO_MERGE_COMMENT_NOTE on SETUP failure (consumed by Task 5's
-          # comment composition). "Required checks not yet satisfied" is NOT a
-          # setup failure — that is the normal case --auto handles.
-          AUTO_MERGE_COMMENT_NOTE=""
-          if [ "$AUTO_MERGE_OK" = "true" ]; then
-            if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
-              echo "Auto-merge enabled for PR #${PR_NUMBER}"
-            else
-              AUTO_MERGE_COMMENT_NOTE="Auto-merge could not be enabled: gh pr merge --auto rejected the request (auto-merge disabled, insufficient permission, or PR not mergeable). Merge manually."
-              echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — see comment note"
-            fi
           fi
 
           # --- Set final status ---
