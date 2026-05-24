@@ -2,6 +2,8 @@
 
 This directory hosts reusable workflows under `j7an/shared-workflows`. Consumers reference them via `uses: j7an/shared-workflows/.github/workflows/<file>@v2`.
 
+> **Note:** `@v2` continues to work for `tag-release.yml`, `publish-pypi.yml`, and `dependency-safety.yml` at their last-released v2 revision, but receives no further updates.
+
 ## `tag-release.yml`
 
 Computes the next semver tag from Conventional Commits since the last tag, optionally bumps version files, and pushes the new tag (which typically triggers a downstream release workflow).
@@ -30,7 +32,7 @@ on:
 
 jobs:
   tag:
-    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v3
     with:
       bump: ${{ inputs.bump }}
       # tag-prefix omitted → defaults to "v" → produces v1.2.3
@@ -47,7 +49,7 @@ on:
 
 jobs:
   tag:
-    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v3
     with:
       bump: ${{ inputs.bump }}
       tag-prefix: "tools/v"   # produces tools/v0.1.0
@@ -184,7 +186,7 @@ on:
 
 jobs:
   publish:
-    uses: j7an/shared-workflows/.github/workflows/publish-pypi.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/publish-pypi.yml@v3
     with:
       tag: ${{ github.ref_name }}
       package-dir: tools

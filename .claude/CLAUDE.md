@@ -30,8 +30,7 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 
 `scripts/*.sh` is the source of truth; the inline copy is a derived artifact. **Editing a script means updating its inline copy too**, or `check-inline-sync.sh` fails CI. The sync is byte-for-byte after known normalizations (10-space YAML indent strip, shebang strip, function-wrapper strip). The pairs are listed in `check-inline-sync.sh` (`INLINE_PAIRS`):
 
-- `dependency-cooldown.yml` embeds `extract-deps.sh`, `check-release-age.sh`, `diff-touches-lockfile.sh`, `pr-body-to-deps.sh`, `classify-touched-paths.sh`, `pyproject-bump-extract.sh`
-- `dependency-safety.yml` embeds the same six scripts plus `safety-verdict.sh`
+- `dependency-safety.yml` embeds `extract-deps.sh`, `check-release-age.sh`, `diff-touches-lockfile.sh`, `pr-body-to-deps.sh`, `classify-touched-paths.sh`, `pyproject-bump-extract.sh`, and `safety-verdict.sh`
 - `tag-release.yml` embeds `bump-version-files.sh`
 
 `lint-workflow-call.sh` is the partner guard: it fails CI if any `workflow_call` file reintroduces a caller-scoped ref as a checkout `ref:`.
@@ -40,9 +39,7 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 
 **Consumer-facing reusable workflows:**
 
-- `dependency-safety.yml` — verifies the native-Dependabot-cooldown invariant on each Dependabot PR. Pipeline mirrors `dependency-cooldown.yml` (extract → fallback → guard → age check → GHSA/OSV scan → scorecard → comment → labels) but the verdict layer is deterministic: `failure` on age violation (when `fail_on_age_violation: true`), `error` on extraction/scan failure, `success` otherwise. Verdict translation lives in `safety-verdict.sh`. No rescan companion — verifier is single-shot per PR event.
-- `dependency-cooldown.yml` — **legacy**, retained for Phase 2 migration window. Scans Dependabot PRs. Pipeline: parse diff → `extract-deps.sh` (with `pr-body-to-deps.sh` as fallback when the diff yields zero rows, and `diff-touches-lockfile.sh` as a fail-loud guard so a clean-but-wrong extraction can't produce a false-green gate) → `check-release-age.sh` for the cooldown gate → GHSA/OSV advisory scan → single update-or-create comment + label reconciliation.
-- `cooldown-rescan.yml` — **legacy**, retained for Phase 2 migration window. Scheduled re-scan of PRs stuck in the `pending` cooldown state.
+- `dependency-safety.yml` — verifies the native-Dependabot-cooldown invariant on each Dependabot PR. Pipeline: extract → fallback → guard → age check → GHSA/OSV scan → scorecard → comment → labels; the verdict layer is deterministic: `failure` on age violation (when `fail_on_age_violation: true`), `error` on extraction/scan failure, `success` otherwise. Verdict translation lives in `safety-verdict.sh`. No rescan companion — verifier is single-shot per PR event.
 - `tag-release.yml` — computes the next semver tag from Conventional Commits, optionally runs `bump-version-files.sh` against `.version-bump.json`, creates the tag via the GitHub Git Data API (so commits/tags auto-sign under the App identity). Requires a GitHub App key (`RELEASE_BOT_PRIVATE_KEY` secret, `RELEASE_BOT_APP_ID` var).
 - `publish-pypi.yml` — `uv build` → TestPyPI (with install verification) → PyPI via OIDC trusted publishing → GitHub Release.
 
