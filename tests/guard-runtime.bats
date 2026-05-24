@@ -35,6 +35,7 @@ extract_guard_block() {
   block=$(extract_guard_block .github/workflows/dependency-safety.yml)
   DEPS_TSV=$'mypy\t1.20.1\tpypi'
   TOUCHED_PATHS=$'package-lock.json\nuv.lock'
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
   UNSUPPORTED_PATHS="package-lock.json"
   eval "$block"
   [ "$GUARD_TRIGGERED" = "true" ]
@@ -55,6 +56,7 @@ extract_guard_block() {
   block=$(extract_guard_block .github/workflows/dependency-safety.yml)
   DEPS_TSV=""
   TOUCHED_PATHS="uv.lock"
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
   UNSUPPORTED_PATHS=""
   eval "$block"
   [ "$GUARD_TRIGGERED" = "true" ]
@@ -74,6 +76,7 @@ extract_guard_block() {
   block=$(extract_guard_block .github/workflows/dependency-safety.yml)
   DEPS_TSV=$'requests\t2.32.0\tpypi'
   TOUCHED_PATHS="requirements.txt"
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
   UNSUPPORTED_PATHS=""
   eval "$block"
   [ "$GUARD_TRIGGERED" = "false" ]
@@ -92,6 +95,7 @@ extract_guard_block() {
   block=$(extract_guard_block .github/workflows/dependency-safety.yml)
   DEPS_TSV=""
   TOUCHED_PATHS=""
+  EFFECTIVE_TOUCHED=""
   UNSUPPORTED_PATHS=""
   eval "$block"
   [ "$GUARD_TRIGGERED" = "false" ]
