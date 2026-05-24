@@ -67,3 +67,15 @@ assert_clean_bump() {
   [ "$status" -eq 2 ]
   [[ "$output" == *"input is not a unified diff"* ]]
 }
+
+@test "PEP 621 [project] dependencies bump — deps mode emits row" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/pep621-dependencies-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "ruff	0.15.13	pypi" ]
+}
+
+@test "PEP 621 [project] dependencies bump — cleared-paths mode emits path" {
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/pep621-dependencies-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "pyproject.toml" ]
+}
