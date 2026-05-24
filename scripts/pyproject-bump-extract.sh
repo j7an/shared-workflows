@@ -116,7 +116,7 @@ extract_target_version() {
 parse_pep508_entry() {
   local content="$1"
   _pep_name=""; _pep_extras=""; _pep_version_spec=""; _pep_marker=""
-  if [[ "$content" =~ ^[[:space:]]*\"([A-Za-z][A-Za-z0-9_.-]*)(\[[^]]*\])?([^\";]*)(;[^\"]*)?\"[[:space:]]*,?[[:space:]]*$ ]]; then
+  if [[ "$content" =~ ^[[:space:]]*\"([A-Za-z][A-Za-z0-9_.-]*)(\[[^]]*\])?([^\";]*)(;.*)?\"[[:space:]]*,?[[:space:]]*$ ]]; then
     _pep_name="${BASH_REMATCH[1]}"
     _pep_extras="${BASH_REMATCH[2]}"
     _pep_version_spec="${BASH_REMATCH[3]}"

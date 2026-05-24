@@ -219,3 +219,37 @@ assert_clean_bump() {
   run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/whitespace-churn-other-table.diff
   [ "$status" -eq 0 ]; [ "$output" = "pyproject.toml" ]
 }
+
+@test "Positive: package name with digits (urllib3)" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/pep621-name-with-digits.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "urllib3	2.5.0	pypi" ]
+}
+
+@test "Positive: bump with unchanged marker preserved on both sides" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/pep621-with-unchanged-marker.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "foo	1.2	pypi" ]
+}
+
+@test "Positive: PEP 440 post-release version" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/pep621-postrelease.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "pkg	1.0.0.post1	pypi" ]
+}
+
+@test "Disqualify: PEP 508 compound spec (>=X,<Y)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-compound-spec.diff
+}
+
+@test "Disqualify: PEP 508 upper-bound change (<X)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-upper-bound-change.diff
+}
+
+@test "Disqualify: PEP 508 not-equal change (!=X)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-not-equal-change.diff
+}
+
+@test "Disqualify: poetry wildcard (\"*\")" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-wildcard.diff
+}
