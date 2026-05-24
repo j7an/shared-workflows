@@ -137,3 +137,19 @@ assert_clean_bump() {
   [ "$status" -eq 0 ]
   [ "$output" = "black	24.2.0	pypi" ]
 }
+
+@test "Subdir pyproject.toml bump emits subdir path" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/subdir-pyproject-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "fastapi	0.111.0	pypi" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/subdir-pyproject-bump.diff
+  [ "$output" = "services/api/pyproject.toml" ]
+}
+
+@test "Multi-file: cleared subdir + disqualified root in same diff" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/multi-file-mixed.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "fastapi	0.111.0	pypi" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/multi-file-mixed.diff
+  [ "$output" = "services/api/pyproject.toml" ]
+}
