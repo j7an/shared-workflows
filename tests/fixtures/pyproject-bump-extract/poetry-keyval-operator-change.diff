@@ -1,7 +1,0 @@
-diff --git a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -1,2 +1,2 @@
- [tool.poetry.dependencies]
--pkg = "==1.0"
-+pkg = "^2.0"

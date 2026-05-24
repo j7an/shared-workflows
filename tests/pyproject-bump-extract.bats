@@ -27,6 +27,38 @@ assert_clean_bump() {
   [ "$output" = "$expected_path" ]
 }
 
+run_pyproject_deps() {
+  run bash -c 'bash scripts/pyproject-bump-extract.sh --mode=deps' <<< "$1"
+}
+
+run_pyproject_cleared() {
+  run bash -c 'bash scripts/pyproject-bump-extract.sh --mode=cleared-paths' <<< "$1"
+}
+
+assert_disqualified_diff() {
+  local diff="$1"
+
+  run_pyproject_deps "$diff"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  run_pyproject_cleared "$diff"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+assert_clean_bump_diff() {
+  local diff="$1" expected_row="$2" expected_path="$3"
+
+  run_pyproject_deps "$diff"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$expected_row" ]
+
+  run_pyproject_cleared "$diff"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$expected_path" ]
+}
+
 @test "missing --mode exits 2 with stderr message" {
   run bash -c 'printf "" | bash scripts/pyproject-bump-extract.sh'
   [ "$status" -eq 2 ]
@@ -115,7 +147,18 @@ assert_clean_bump() {
 }
 
 @test "Poetry python constraint change disqualifies" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-python-constraint-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [tool.poetry.dependencies]
+-python = "^3.11"
++python = "^3.12"
+ requests = "^2.32"
+DIFF
+)"
 }
 
 @test "Poetry inline-table version-only bump" {
@@ -123,7 +166,18 @@ assert_clean_bump() {
 }
 
 @test "Poetry inline-table extras change disqualifies" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-inline-extras-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [tool.poetry.dependencies]
+ python = "^3.11"
+-ruff = { version = "^0.15.13", extras = ["server"] }
++ruff = { version = "^0.15.13", extras = ["server", "lsp"] }
+DIFF
+)"
 }
 
 @test "Poetry [tool.poetry.group.dev.dependencies] bump" {
@@ -155,55 +209,214 @@ assert_clean_bump() {
 }
 
 @test "Disqualify: PEP 621 new-dep addition" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-add-dep.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,6 +10,7 @@
+ [project]
+ dependencies = [
+     "ruff>=0.15.13",
++    "newpkg>=1.0.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 621 dep removal (unmatched -)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-remove-dep.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,6 @@
+ [project]
+ dependencies = [
+     "ruff>=0.15.13",
+-    "oldpkg>=1.0.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 621 marker change" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-marker-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "foo>=1.2; python_version < \"3.11\"",
++    "foo>=1.2; python_version < \"3.12\"",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 621 extras change" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-extras-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "httpx[http2]>=0.28.0",
++    "httpx[http2,brotli]>=0.28.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 621 version + marker both change (skeleton mismatch)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-version-plus-marker-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "foo>=1.1; python_version < '3.11'",
++    "foo>=1.2; python_version < '3.12'",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 621 version + extras both change (skeleton mismatch)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-version-plus-extras-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "httpx[http2]>=0.28.0",
++    "httpx[http2,brotli]>=0.28.1",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 621 unmatched removal followed by context (pending lifetime)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-unmatched-removal.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,6 @@
+ [project]
+ dependencies = [
+-    "oldpkg>=1.0.0",
+     "ruff>=0.15.13",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: adding a new extras key in [project.optional-dependencies] (structural)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-add-extras-key.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,6 +10,9 @@
+ [project.optional-dependencies]
+ server = [
+     "httpx>=0.28.1",
+ ]
++lsp = [
++    "lsprotocol>=2025.0.0",
++]
+DIFF
+)"
 }
 
 @test "Disqualify: adding the dependencies = [ array to [project] (structural)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-add-dependencies-array.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -5,6 +5,9 @@
+ [project]
+ name = "foo"
+ version = "0.1.0"
++dependencies = [
++    "ruff>=0.15.13",
++]
+DIFF
+)"
 }
 
 @test "Disqualify: build-system edit" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/build-system-edit.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,6 +1,6 @@
+ [build-system]
+ requires = [
+-    "hatchling>=1.20.0",
++    "hatchling>=1.21.0",
+ ]
+ build-backend = "hatchling.build"
+DIFF
+)"
 }
 
 @test "Disqualify: mid-array hunk with no header context" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/mid-array-no-context.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -100,4 +100,4 @@
+-    "ruff>=0.15.12",
++    "ruff>=0.15.13",
+     "httpx>=0.27.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: unrecognized table" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/unrecognized-table-edit.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -50,7 +50,7 @@
+ [tool.foo]
+-bar = "old"
++bar = "new"
+DIFF
+)"
 }
 
 @test "Disqualify: mixed bump + addition in same file" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/mixed-bump-and-add.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,8 @@
+ [project]
+ dependencies = [
+-    "ruff>=0.15.12",
++    "ruff>=0.15.13",
++    "newpkg>=1.0.0",
+     "httpx>=0.27.0",
+ ]
+DIFF
+)"
 }
 
 @test "Comment-only churn clears path with zero deps" {
@@ -221,71 +434,261 @@ assert_clean_bump() {
 }
 
 @test "Positive: package name with digits (urllib3)" {
-  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/pep621-name-with-digits.diff
+  DIFF="$(cat <<'DIFF_EOF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "urllib3>=2.4.0",
++    "urllib3>=2.5.0",
+ ]
+DIFF_EOF
+)"
+  run_pyproject_deps "$DIFF"
   [ "$status" -eq 0 ]
   [ "$output" = "urllib3	2.5.0	pypi" ]
+  run_pyproject_cleared "$DIFF"
+  [ "$output" = "pyproject.toml" ]
 }
 
 @test "Positive: bump with unchanged marker preserved on both sides" {
-  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/pep621-with-unchanged-marker.diff
+  DIFF="$(cat <<'DIFF_EOF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "foo>=1.1; python_version < \"3.12\"",
++    "foo>=1.2; python_version < \"3.12\"",
+ ]
+DIFF_EOF
+)"
+  run_pyproject_deps "$DIFF"
   [ "$status" -eq 0 ]
   [ "$output" = "foo	1.2	pypi" ]
+  run_pyproject_cleared "$DIFF"
+  [ "$output" = "pyproject.toml" ]
 }
 
 @test "Positive: PEP 440 post-release version" {
-  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/pep621-postrelease.diff
+  DIFF="$(cat <<'DIFF_EOF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "pkg>=1.0.0",
++    "pkg>=1.0.0.post1",
+ ]
+DIFF_EOF
+)"
+  run_pyproject_deps "$DIFF"
   [ "$status" -eq 0 ]
   [ "$output" = "pkg	1.0.0.post1	pypi" ]
+  run_pyproject_cleared "$DIFF"
+  [ "$output" = "pyproject.toml" ]
 }
 
 @test "Disqualify: PEP 508 compound spec (>=X,<Y)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-compound-spec.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "ruff>=0.15.12,<0.16",
++    "ruff>=0.15.13,<0.16",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 508 upper-bound change (<X)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-upper-bound-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "foo<3.0",
++    "foo<4.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 508 not-equal change (!=X)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-not-equal-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "foo!=1.2.0",
++    "foo!=1.3.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: poetry wildcard (\"*\")" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-wildcard.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [tool.poetry.dependencies]
+-foo = "1.0.0"
++foo = "*"
+DIFF
+)"
 }
 
 @test "Disqualify: current_key leak — keywords array after dependencies (Bug 1)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-current-key-leak-keywords.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,10 +1,10 @@
+ [project]
+ dependencies = [
+   "ruff>=0.1",
+ ]
+ keywords = [
+-  "docs>=1.0",
++  "docs>=2.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: current_key leak — uv dev-dependencies after constraint-dependencies (Bug 1)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/uv-current-key-leak.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,10 +1,10 @@
+ [tool.uv]
+ constraint-dependencies = [
+   "ruff>=0.1",
+ ]
+ dev-dependencies = [
+-  "docs>=1.0",
++  "docs>=2.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: poetry inline-table subversion does not match version (Bug 2)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-inline-subversion.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,4 +1,4 @@
+ [tool.poetry.dependencies]
+-pkg = { subversion = "1.0.0", source = "internal" }
++pkg = { subversion = "2.0.0", source = "internal" }
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 508 operator change (== to >=) is constraint broadening (Bug 3)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-operator-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,5 +1,5 @@
+ [project]
+ dependencies = [
+-  "foo==1.0",
++  "foo>=2.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: poetry keyval operator change (== to ^) is constraint broadening (Bug 3)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-keyval-operator-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,2 +1,2 @@
+ [tool.poetry.dependencies]
+-pkg = "==1.0"
++pkg = "^2.0"
+DIFF
+)"
 }
 
 @test "Disqualify: poetry inline-table operator change (== to ^) is constraint broadening (Bug 3)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-inline-operator-change.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,2 +1,2 @@
+ [tool.poetry.dependencies]
+-pkg = { version = "==1.0", source = "internal" }
++pkg = { version = "^2.0", source = "internal" }
+DIFF
+)"
 }
 
 @test "Disqualify: poetry inline-table whitespace around version= changed (Bug 4)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-inline-whitespace-normalized.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,2 +1,2 @@
+ [tool.poetry.dependencies]
+-ruff = { version = "^0.15.12", extras = ["server"] }
++ruff = { version="^0.15.13", extras = ["server"] }
+DIFF
+)"
 }
 
 @test "Disqualify: malformed PEP 508 bare version (no operator) (Bug 5)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-bare-version.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,4 +1,4 @@
+ [project]
+ dependencies = [
+-    "foo 1.0",
++    "foo 2.0",
+ ]
+DIFF
+)"
 }
 
 @test "Disqualify: PEP 508 entries after a closing ] inherit no dependency context (Bug 1b)" {
-  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-current-key-leak-post-close.diff
+  assert_disqualified_diff "$(cat <<'DIFF'
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,8 +1,8 @@
+ [project]
+ dependencies = [
+   "ruff>=0.1",
+ ]
+-  "docs>=1.0",
++  "docs>=2.0",
+ ]
+DIFF
+)"
 }

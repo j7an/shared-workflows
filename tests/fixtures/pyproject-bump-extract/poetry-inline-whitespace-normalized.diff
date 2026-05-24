@@ -1,7 +1,0 @@
-diff --git a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -1,2 +1,2 @@
- [tool.poetry.dependencies]
--ruff = { version = "^0.15.12", extras = ["server"] }
-+ruff = { version="^0.15.13", extras = ["server"] }

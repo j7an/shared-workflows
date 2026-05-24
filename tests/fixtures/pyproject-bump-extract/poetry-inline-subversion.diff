@@ -1,7 +1,0 @@
-diff --git a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -1,4 +1,4 @@
- [tool.poetry.dependencies]
--pkg = { subversion = "1.0.0", source = "internal" }
-+pkg = { subversion = "2.0.0", source = "internal" }

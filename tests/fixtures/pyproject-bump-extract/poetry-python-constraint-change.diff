@@ -1,9 +1,0 @@
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [tool.poetry.dependencies]
--python = "^3.11"
-+python = "^3.12"
- requests = "^2.32"
