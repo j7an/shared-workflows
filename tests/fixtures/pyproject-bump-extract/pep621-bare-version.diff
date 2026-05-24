@@ -1,0 +1,9 @@
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,4 +1,4 @@
+ [project]
+ dependencies = [
+-    "foo 1.0",
++    "foo 2.0",
+ ]

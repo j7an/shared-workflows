@@ -253,3 +253,35 @@ assert_clean_bump() {
 @test "Disqualify: poetry wildcard (\"*\")" {
   assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-wildcard.diff
 }
+
+@test "Disqualify: current_key leak — keywords array after dependencies (Bug 1)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-current-key-leak-keywords.diff
+}
+
+@test "Disqualify: current_key leak — uv dev-dependencies after constraint-dependencies (Bug 1)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/uv-current-key-leak.diff
+}
+
+@test "Disqualify: poetry inline-table subversion does not match version (Bug 2)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-inline-subversion.diff
+}
+
+@test "Disqualify: PEP 508 operator change (== to >=) is constraint broadening (Bug 3)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-operator-change.diff
+}
+
+@test "Disqualify: poetry keyval operator change (== to ^) is constraint broadening (Bug 3)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-keyval-operator-change.diff
+}
+
+@test "Disqualify: poetry inline-table operator change (== to ^) is constraint broadening (Bug 3)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-inline-operator-change.diff
+}
+
+@test "Disqualify: poetry inline-table whitespace around version= changed (Bug 4)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-inline-whitespace-normalized.diff
+}
+
+@test "Disqualify: malformed PEP 508 bare version (no operator) (Bug 5)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-bare-version.diff
+}

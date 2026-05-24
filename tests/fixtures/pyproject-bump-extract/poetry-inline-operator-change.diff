@@ -1,0 +1,7 @@
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,2 +1,2 @@
+ [tool.poetry.dependencies]
+-pkg = { version = "==1.0", source = "internal" }
++pkg = { version = "^2.0", source = "internal" }
