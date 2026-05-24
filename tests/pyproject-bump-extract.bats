@@ -285,3 +285,7 @@ assert_clean_bump() {
 @test "Disqualify: malformed PEP 508 bare version (no operator) (Bug 5)" {
   assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-bare-version.diff
 }
+
+@test "Disqualify: PEP 508 entries after a closing ] inherit no dependency context (Bug 1b)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-current-key-leak-post-close.diff
+}

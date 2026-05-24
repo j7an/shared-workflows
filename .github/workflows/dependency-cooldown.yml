@@ -778,9 +778,13 @@ jobs:
               continue
             fi
           
-            # Closing `]` of an array on a changed line = reformatting → disqualify.
+            # Closing `]` of an array. On +/- this is reformatting/structural → disqualify.
+            # On a context line, the array we were tracking has closed → reset current_key
+            # so subsequent PEP 508-shaped lines do not inherit dependency-array context
+            # (any later entries need fresh context to re-establish in_array).
             if [[ "$content" =~ ^[[:space:]]*\] ]]; then
               if [ "$prefix" = "+" ] || [ "$prefix" = "-" ]; then verdict="disqualified"; fi
+              current_key=""
               continue
             fi
           
