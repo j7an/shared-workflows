@@ -30,8 +30,8 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 
 `scripts/*.sh` is the source of truth; the inline copy is a derived artifact. **Editing a script means updating its inline copy too**, or `check-inline-sync.sh` fails CI. The sync is byte-for-byte after known normalizations (10-space YAML indent strip, shebang strip, function-wrapper strip). The pairs are listed in `check-inline-sync.sh` (`INLINE_PAIRS`):
 
-- `dependency-cooldown.yml` embeds `extract-deps.sh`, `check-release-age.sh`, `diff-touches-lockfile.sh`, `pr-body-to-deps.sh`
-- `dependency-safety.yml` embeds the same four scripts plus `safety-verdict.sh`
+- `dependency-cooldown.yml` embeds `extract-deps.sh`, `check-release-age.sh`, `diff-touches-lockfile.sh`, `pr-body-to-deps.sh`, `classify-touched-paths.sh`, `pyproject-bump-extract.sh`
+- `dependency-safety.yml` embeds the same six scripts plus `safety-verdict.sh`
 - `tag-release.yml` embeds `bump-version-files.sh`
 
 `lint-workflow-call.sh` is the partner guard: it fails CI if any `workflow_call` file reintroduces a caller-scoped ref as a checkout `ref:`.
