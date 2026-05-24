@@ -79,3 +79,33 @@ assert_clean_bump() {
   [ "$status" -eq 0 ]
   [ "$output" = "pyproject.toml" ]
 }
+
+@test "PEP 621 [project.optional-dependencies] bump" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/pep621-optional-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "httpx	0.28.1	pypi" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/pep621-optional-bump.diff
+  [ "$output" = "pyproject.toml" ]
+}
+
+@test "PEP 735 [dependency-groups] bump" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/pep735-group-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "pytest	8.4.0	pypi" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/pep735-group-bump.diff
+  [ "$output" = "pyproject.toml" ]
+}
+
+@test "uv [tool.uv] constraint-dependencies bump" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/uv-constraint-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "urllib3	2.5.0	pypi" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/uv-constraint-bump.diff
+  [ "$output" = "pyproject.toml" ]
+}
+
+@test "uv [tool.uv] override-dependencies bump" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/uv-override-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "certifi	2024.2.2	pypi" ]
+}
