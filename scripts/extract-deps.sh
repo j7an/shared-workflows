@@ -19,7 +19,7 @@ set -euo pipefail
 
 # pypi-shape lockfiles only. Cargo.lock / package-lock.json would need
 # downstream ecosystem support (registry clients, OSV enums) before rows
-# could be scanned — the fail-loud guard in dependency-cooldown.yml covers
+# could be scanned — the fail-loud guard in dependency-safety.yml covers
 # unhandled lockfiles.
 filename_to_ecosystem() {
   case "$1" in

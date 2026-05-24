@@ -11,11 +11,6 @@ set -euo pipefail
 
 # Each entry: "<workflow-yaml>:<script-path>"
 INLINE_PAIRS=(
-  ".github/workflows/dependency-cooldown.yml:scripts/extract-deps.sh"
-  ".github/workflows/dependency-cooldown.yml:scripts/check-release-age.sh"
-  ".github/workflows/dependency-cooldown.yml:scripts/diff-touches-lockfile.sh"
-  ".github/workflows/dependency-cooldown.yml:scripts/pr-body-to-deps.sh"
-  ".github/workflows/dependency-cooldown.yml:scripts/classify-touched-paths.sh"
   ".github/workflows/dependency-safety.yml:scripts/extract-deps.sh"
   ".github/workflows/dependency-safety.yml:scripts/check-release-age.sh"
   ".github/workflows/dependency-safety.yml:scripts/diff-touches-lockfile.sh"
@@ -23,7 +18,6 @@ INLINE_PAIRS=(
   ".github/workflows/dependency-safety.yml:scripts/safety-verdict.sh"
   ".github/workflows/dependency-safety.yml:scripts/classify-touched-paths.sh"
   ".github/workflows/tag-release.yml:scripts/bump-version-files.sh"
-  ".github/workflows/dependency-cooldown.yml:scripts/pyproject-bump-extract.sh"
   ".github/workflows/dependency-safety.yml:scripts/pyproject-bump-extract.sh"
 )
 

@@ -21,17 +21,6 @@ extract_guard_block() {
     | sed -E 's/^          //'
 }
 
-@test "cooldown: issue #62 case (DEPS_TSV non-empty + UNSUPPORTED non-empty) — guard fires" {
-  block=$(extract_guard_block .github/workflows/dependency-cooldown.yml)
-  DEPS_TSV=$'mypy\t1.20.1\tpypi'
-  TOUCHED_PATHS=$'package-lock.json\nuv.lock'
-  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
-  UNSUPPORTED_PATHS="package-lock.json"
-  eval "$block"
-  [ "$GUARD_TRIGGERED" = "true" ]
-  [[ "$EXTRACTION_WARNING" == *"does not support"* ]]
-}
-
 @test "safety: issue #62 case (DEPS_TSV non-empty + UNSUPPORTED non-empty) — guard fires" {
   block=$(extract_guard_block .github/workflows/dependency-safety.yml)
   DEPS_TSV=$'mypy\t1.20.1\tpypi'
@@ -41,17 +30,6 @@ extract_guard_block() {
   eval "$block"
   [ "$GUARD_TRIGGERED" = "true" ]
   [[ "$EXTRACTION_WARNING" == *"does not support"* ]]
-}
-
-@test "cooldown: issue #52 case (DEPS_TSV empty + TOUCHED non-empty + UNSUPPORTED empty) — guard fires" {
-  block=$(extract_guard_block .github/workflows/dependency-cooldown.yml)
-  DEPS_TSV=""
-  TOUCHED_PATHS="uv.lock"
-  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
-  UNSUPPORTED_PATHS=""
-  eval "$block"
-  [ "$GUARD_TRIGGERED" = "true" ]
-  [[ "$EXTRACTION_WARNING" == *"Parser could not extract"* ]]
 }
 
 @test "safety: issue #52 case (DEPS_TSV empty + TOUCHED non-empty + UNSUPPORTED empty) — guard fires" {
@@ -65,31 +43,11 @@ extract_guard_block() {
   [[ "$EXTRACTION_WARNING" == *"Parser could not extract"* ]]
 }
 
-@test "cooldown: clean supported case (DEPS_TSV non-empty + UNSUPPORTED empty) — guard does NOT fire" {
-  block=$(extract_guard_block .github/workflows/dependency-cooldown.yml)
-  DEPS_TSV=$'requests\t2.32.0\tpypi'
-  TOUCHED_PATHS="requirements.txt"
-  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
-  UNSUPPORTED_PATHS=""
-  eval "$block"
-  [ "$GUARD_TRIGGERED" = "false" ]
-}
-
 @test "safety: clean supported case (DEPS_TSV non-empty + UNSUPPORTED empty) — guard does NOT fire" {
   block=$(extract_guard_block .github/workflows/dependency-safety.yml)
   DEPS_TSV=$'requests\t2.32.0\tpypi'
   TOUCHED_PATHS="requirements.txt"
   EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
-  UNSUPPORTED_PATHS=""
-  eval "$block"
-  [ "$GUARD_TRIGGERED" = "false" ]
-}
-
-@test "cooldown: no touched paths (empty diff) — guard does NOT fire" {
-  block=$(extract_guard_block .github/workflows/dependency-cooldown.yml)
-  DEPS_TSV=""
-  TOUCHED_PATHS=""
-  EFFECTIVE_TOUCHED=""
   UNSUPPORTED_PATHS=""
   eval "$block"
   [ "$GUARD_TRIGGERED" = "false" ]

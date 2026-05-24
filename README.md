@@ -78,7 +78,7 @@ concurrency:
 
 jobs:
   safety:
-    uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v3
     secrets: inherit
     with:
       auto_merge: true
@@ -86,10 +86,9 @@ jobs:
 
 `contents: write` is only required when `auto_merge: true`; otherwise `contents: read` is sufficient.
 
-> **Note:** `@v2` resolves to `dependency-safety.yml` only after a release of
-> this repo that contains it. Before that, pin to the explicit tag where the
-> workflow first shipped (`@vX.Y.Z`). Releases in this repo are dispatched
-> manually — see [Versioning](#versioning).
+> **Note:** `@v3` is the current floating major. `@v2` continues to work at
+> the last cooldown-bearing release (frozen, no further updates). Releases
+> in this repo are dispatched manually — see [Versioning](#versioning).
 
 ## Inputs
 
@@ -168,27 +167,41 @@ Labels:
 
 Reconciliation is authoritative when the scan succeeds. On the `error` path, labels are preserved (not removed) since the verdict is unreliable.
 
-## Migration From Legacy Cooldown
+## v2 → v3 migration
 
-If you're migrating from `dependency-cooldown.yml`:
+`v3.0.0` removed the deprecated `dependency-cooldown.yml` and
+`cooldown-rescan.yml` workflows. If your repo still references them via
+`@v2`, the pin continues to work against the frozen v2 line; to move to
+`v3`, follow these steps:
 
 1. **Add native cooldown** to `.github/dependabot.yml` (`cooldown.default-days: 5` or higher).
-2. **Replace the caller `uses:`** line:
+
+2. **Replace the caller `uses:` line:**
    ```diff
    - uses: j7an/shared-workflows/.github/workflows/dependency-cooldown.yml@v2
-   + uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v2
+   + uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v3
    ```
+
 3. **Rename the input** `cooldown_days` → `minimum_release_age_days`.
-4. **Drop `fail_on_cooldown`** — replaced by `fail_on_age_violation` with different semantics (failure-on-violation, not pending-on-violation).
-5. **Remove any caller workflow** that uses `cooldown-rescan.yml` (no rescan companion under the new model — the verifier is single-shot per PR event).
-6. **Update branch protection / rulesets.** The commit-status context changes from `dependency-cooldown / gate` to `dependency-safety / gate`. Required-status-check rules on the old context will wait forever once you cut over. In Settings → Branches (or Rules), remove `dependency-cooldown / gate` from the required checks list and add `dependency-safety / gate` in its place. The two contexts can coexist briefly if you keep both workflows running during a Phase 2 transition.
-7. **Optional:** add `rebase-strategy: disabled` to your `dependabot.yml` ecosystem block. This avoids `@dependabot rebase` pulling in newer versions that have not yet aged through native cooldown.
 
-After migration, the `cooldown-pending` label (managed by the legacy workflow) will become stale on the PR; the new workflow does not touch it, so remove it manually if desired.
+4. **Drop `fail_on_cooldown`** — replaced by `fail_on_age_violation` with
+   different semantics (failure-on-violation, not pending-on-violation).
 
-## Legacy Workflows
+5. **Remove any caller workflow** that uses `cooldown-rescan.yml`. No rescan
+   companion under `dependency-safety.yml` — the verifier is single-shot per
+   PR event.
 
-`dependency-cooldown.yml` and `cooldown-rescan.yml` implement the pre-2026 workflow-owned waiting model: the workflow itself held PRs in `pending` state for the cooldown window, and a separate rescan workflow swept stale PRs on a schedule. These remain available during the sibling-migration window and will be removed in a future major release once known consumers have moved to `dependency-safety.yml`. See [Migration From Legacy Cooldown](#migration-from-legacy-cooldown) above.
+6. **Update branch protection / rulesets.** The commit-status context changes
+   from `dependency-cooldown / gate` to `dependency-safety / gate`. Required-
+   status-check rules on the old context will wait forever once you cut over.
+
+7. **Clean up stale labels.** Any `cooldown-pending` label managed by the
+   legacy workflow lingers until manually removed; `dependency-safety.yml`
+   does not touch it.
+
+8. **Optional:** add `rebase-strategy: disabled` to your `dependabot.yml`
+   ecosystem block — avoids `@dependabot rebase` pulling in newer versions
+   that have not yet aged through native cooldown.
 
 ## Security Analysis (Zizmor)
 
@@ -320,12 +333,12 @@ permissions:
 
 jobs:
   tag:
-    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v3
     secrets:
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
   publish:
     needs: tag
-    uses: j7an/shared-workflows/.github/workflows/release.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/release.yml@v3
     with:
       tag: ${{ needs.tag.outputs.tag }}
 ```
@@ -352,14 +365,14 @@ permissions:
 
 jobs:
   tag:
-    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v3
     with:
       bump: ${{ inputs.bump }}
     secrets:
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
   publish:
     needs: tag
-    uses: j7an/shared-workflows/.github/workflows/release.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/release.yml@v3
     with:
       tag: ${{ needs.tag.outputs.tag }}
 ```
@@ -377,6 +390,16 @@ If your repo has version strings in committed JSON files (e.g. `server.json`, `p
 
 The `environment: release` + `if: github.ref == 'refs/heads/main'` gate inside `tag-release.yml` runs in **your repo's** security context — `shared-workflows` cannot unilaterally enforce it across consumers. If you skip step 1, you lose the environment-side branch policy and secret protection; the in-file `if:` check still blocks non-`main` refs, but the extra GitHub-side gate is gone.
 
-### On the `@v2` pin
+### On the `@v3` pin
 
-`@v2` is the floating major tag for the current `v2.x.y` line. It always points at the latest `v2.x.y` release because `release.yml` force-updates floating majors on every publish. Pinning to `@v2` means you get all non-breaking updates automatically. Pin to `@v2.1` for patch-only updates, or `@v2.1.0` for an immutable freeze — see the [Versioning](#versioning) section above.
+`@v3` is the floating major tag for the current `v3.x.y` line. It always
+points at the latest `v3.x.y` release because `release.yml` force-updates
+floating majors on every publish. Pinning to `@v3` means you get all
+non-breaking updates within v3 automatically. Pin to `@v3.0` for patch-only
+updates, or `@v3.0.0` for an immutable freeze — see the [Versioning](#versioning)
+section above.
+
+`@v2` is the frozen historical line, pinned at the last cooldown-bearing
+release. It continues to work for `tag-release.yml`, `publish-pypi.yml`, and
+`dependency-safety.yml`, but receives no further updates. Consumers on `@v2`
+should plan migration to `@v3` (see [v2 → v3 migration](#v2--v3-migration)).

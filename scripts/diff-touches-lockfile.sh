@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # diff-touches-lockfile.sh — detect dependency-relevant file edits in a
 # unified diff (lockfiles, manifests, and GitHub Actions workflow YAMLs).
-# Used by dependency-cooldown.yml's fail-loud guard to refuse green gates
+# Used by dependency-safety.yml's fail-loud guard to refuse green gates
 # when the dep extractor returns zero rows on a diff that touches files
 # which *should* have produced deps.
 #

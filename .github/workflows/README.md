@@ -1,6 +1,8 @@
 # Reusable Workflows
 
-This directory hosts reusable workflows under `j7an/shared-workflows`. Consumers reference them via `uses: j7an/shared-workflows/.github/workflows/<file>@v2`.
+This directory hosts reusable workflows under `j7an/shared-workflows`. Consumers reference them via `uses: j7an/shared-workflows/.github/workflows/<file>@v3`.
+
+> **Note:** `@v2` continues to work for `tag-release.yml`, `publish-pypi.yml`, and `dependency-safety.yml` at their last-released v2 revision, but receives no further updates.
 
 ## `tag-release.yml`
 
@@ -30,7 +32,7 @@ on:
 
 jobs:
   tag:
-    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v3
     with:
       bump: ${{ inputs.bump }}
       # tag-prefix omitted → defaults to "v" → produces v1.2.3
@@ -47,7 +49,7 @@ on:
 
 jobs:
   tag:
-    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v3
     with:
       bump: ${{ inputs.bump }}
       tag-prefix: "tools/v"   # produces tools/v0.1.0
@@ -184,7 +186,7 @@ on:
 
 jobs:
   publish:
-    uses: j7an/shared-workflows/.github/workflows/publish-pypi.yml@v2
+    uses: j7an/shared-workflows/.github/workflows/publish-pypi.yml@v3
     with:
       tag: ${{ github.ref_name }}
       package-dir: tools
@@ -196,7 +198,7 @@ jobs:
 For each new PyPI package that uses this workflow, complete **once**:
 
 - [ ] Claim the package name on [PyPI](https://pypi.org/) and [TestPyPI](https://test.pypi.org/).
-- [ ] On PyPI, configure trusted publisher: workflow `j7an/shared-workflows/.github/workflows/publish-pypi.yml`, ref `v2`, environment `pypi`.
+- [ ] On PyPI, configure trusted publisher: workflow `j7an/shared-workflows/.github/workflows/publish-pypi.yml`, ref `v3`, environment `pypi`.
 - [ ] On TestPyPI, configure the same trusted publisher with environment `testpypi`.
 - [ ] Confirm GitHub Environments `testpypi` and `pypi` exist in `j7an/shared-workflows` repo settings.
 

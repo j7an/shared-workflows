@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # pyproject-bump-extract.sh — diff-aware extractor for pyproject.toml bump-only edits.
 #
-# Owns all pyproject.toml diff semantics for the dependency-cooldown/safety
-# workflows. Recognizes the narrow set of bump shapes Dependabot emits for
+# Owns all pyproject.toml diff semantics for the dependency-safety
+# workflow. Recognizes the narrow set of bump shapes Dependabot emits for
 # uv/poetry ecosystems and emits either extracted dep rows (mode=deps) or
 # the paths it proved are bump-only (mode=cleared-paths). Files with any
 # unparseable changed line (build-system edits, new-dep additions, marker

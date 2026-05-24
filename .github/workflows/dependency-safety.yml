@@ -67,7 +67,7 @@ jobs:
           ENABLE_SCORECARD: ${{ inputs.enable_scorecard }}
           AUTO_MERGE: ${{ inputs.auto_merge }}
           # COOLDOWN_DAYS is intentionally named for the inlined check-release-age.sh,
-          # which is shared with dependency-cooldown.yml and requires that env name.
+          # which requires that env name unchanged from its standalone-script form.
           # MINIMUM_RELEASE_AGE_DAYS feeds safety-verdict.sh and human-readable strings.
           COOLDOWN_DAYS: ${{ inputs.minimum_release_age_days }}
           MINIMUM_RELEASE_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
@@ -95,7 +95,7 @@ jobs:
 
           # pypi-shape lockfiles only. Cargo.lock / package-lock.json would need
           # downstream ecosystem support (registry clients, OSV enums) before rows
-          # could be scanned — the fail-loud guard in dependency-cooldown.yml covers
+          # could be scanned — the fail-loud guard in dependency-safety.yml covers
           # unhandled lockfiles.
           filename_to_ecosystem() {
             case "$1" in
@@ -210,7 +210,7 @@ jobs:
           diff_touches_lockfile() (
           # diff-touches-lockfile.sh — detect dependency-relevant file edits in a
           # unified diff (lockfiles, manifests, and GitHub Actions workflow YAMLs).
-          # Used by dependency-cooldown.yml's fail-loud guard to refuse green gates
+          # Used by dependency-safety.yml's fail-loud guard to refuse green gates
           # when the dep extractor returns zero rows on a diff that touches files
           # which *should* have produced deps.
           #
@@ -326,8 +326,8 @@ jobs:
           pyproject_bump_extract() (
           # pyproject-bump-extract.sh — diff-aware extractor for pyproject.toml bump-only edits.
           #
-          # Owns all pyproject.toml diff semantics for the dependency-cooldown/safety
-          # workflows. Recognizes the narrow set of bump shapes Dependabot emits for
+          # Owns all pyproject.toml diff semantics for the dependency-safety
+          # workflow. Recognizes the narrow set of bump shapes Dependabot emits for
           # uv/poetry ecosystems and emits either extracted dep rows (mode=deps) or
           # the paths it proved are bump-only (mode=cleared-paths). Files with any
           # unparseable changed line (build-system edits, new-dep additions, marker
@@ -1232,7 +1232,7 @@ jobs:
           if [ -n "$UNSUPPORTED_PATHS" ]; then
             GUARD_TRIGGERED=true
             UNSUPPORTED_LIST=$(echo "$UNSUPPORTED_PATHS" | paste -sd, -)
-            EXTRACTION_WARNING="⚠️ Diff touches dependency files the parser does not support (${UNSUPPORTED_LIST}). Manual review required; the cooldown/safety gate cannot scan these."
+            EXTRACTION_WARNING="⚠️ Diff touches dependency files the parser does not support (${UNSUPPORTED_LIST}). Manual review required; the dependency-safety gate cannot scan these."
           elif [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ] && [ -n "$EFFECTIVE_TOUCHED" ]; then
             GUARD_TRIGGERED=true
             TOUCHED_LIST=$(echo "$EFFECTIVE_TOUCHED" | paste -sd, -)
@@ -1656,8 +1656,7 @@ jobs:
           # The reconcile_label function preserves stale labels when HAS_ERROR is set
           # (conservative-preserve rule, spec §6.2).
           #
-          # This workflow MUST NOT touch `cooldown-pending` — that label is owned
-          # exclusively by the legacy dependency-cooldown.yml during Phase 2 migration.
+          # This workflow does not manage the retired `cooldown-pending` label.
           reconcile_label "security-review-needed"    "$HAS_SECURITY_REVIEW" "$LABEL_COLOR_security_review_needed"    "$LABEL_DESC_security_review_needed"
           reconcile_label "dependency-age-violation" "$HAS_AGE_VIOLATION"   "$LABEL_COLOR_dependency_age_violation" "$LABEL_DESC_dependency_age_violation"
           reconcile_label "dependency-safety-error"  "$HAS_SAFETY_ERROR"    "$LABEL_COLOR_dependency_safety_error"  "$LABEL_DESC_dependency_safety_error"
