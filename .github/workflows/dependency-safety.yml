@@ -95,7 +95,7 @@ jobs:
 
           # pypi-shape lockfiles only. Cargo.lock / package-lock.json would need
           # downstream ecosystem support (registry clients, OSV enums) before rows
-          # could be scanned — the fail-loud guard in dependency-cooldown.yml covers
+          # could be scanned — the fail-loud guard in dependency-safety.yml covers
           # unhandled lockfiles.
           filename_to_ecosystem() {
             case "$1" in
@@ -210,7 +210,7 @@ jobs:
           diff_touches_lockfile() (
           # diff-touches-lockfile.sh — detect dependency-relevant file edits in a
           # unified diff (lockfiles, manifests, and GitHub Actions workflow YAMLs).
-          # Used by dependency-cooldown.yml's fail-loud guard to refuse green gates
+          # Used by dependency-safety.yml's fail-loud guard to refuse green gates
           # when the dep extractor returns zero rows on a diff that touches files
           # which *should* have produced deps.
           #
@@ -326,8 +326,8 @@ jobs:
           pyproject_bump_extract() (
           # pyproject-bump-extract.sh — diff-aware extractor for pyproject.toml bump-only edits.
           #
-          # Owns all pyproject.toml diff semantics for the dependency-cooldown/safety
-          # workflows. Recognizes the narrow set of bump shapes Dependabot emits for
+          # Owns all pyproject.toml diff semantics for the dependency-safety
+          # workflow. Recognizes the narrow set of bump shapes Dependabot emits for
           # uv/poetry ecosystems and emits either extracted dep rows (mode=deps) or
           # the paths it proved are bump-only (mode=cleared-paths). Files with any
           # unparseable changed line (build-system edits, new-dep additions, marker
