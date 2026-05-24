@@ -117,3 +117,11 @@ assert_clean_bump() {
 @test "Poetry python constraint change disqualifies" {
   assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-python-constraint-change.diff
 }
+
+@test "Poetry inline-table version-only bump" {
+  assert_clean_bump tests/fixtures/pyproject-bump-extract/poetry-inline-table-bump.diff $'ruff\t0.15.13\tpypi' "pyproject.toml"
+}
+
+@test "Poetry inline-table extras change disqualifies" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-inline-extras-change.diff
+}
