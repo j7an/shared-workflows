@@ -205,3 +205,17 @@ assert_clean_bump() {
 @test "Disqualify: mixed bump + addition in same file" {
   assert_disqualified tests/fixtures/pyproject-bump-extract/mixed-bump-and-add.diff
 }
+
+@test "Comment-only churn clears path with zero deps" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/comment-only-churn.diff
+  [ "$status" -eq 0 ]; [ -z "$output" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/comment-only-churn.diff
+  [ "$status" -eq 0 ]; [ "$output" = "pyproject.toml" ]
+}
+
+@test "Whitespace-only churn in unrelated table clears path" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/whitespace-churn-other-table.diff
+  [ "$status" -eq 0 ]; [ -z "$output" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/whitespace-churn-other-table.diff
+  [ "$status" -eq 0 ]; [ "$output" = "pyproject.toml" ]
+}
