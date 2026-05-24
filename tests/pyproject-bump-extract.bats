@@ -125,3 +125,15 @@ assert_clean_bump() {
 @test "Poetry inline-table extras change disqualifies" {
   assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-inline-extras-change.diff
 }
+
+@test "Poetry [tool.poetry.group.dev.dependencies] bump" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/poetry-group-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "pytest	8.4.0	pypi" ]
+}
+
+@test "Poetry legacy [tool.poetry.dev-dependencies] bump" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps < tests/fixtures/pyproject-bump-extract/poetry-dev-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "black	24.2.0	pypi" ]
+}
