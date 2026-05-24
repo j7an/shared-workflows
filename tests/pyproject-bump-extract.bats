@@ -59,6 +59,52 @@ assert_clean_bump_diff() {
   [ "$output" = "$expected_path" ]
 }
 
+# Build a minimal PEP 621 [project] dependencies bump diff. One - and one + line.
+# Args: $1 = minus body inside quotes (e.g. "ruff>=0.15.12")
+#       $2 = plus body inside quotes (e.g. "ruff>=0.15.13")
+# Both args are inserted verbatim between the leading 4-space indent and the
+# trailing comma. Hunk header is fixed at @@ -10,7 +10,7 @@.
+pep621_deps_diff() {
+  printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' \
+    '--- a/pyproject.toml' \
+    '+++ b/pyproject.toml' \
+    '@@ -10,7 +10,7 @@' \
+    ' [project]' \
+    ' dependencies = [' \
+    "-    $1," \
+    "+    $2," \
+    ' ]'
+}
+
+# Build a minimal Poetry [tool.poetry.dependencies] keyval diff. One - and one +.
+# Args: $1 = minus body (e.g. 'pkg = "==1.0"')
+#       $2 = plus body (e.g. 'pkg = "^2.0"')
+poetry_main_kv_diff() {
+  printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' \
+    '--- a/pyproject.toml' \
+    '+++ b/pyproject.toml' \
+    '@@ -1,2 +1,2 @@' \
+    ' [tool.poetry.dependencies]' \
+    "-$1" \
+    "+$2"
+}
+
+# Build a minimal Poetry [tool.poetry.dependencies] inline-table diff.
+# Args: $1 = minus body (e.g. 'pkg = { version = "==1.0", source = "internal" }')
+#       $2 = plus body
+poetry_inline_diff() {
+  printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' \
+    '--- a/pyproject.toml' \
+    '+++ b/pyproject.toml' \
+    '@@ -1,2 +1,2 @@' \
+    ' [tool.poetry.dependencies]' \
+    "-$1" \
+    "+$2"
+}
+
 @test "missing --mode exits 2 with stderr message" {
   run bash -c 'printf "" | bash scripts/pyproject-bump-extract.sh'
   [ "$status" -eq 2 ]
@@ -241,67 +287,19 @@ DIFF
 }
 
 @test "Disqualify: PEP 621 marker change" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "foo>=1.2; python_version < \"3.11\"",
-+    "foo>=1.2; python_version < \"3.12\"",
- ]
-DIFF
-)"
+  assert_disqualified_diff "$(pep621_deps_diff '"foo>=1.2; python_version < \"3.11\""' '"foo>=1.2; python_version < \"3.12\""')"
 }
 
 @test "Disqualify: PEP 621 extras change" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "httpx[http2]>=0.28.0",
-+    "httpx[http2,brotli]>=0.28.0",
- ]
-DIFF
-)"
+  assert_disqualified_diff "$(pep621_deps_diff '"httpx[http2]>=0.28.0"' '"httpx[http2,brotli]>=0.28.0"')"
 }
 
 @test "Disqualify: PEP 621 version + marker both change (skeleton mismatch)" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "foo>=1.1; python_version < '3.11'",
-+    "foo>=1.2; python_version < '3.12'",
- ]
-DIFF
-)"
+  assert_disqualified_diff "$(pep621_deps_diff '"foo>=1.1; python_version < '"'"'3.11'"'"'"' '"foo>=1.2; python_version < '"'"'3.12'"'"'"')"
 }
 
 @test "Disqualify: PEP 621 version + extras both change (skeleton mismatch)" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "httpx[http2]>=0.28.0",
-+    "httpx[http2,brotli]>=0.28.1",
- ]
-DIFF
-)"
+  assert_disqualified_diff "$(pep621_deps_diff '"httpx[http2]>=0.28.0"' '"httpx[http2,brotli]>=0.28.1"')"
 }
 
 @test "Disqualify: PEP 621 unmatched removal followed by context (pending lifetime)" {
@@ -434,19 +432,7 @@ DIFF
 }
 
 @test "Positive: package name with digits (urllib3)" {
-  DIFF="$(cat <<'DIFF_EOF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "urllib3>=2.4.0",
-+    "urllib3>=2.5.0",
- ]
-DIFF_EOF
-)"
+  DIFF="$(pep621_deps_diff '"urllib3>=2.4.0"' '"urllib3>=2.5.0"')"
   run_pyproject_deps "$DIFF"
   [ "$status" -eq 0 ]
   [ "$output" = "urllib3	2.5.0	pypi" ]
@@ -455,19 +441,7 @@ DIFF_EOF
 }
 
 @test "Positive: bump with unchanged marker preserved on both sides" {
-  DIFF="$(cat <<'DIFF_EOF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "foo>=1.1; python_version < \"3.12\"",
-+    "foo>=1.2; python_version < \"3.12\"",
- ]
-DIFF_EOF
-)"
+  DIFF="$(pep621_deps_diff '"foo>=1.1; python_version < \"3.12\""' '"foo>=1.2; python_version < \"3.12\""')"
   run_pyproject_deps "$DIFF"
   [ "$status" -eq 0 ]
   [ "$output" = "foo	1.2	pypi" ]
@@ -476,19 +450,7 @@ DIFF_EOF
 }
 
 @test "Positive: PEP 440 post-release version" {
-  DIFF="$(cat <<'DIFF_EOF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "pkg>=1.0.0",
-+    "pkg>=1.0.0.post1",
- ]
-DIFF_EOF
-)"
+  DIFF="$(pep621_deps_diff '"pkg>=1.0.0"' '"pkg>=1.0.0.post1"')"
   run_pyproject_deps "$DIFF"
   [ "$status" -eq 0 ]
   [ "$output" = "pkg	1.0.0.post1	pypi" ]
@@ -497,65 +459,19 @@ DIFF_EOF
 }
 
 @test "Disqualify: PEP 508 compound spec (>=X,<Y)" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "ruff>=0.15.12,<0.16",
-+    "ruff>=0.15.13,<0.16",
- ]
-DIFF
-)"
+  assert_disqualified_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff>=0.15.13,<0.16"')"
 }
 
 @test "Disqualify: PEP 508 upper-bound change (<X)" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "foo<3.0",
-+    "foo<4.0",
- ]
-DIFF
-)"
+  assert_disqualified_diff "$(pep621_deps_diff '"foo<3.0"' '"foo<4.0"')"
 }
 
 @test "Disqualify: PEP 508 not-equal change (!=X)" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [project]
- dependencies = [
--    "foo!=1.2.0",
-+    "foo!=1.3.0",
- ]
-DIFF
-)"
+  assert_disqualified_diff "$(pep621_deps_diff '"foo!=1.2.0"' '"foo!=1.3.0"')"
 }
 
 @test "Disqualify: poetry wildcard (\"*\")" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
-index 1111111..2222222 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -10,7 +10,7 @@
- [tool.poetry.dependencies]
--foo = "1.0.0"
-+foo = "*"
-DIFF
-)"
+  assert_disqualified_diff "$(poetry_main_kv_diff 'foo = "1.0.0"' 'foo = "*"')"
 }
 
 @test "Disqualify: current_key leak — keywords array after dependencies (Bug 1)" {
@@ -595,16 +511,7 @@ DIFF
 }
 
 @test "Disqualify: poetry inline-table subversion does not match version (Bug 2)" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -1,4 +1,4 @@
- [tool.poetry.dependencies]
--pkg = { subversion = "1.0.0", source = "internal" }
-+pkg = { subversion = "2.0.0", source = "internal" }
-DIFF
-)"
+  assert_disqualified_diff "$(poetry_inline_diff 'pkg = { subversion = "1.0.0", source = "internal" }' 'pkg = { subversion = "2.0.0", source = "internal" }')"
 }
 
 @test "Disqualify: PEP 508 operator change (== to >=) is constraint broadening (Bug 3)" {
@@ -623,42 +530,15 @@ DIFF
 }
 
 @test "Disqualify: poetry keyval operator change (== to ^) is constraint broadening (Bug 3)" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -1,2 +1,2 @@
- [tool.poetry.dependencies]
--pkg = "==1.0"
-+pkg = "^2.0"
-DIFF
-)"
+  assert_disqualified_diff "$(poetry_main_kv_diff 'pkg = "==1.0"' 'pkg = "^2.0"')"
 }
 
 @test "Disqualify: poetry inline-table operator change (== to ^) is constraint broadening (Bug 3)" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -1,2 +1,2 @@
- [tool.poetry.dependencies]
--pkg = { version = "==1.0", source = "internal" }
-+pkg = { version = "^2.0", source = "internal" }
-DIFF
-)"
+  assert_disqualified_diff "$(poetry_inline_diff 'pkg = { version = "==1.0", source = "internal" }' 'pkg = { version = "^2.0", source = "internal" }')"
 }
 
 @test "Disqualify: poetry inline-table whitespace around version= changed (Bug 4)" {
-  assert_disqualified_diff "$(cat <<'DIFF'
-diff --git a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -1,2 +1,2 @@
- [tool.poetry.dependencies]
--ruff = { version = "^0.15.12", extras = ["server"] }
-+ruff = { version="^0.15.13", extras = ["server"] }
-DIFF
-)"
+  assert_disqualified_diff "$(poetry_inline_diff 'ruff = { version = "^0.15.12", extras = ["server"] }' 'ruff = { version="^0.15.13", extras = ["server"] }')"
 }
 
 @test "Disqualify: malformed PEP 508 bare version (no operator) (Bug 5)" {
