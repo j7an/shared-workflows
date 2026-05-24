@@ -341,9 +341,9 @@ jobs:
           # newline-delimited string sentinel, matching scripts/extract-deps.sh.
           #
           # See docs/superpowers/specs/2026-05-23-pyproject-toml-parser-design.md.
-
+          
           set -euo pipefail
-
+          
           MODE=""
           for arg in "$@"; do
             case "$arg" in
@@ -360,26 +360,26 @@ jobs:
                 ;;
             esac
           done
-
+          
           if [ -z "$MODE" ]; then
             echo "pyproject-bump-extract.sh: --mode=deps or --mode=cleared-paths required" >&2
             exit 2
           fi
-
+          
           input=$(cat)
-
+          
           # Empty input → exit 0 with no output (matches extract-deps.sh).
           if [ -z "$input" ]; then
             exit 0
           fi
-
+          
           # Malformed input detection: here-string (not pipeline) to avoid SIGPIPE under
           # pipefail on large valid diffs (issue #50 pattern).
           if ! grep -qE '^(\+\+\+|---|@@|diff --git)' <<< "$input"; then
             echo "pyproject-bump-extract.sh: input is not a unified diff" >&2
             exit 2
           fi
-
+          
           # --- Parser state ---
           # Per-file (reset on each diff --git boundary):
           current_path=""
@@ -390,12 +390,12 @@ jobs:
           current_key=""          # array-opening key for tables where keys are dep arrays
           verdict="clean"
           file_rows=$'\n'
-
+          
           # Global:
           out_deps_rows=()
           out_cleared_paths=()
           seen=$'\n'              # dedup sentinel "\npypi:<name>\n"
-
+          
           # Single pending tracker. Lifetime = exactly one line. If pending is set,
           # the IMMEDIATELY NEXT line MUST be the matching + (same kind, same name,
           # same skeleton). Anything else (other -, unmatched +, context, comment,
@@ -404,9 +404,9 @@ jobs:
           pending_name=""
           pending_skeleton=""     # entry with version-spec field substituted by sentinel
           pending_minus_version=""
-
+          
           # --- Helpers ---
-
+          
           # extract_target_version "$spec" — §3.3.1. Prints target on stdout, returns 1 on disqualify.
           extract_target_version() {
             local spec="$1" stripped
@@ -430,23 +430,32 @@ jobs:
             fi
             return 1
           }
-
+          
           # parse_pep508_entry "$content" — captures name/extras/version_spec/marker.
           # Sets _pep_name, _pep_extras (with brackets, or empty), _pep_version_spec,
           # _pep_marker (with leading ';', or empty). Returns 0/1.
           parse_pep508_entry() {
-            local content="$1"
+            local content="$1" trimmed
             _pep_name=""; _pep_extras=""; _pep_version_spec=""; _pep_marker=""
             if [[ "$content" =~ ^[[:space:]]*\"([A-Za-z][A-Za-z0-9_.-]*)(\[[^]]*\])?([^\";]*)(;.*)?\"[[:space:]]*,?[[:space:]]*$ ]]; then
               _pep_name="${BASH_REMATCH[1]}"
               _pep_extras="${BASH_REMATCH[2]}"
               _pep_version_spec="${BASH_REMATCH[3]}"
               _pep_marker="${BASH_REMATCH[4]}"
+              # Validate: non-empty version_spec must start with a PEP 508 operator.
+              # Bare versions (e.g., "foo 1.0") are malformed PEP 508 and must not parse.
+              trimmed="${_pep_version_spec#"${_pep_version_spec%%[![:space:]]*}"}"
+              if [ -n "$trimmed" ]; then
+                case "$trimmed" in
+                  \^*|\~=*|\~*|\>=*|==*|\<=*|\<*|\>*|!=*) ;;
+                  *) return 1 ;;
+                esac
+              fi
               return 0
             fi
             return 1
           }
-
+          
           # parse_poetry_keyval "$value" — for "spec" form. Sets _poetry_keyval_version.
           parse_poetry_keyval() {
             local value="$1"
@@ -457,45 +466,70 @@ jobs:
             fi
             return 1
           }
-
+          
           # parse_poetry_inline "$value" — for { version = "spec", ... } form.
-          # Sets _poetry_inline_version and _poetry_inline_skeleton (version substituted).
+          # Sets _poetry_inline_version and _poetry_inline_skeleton (version VALUE
+          # substituted, surrounding whitespace preserved). Requires `version` to be
+          # preceded by start-of-string, comma, or whitespace so `subversion` does
+          # not match (Bug 2). Preserves original whitespace around `=` so
+          # reformatting that changes spacing is caught (Bug 4).
           parse_poetry_inline() {
             local value="$1" inner
             _poetry_inline_version=""; _poetry_inline_skeleton=""
             if [[ "$value" =~ ^[[:space:]]*\{(.*)\}[[:space:]]*$ ]]; then
               inner="${BASH_REMATCH[1]}"
-              if [[ "$inner" =~ version[[:space:]]*=[[:space:]]*\"([^\"]*)\" ]]; then
-                _poetry_inline_version="${BASH_REMATCH[1]}"
-                _poetry_inline_skeleton=$(printf '%s' "$inner" | sed -E 's/version[[:space:]]*=[[:space:]]*"[^"]*"/version=__VER__/')
+              if [[ "$inner" =~ (^|[,[:space:]])version[[:space:]]*=[[:space:]]*\"([^\"]*)\" ]]; then
+                _poetry_inline_version="${BASH_REMATCH[2]}"
+                _poetry_inline_skeleton=$(printf '%s' "$inner" | sed -E 's/(^|[,[:space:]])(version[[:space:]]*=[[:space:]]*)"[^"]*"/\1\2"__VER__"/')
                 return 0
               fi
             fi
             return 1
           }
-
+          
+          # extract_operator "$spec" — returns the operator portion on stdout.
+          # "^", "~=", "~", ">=", "==" → printed verbatim; bare version → empty string.
+          # Unsupported operators (<, <=, >, !=) → return 1 (caller treats as disqualify).
+          extract_operator() {
+            local spec="$1" trimmed
+            trimmed="${spec#"${spec%%[![:space:]]*}"}"
+            case "$trimmed" in
+              \^*)   printf '%s' '^' ;;
+              \~=*)  printf '%s' '~=' ;;
+              \~*)   printf '%s' '~' ;;
+              \>=*)  printf '%s' '>=' ;;
+              ==*)   printf '%s' '==' ;;
+              \<=*|\<*|\>*|!=*) return 1 ;;
+              *)     printf '%s' '' ;;
+            esac
+            return 0
+          }
+          
           emit_bump() {
-            local name="$1" plus_spec="$2" minus_spec="$3" target
+            local name="$1" plus_spec="$2" minus_spec="$3" target plus_op minus_op
             if [ "$plus_spec" = "$minus_spec" ]; then verdict="disqualified"; return; fi
+            plus_op=$(extract_operator "$plus_spec") || { verdict="disqualified"; return; }
+            minus_op=$(extract_operator "$minus_spec") || { verdict="disqualified"; return; }
+            if [ "$plus_op" != "$minus_op" ]; then verdict="disqualified"; return; fi
             target=$(extract_target_version "$plus_spec") || { verdict="disqualified"; return; }
             extract_target_version "$minus_spec" >/dev/null || { verdict="disqualified"; return; }
             file_rows="${file_rows}${name}	${target}	pypi"$'\n'
           }
-
+          
           clear_pending() {
             pending_kind=""
             pending_name=""
             pending_skeleton=""
             pending_minus_version=""
           }
-
+          
           flush_pending_as_disqualified() {
             if [ -n "$pending_kind" ]; then
               verdict="disqualified"
               clear_pending
             fi
           }
-
+          
           flush_file() {
             flush_pending_as_disqualified
             if [ -z "$current_basename" ] || [ "$current_basename" != "pyproject.toml" ]; then
@@ -513,7 +547,7 @@ jobs:
               out_cleared_paths+=("$current_path")
             fi
           }
-
+          
           reset_file_state() {
             current_table=""
             current_key=""
@@ -521,11 +555,11 @@ jobs:
             file_rows=$'\n'
             clear_pending
           }
-
+          
           # --- Main parse loop ---
           while IFS= read -r line; do
             line="${line%$'\r'}"
-
+          
             # File boundary.
             if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
               flush_file
@@ -534,23 +568,23 @@ jobs:
               reset_file_state
               continue
             fi
-
+          
             [[ "$line" == +++* ]] && continue
             [[ "$line" == ---* ]] && continue
-
+          
             if [[ "$line" =~ ^@@ ]]; then
               flush_pending_as_disqualified
               current_table=""
               current_key=""
               continue
             fi
-
+          
             [ "$current_basename" != "pyproject.toml" ] && continue
             [ "$verdict" = "disqualified" ] && continue
-
+          
             prefix="${line:0:1}"
             content="${line:1}"
-
+          
             # ---------------- Centralized pending consumption ----------------
             # If pending is set, this line MUST be the matching + (same kind/name/skeleton)
             # or the file is disqualified. No other line type may consume or pass through
@@ -599,11 +633,11 @@ jobs:
               continue
             fi
             # ---------------- End pending consumption ----------------
-
+          
             # Comment / whitespace allowance anywhere (§3.4 rule 2).
             if [[ "$content" =~ ^[[:space:]]*# ]]; then continue; fi
             if [[ "$content" =~ ^[[:space:]]*$ ]]; then continue; fi
-
+          
             # Table header detection.
             if [[ "$content" =~ ^[[:space:]]*\[([^]]+)\] ]]; then
               header="${BASH_REMATCH[1]}"
@@ -626,7 +660,7 @@ jobs:
               if [ "$prefix" = "+" ] || [ "$prefix" = "-" ]; then verdict="disqualified"; fi
               continue
             fi
-
+          
             # Key = ... line — per-table routing.
             if [[ "$content" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_-]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
               key="${BASH_REMATCH[1]}"
@@ -639,6 +673,7 @@ jobs:
                     current_key="dependencies"
                   else
                     # Any other [project] key on +/- (name, version, description, ...) disqualifies.
+                    current_key=""
                     if [ "$prefix" = "+" ] || [ "$prefix" = "-" ]; then verdict="disqualified"; fi
                   fi
                   ;;
@@ -654,6 +689,7 @@ jobs:
                       current_key="$key"
                       ;;
                     *)
+                      current_key=""
                       if [ "$prefix" = "+" ] || [ "$prefix" = "-" ]; then verdict="disqualified"; fi
                       ;;
                   esac
@@ -705,7 +741,7 @@ jobs:
               esac
               continue
             fi
-
+          
             # PEP 508 string-in-array entry.
             if parse_pep508_entry "$content"; then
               # Positively-established array context required (Blocker 3).
@@ -741,19 +777,19 @@ jobs:
               fi
               continue
             fi
-
+          
             # Closing `]` of an array on a changed line = reformatting → disqualify.
             if [[ "$content" =~ ^[[:space:]]*\] ]]; then
               if [ "$prefix" = "+" ] || [ "$prefix" = "-" ]; then verdict="disqualified"; fi
               continue
             fi
-
+          
             # Anything else changed in pyproject.toml → disqualify.
             if [ "$prefix" = "+" ] || [ "$prefix" = "-" ]; then verdict="disqualified"; fi
           done <<< "$input"
-
+          
           flush_file
-
+          
           if [ "$MODE" = "deps" ]; then
             if [ ${#out_deps_rows[@]} -gt 0 ]; then
               printf '%s\n' "${out_deps_rows[@]}" | sort -t$'\t' -k1,1 -u

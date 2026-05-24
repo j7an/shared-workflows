@@ -439,13 +439,22 @@ jobs:
           # Sets _pep_name, _pep_extras (with brackets, or empty), _pep_version_spec,
           # _pep_marker (with leading ';', or empty). Returns 0/1.
           parse_pep508_entry() {
-            local content="$1"
+            local content="$1" trimmed
             _pep_name=""; _pep_extras=""; _pep_version_spec=""; _pep_marker=""
             if [[ "$content" =~ ^[[:space:]]*\"([A-Za-z][A-Za-z0-9_.-]*)(\[[^]]*\])?([^\";]*)(;.*)?\"[[:space:]]*,?[[:space:]]*$ ]]; then
               _pep_name="${BASH_REMATCH[1]}"
               _pep_extras="${BASH_REMATCH[2]}"
               _pep_version_spec="${BASH_REMATCH[3]}"
               _pep_marker="${BASH_REMATCH[4]}"
+              # Validate: non-empty version_spec must start with a PEP 508 operator.
+              # Bare versions (e.g., "foo 1.0") are malformed PEP 508 and must not parse.
+              trimmed="${_pep_version_spec#"${_pep_version_spec%%[![:space:]]*}"}"
+              if [ -n "$trimmed" ]; then
+                case "$trimmed" in
+                  \^*|\~=*|\~*|\>=*|==*|\<=*|\<*|\>*|!=*) ;;
+                  *) return 1 ;;
+                esac
+              fi
               return 0
             fi
             return 1
@@ -463,24 +472,49 @@ jobs:
           }
           
           # parse_poetry_inline "$value" — for { version = "spec", ... } form.
-          # Sets _poetry_inline_version and _poetry_inline_skeleton (version substituted).
+          # Sets _poetry_inline_version and _poetry_inline_skeleton (version VALUE
+          # substituted, surrounding whitespace preserved). Requires `version` to be
+          # preceded by start-of-string, comma, or whitespace so `subversion` does
+          # not match (Bug 2). Preserves original whitespace around `=` so
+          # reformatting that changes spacing is caught (Bug 4).
           parse_poetry_inline() {
             local value="$1" inner
             _poetry_inline_version=""; _poetry_inline_skeleton=""
             if [[ "$value" =~ ^[[:space:]]*\{(.*)\}[[:space:]]*$ ]]; then
               inner="${BASH_REMATCH[1]}"
-              if [[ "$inner" =~ version[[:space:]]*=[[:space:]]*\"([^\"]*)\" ]]; then
-                _poetry_inline_version="${BASH_REMATCH[1]}"
-                _poetry_inline_skeleton=$(printf '%s' "$inner" | sed -E 's/version[[:space:]]*=[[:space:]]*"[^"]*"/version=__VER__/')
+              if [[ "$inner" =~ (^|[,[:space:]])version[[:space:]]*=[[:space:]]*\"([^\"]*)\" ]]; then
+                _poetry_inline_version="${BASH_REMATCH[2]}"
+                _poetry_inline_skeleton=$(printf '%s' "$inner" | sed -E 's/(^|[,[:space:]])(version[[:space:]]*=[[:space:]]*)"[^"]*"/\1\2"__VER__"/')
                 return 0
               fi
             fi
             return 1
           }
           
+          # extract_operator "$spec" — returns the operator portion on stdout.
+          # "^", "~=", "~", ">=", "==" → printed verbatim; bare version → empty string.
+          # Unsupported operators (<, <=, >, !=) → return 1 (caller treats as disqualify).
+          extract_operator() {
+            local spec="$1" trimmed
+            trimmed="${spec#"${spec%%[![:space:]]*}"}"
+            case "$trimmed" in
+              \^*)   printf '%s' '^' ;;
+              \~=*)  printf '%s' '~=' ;;
+              \~*)   printf '%s' '~' ;;
+              \>=*)  printf '%s' '>=' ;;
+              ==*)   printf '%s' '==' ;;
+              \<=*|\<*|\>*|!=*) return 1 ;;
+              *)     printf '%s' '' ;;
+            esac
+            return 0
+          }
+          
           emit_bump() {
-            local name="$1" plus_spec="$2" minus_spec="$3" target
+            local name="$1" plus_spec="$2" minus_spec="$3" target plus_op minus_op
             if [ "$plus_spec" = "$minus_spec" ]; then verdict="disqualified"; return; fi
+            plus_op=$(extract_operator "$plus_spec") || { verdict="disqualified"; return; }
+            minus_op=$(extract_operator "$minus_spec") || { verdict="disqualified"; return; }
+            if [ "$plus_op" != "$minus_op" ]; then verdict="disqualified"; return; fi
             target=$(extract_target_version "$plus_spec") || { verdict="disqualified"; return; }
             extract_target_version "$minus_spec" >/dev/null || { verdict="disqualified"; return; }
             file_rows="${file_rows}${name}	${target}	pypi"$'\n'
@@ -643,6 +677,7 @@ jobs:
                     current_key="dependencies"
                   else
                     # Any other [project] key on +/- (name, version, description, ...) disqualifies.
+                    current_key=""
                     if [ "$prefix" = "+" ] || [ "$prefix" = "-" ]; then verdict="disqualified"; fi
                   fi
                   ;;
@@ -658,6 +693,7 @@ jobs:
                       current_key="$key"
                       ;;
                     *)
+                      current_key=""
                       if [ "$prefix" = "+" ] || [ "$prefix" = "-" ]; then verdict="disqualified"; fi
                       ;;
                   esac
