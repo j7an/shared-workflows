@@ -67,7 +67,7 @@ jobs:
           ENABLE_SCORECARD: ${{ inputs.enable_scorecard }}
           AUTO_MERGE: ${{ inputs.auto_merge }}
           # COOLDOWN_DAYS is intentionally named for the inlined check-release-age.sh,
-          # which is shared with dependency-cooldown.yml and requires that env name.
+          # which requires that env name unchanged from its standalone-script form.
           # MINIMUM_RELEASE_AGE_DAYS feeds safety-verdict.sh and human-readable strings.
           COOLDOWN_DAYS: ${{ inputs.minimum_release_age_days }}
           MINIMUM_RELEASE_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
@@ -1232,7 +1232,7 @@ jobs:
           if [ -n "$UNSUPPORTED_PATHS" ]; then
             GUARD_TRIGGERED=true
             UNSUPPORTED_LIST=$(echo "$UNSUPPORTED_PATHS" | paste -sd, -)
-            EXTRACTION_WARNING="⚠️ Diff touches dependency files the parser does not support (${UNSUPPORTED_LIST}). Manual review required; the cooldown/safety gate cannot scan these."
+            EXTRACTION_WARNING="⚠️ Diff touches dependency files the parser does not support (${UNSUPPORTED_LIST}). Manual review required; the dependency-safety gate cannot scan these."
           elif [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ] && [ -n "$EFFECTIVE_TOUCHED" ]; then
             GUARD_TRIGGERED=true
             TOUCHED_LIST=$(echo "$EFFECTIVE_TOUCHED" | paste -sd, -)
@@ -1656,8 +1656,7 @@ jobs:
           # The reconcile_label function preserves stale labels when HAS_ERROR is set
           # (conservative-preserve rule, spec §6.2).
           #
-          # This workflow MUST NOT touch `cooldown-pending` — that label is owned
-          # exclusively by the legacy dependency-cooldown.yml during Phase 2 migration.
+          # This workflow does not manage the retired `cooldown-pending` label.
           reconcile_label "security-review-needed"    "$HAS_SECURITY_REVIEW" "$LABEL_COLOR_security_review_needed"    "$LABEL_DESC_security_review_needed"
           reconcile_label "dependency-age-violation" "$HAS_AGE_VIOLATION"   "$LABEL_COLOR_dependency_age_violation" "$LABEL_DESC_dependency_age_violation"
           reconcile_label "dependency-safety-error"  "$HAS_SAFETY_ERROR"    "$LABEL_COLOR_dependency_safety_error"  "$LABEL_DESC_dependency_safety_error"
