@@ -1,0 +1,20 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [tool.poetry.dependencies]
+ python = "^3.11"
+-requests = "^2.31"
++requests = "^2.32"
+diff --git a/poetry.lock b/poetry.lock
+index 3333333..4444444 100644
+--- a/poetry.lock
++++ b/poetry.lock
+@@ -50,7 +50,7 @@ optional = false
+
+ [[package]]
+ name = "requests"
+-version = "2.31.0"
++version = "2.32.0"
+ description = "..."
