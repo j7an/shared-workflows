@@ -109,3 +109,11 @@ assert_clean_bump() {
   [ "$status" -eq 0 ]
   [ "$output" = "certifi	2024.2.2	pypi" ]
 }
+
+@test "Poetry main key=value bump" {
+  assert_clean_bump tests/fixtures/pyproject-bump-extract/poetry-main-bump.diff $'requests\t2.32\tpypi' "pyproject.toml"
+}
+
+@test "Poetry python constraint change disqualifies" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/poetry-python-constraint-change.diff
+}
