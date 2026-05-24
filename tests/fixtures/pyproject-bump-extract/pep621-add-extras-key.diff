@@ -1,0 +1,12 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,6 +10,9 @@
+ [project.optional-dependencies]
+ server = [
+     "httpx>=0.28.1",
+ ]
++lsp = [
++    "lsprotocol>=2025.0.0",
++]

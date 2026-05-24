@@ -153,3 +153,55 @@ assert_clean_bump() {
   run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths < tests/fixtures/pyproject-bump-extract/multi-file-mixed.diff
   [ "$output" = "services/api/pyproject.toml" ]
 }
+
+@test "Disqualify: PEP 621 new-dep addition" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-add-dep.diff
+}
+
+@test "Disqualify: PEP 621 dep removal (unmatched -)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-remove-dep.diff
+}
+
+@test "Disqualify: PEP 621 marker change" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-marker-change.diff
+}
+
+@test "Disqualify: PEP 621 extras change" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-extras-change.diff
+}
+
+@test "Disqualify: PEP 621 version + marker both change (skeleton mismatch)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-version-plus-marker-change.diff
+}
+
+@test "Disqualify: PEP 621 version + extras both change (skeleton mismatch)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-version-plus-extras-change.diff
+}
+
+@test "Disqualify: PEP 621 unmatched removal followed by context (pending lifetime)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-unmatched-removal.diff
+}
+
+@test "Disqualify: adding a new extras key in [project.optional-dependencies] (structural)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-add-extras-key.diff
+}
+
+@test "Disqualify: adding the dependencies = [ array to [project] (structural)" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/pep621-add-dependencies-array.diff
+}
+
+@test "Disqualify: build-system edit" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/build-system-edit.diff
+}
+
+@test "Disqualify: mid-array hunk with no header context" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/mid-array-no-context.diff
+}
+
+@test "Disqualify: unrecognized table" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/unrecognized-table-edit.diff
+}
+
+@test "Disqualify: mixed bump + addition in same file" {
+  assert_disqualified tests/fixtures/pyproject-bump-extract/mixed-bump-and-add.diff
+}
