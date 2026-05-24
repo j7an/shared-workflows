@@ -1,0 +1,20 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,8 @@
+ [project]
+ dependencies = [
+     "ruff>=0.15.13",
++    "newpkg>=1.0.0",
+ ]
+diff --git a/services/api/pyproject.toml b/services/api/pyproject.toml
+index 3333333..4444444 100644
+--- a/services/api/pyproject.toml
++++ b/services/api/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "fastapi>=0.110.0",
++    "fastapi>=0.111.0",
+ ]

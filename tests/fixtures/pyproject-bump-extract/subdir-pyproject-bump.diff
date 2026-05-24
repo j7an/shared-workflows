@@ -1,0 +1,10 @@
+diff --git a/services/api/pyproject.toml b/services/api/pyproject.toml
+index 1111111..2222222 100644
+--- a/services/api/pyproject.toml
++++ b/services/api/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "fastapi>=0.110.0",
++    "fastapi>=0.111.0",
+ ]

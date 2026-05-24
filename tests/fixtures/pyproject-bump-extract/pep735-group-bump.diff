@@ -1,0 +1,11 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -30,7 +30,7 @@ server = [
+
+ [dependency-groups]
+ dev = [
+-    "pytest>=8.3.0",
++    "pytest>=8.4.0",
+ ]

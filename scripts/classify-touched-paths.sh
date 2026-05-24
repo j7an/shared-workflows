@@ -29,6 +29,13 @@
 # unsupported and printed to stdout. Layer 2 (PR-body fallback) may still
 # recover deps from some of these for the scan loop, but the guard fires
 # because the diff parser cannot prove the scan was complete.
+#
+# pyproject.toml is path-level unsupported here and may be cleared by
+# scripts/pyproject-bump-extract.sh at the workflow composition layer
+# when its hunks are proven to be bump-only. This script remains
+# path-only and intentionally conservative; the final unsupported set
+# in the workflow is produced by composition, not by this classifier
+# alone.
 
 set -euo pipefail
 

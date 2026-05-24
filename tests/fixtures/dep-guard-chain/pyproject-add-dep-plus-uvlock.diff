@@ -1,0 +1,21 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,6 +10,7 @@
+ [project]
+ dependencies = [
+     "ruff>=0.15.13",
++    "newpkg>=1.0.0",
+ ]
+diff --git a/uv.lock b/uv.lock
+index 3333333..4444444 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -100,7 +100,7 @@ wheels = [
+
+ [[package]]
+ name = "newpkg"
+-version = "0.9.0"
++version = "1.0.0"
+ source = { registry = "https://pypi.org/simple" }

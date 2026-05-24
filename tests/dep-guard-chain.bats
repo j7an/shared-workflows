@@ -50,10 +50,41 @@ run_chain() {
   [ -z "$UNSUPPORTED_PATHS" ]
 }
 
-@test "pyproject.toml only — TOUCHED=pyproject.toml, UNSUPPORTED=pyproject.toml" {
-  run_chain "$FIXTURES/pyproject-only.diff"
-  [ "$TOUCHED_PATHS" = "pyproject.toml" ]
-  [ "$UNSUPPORTED_PATHS" = "pyproject.toml" ]
+# Mirrors the workflow composition block from §4.3 of the spec, including
+# the CLEARED_PYPROJECT subtraction and the EFFECTIVE_TOUCHED computation.
+run_chain_with_pyproject() {
+  local fixture="$1"
+  local diff_content
+  diff_content=$(cat "$fixture")
+
+  # Note: extract-deps is invoked here without error suppression to match the
+  # workflow's behavior — its failures should surface. The new helper is
+  # guarded with `2>/dev/null || true` because exit-2 on malformed input is
+  # informational at the integration layer.
+  EXTRACTED=$(printf '%s' "$diff_content" | bash scripts/extract-deps.sh)
+  PYPROJECT_DEPS=$(printf '%s' "$diff_content" | bash scripts/pyproject-bump-extract.sh --mode=deps 2>/dev/null || true)
+  DEPS_TSV=$(printf '%s\n%s\n' "$EXTRACTED" "$PYPROJECT_DEPS" | sed '/^$/d' | sort -u)
+
+  TOUCHED_PATHS=$(printf '%s' "$diff_content" | bash scripts/diff-touches-lockfile.sh 2>/dev/null || true)
+  BASE_UNSUPPORTED=$(printf '%s\n' "$TOUCHED_PATHS" | bash scripts/classify-touched-paths.sh 2>/dev/null || true)
+  CLEARED_PYPROJECT=$(printf '%s' "$diff_content" | bash scripts/pyproject-bump-extract.sh --mode=cleared-paths 2>/dev/null || true)
+
+  UNSUPPORTED_PATHS="$BASE_UNSUPPORTED"
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
+  if [ -n "$(printf '%s\n' "$CLEARED_PYPROJECT" | sed '/^$/d')" ]; then
+    local cleared_file
+    cleared_file=$(mktemp "${TMPDIR:-/tmp}/cleared-pyproject-paths.XXXXXX")
+    printf '%s\n' "$CLEARED_PYPROJECT" | sed '/^$/d' | sort -u > "$cleared_file"
+    UNSUPPORTED_PATHS=$(printf '%s\n' "$BASE_UNSUPPORTED" | sed '/^$/d' | grep -vFxf "$cleared_file" || true)
+    EFFECTIVE_TOUCHED=$(printf '%s\n' "$TOUCHED_PATHS" | sed '/^$/d' | grep -vFxf "$cleared_file" || true)
+    rm -f "$cleared_file"
+  fi
+}
+
+@test "pyproject-only Poetry bump — DEPS includes requests, UNSUPPORTED empty (issue #66)" {
+  run_chain_with_pyproject "$FIXTURES/pyproject-only.diff"
+  [[ "$DEPS_TSV" == *"requests"* ]]
+  [ -z "$UNSUPPORTED_PATHS" ]
 }
 
 @test "workflow YAML uses: bump — DEPS_TSV non-empty, UNSUPPORTED empty" {
@@ -62,4 +93,58 @@ run_chain() {
   [[ "$DEPS_TSV" == *"actions/checkout"* ]]
   [ "$TOUCHED_PATHS" = ".github/workflows/ci.yml" ]
   [ -z "$UNSUPPORTED_PATHS" ]
+}
+
+@test "uv pyproject + uv.lock Dependabot bump passes guard (AC1)" {
+  run_chain_with_pyproject "$FIXTURES/uv-pyproject-plus-lock.diff"
+  [[ "$DEPS_TSV" == *"ruff"* ]]
+  [ -z "$UNSUPPORTED_PATHS" ]
+}
+
+@test "poetry pyproject + poetry.lock Dependabot bump passes guard (AC2)" {
+  run_chain_with_pyproject "$FIXTURES/poetry-pyproject-plus-lock.diff"
+  [[ "$DEPS_TSV" == *"requests"* ]]
+  [ -z "$UNSUPPORTED_PATHS" ]
+}
+
+@test "pyproject-only supported bump extracts and clears" {
+  run_chain_with_pyproject "$FIXTURES/uv-pyproject-only-bump.diff"
+  [[ "$DEPS_TSV" == *"ruff"* ]]
+  [ -z "$UNSUPPORTED_PATHS" ]
+}
+
+@test "pyproject non-bump edit remains fail-loud (AC3)" {
+  run_chain_with_pyproject "$FIXTURES/pyproject-add-dep.diff"
+  # pyproject contributes no rows; if other helpers also produce none, DEPS is empty.
+  # The critical assertion is UNSUPPORTED still contains pyproject.toml.
+  [[ "$UNSUPPORTED_PATHS" == *"pyproject.toml"* ]]
+}
+
+@test "mixed: cleared pyproject + unsupported package-lock.json" {
+  run_chain_with_pyproject "$FIXTURES/pyproject-bump-plus-npm.diff"
+  [[ "$DEPS_TSV" == *"ruff"* ]]
+  [[ "$UNSUPPORTED_PATHS" == *"package-lock.json"* ]]
+}
+
+@test "pyproject disqualifier + uv.lock bump preserves AC4 fail-loud" {
+  run_chain_with_pyproject "$FIXTURES/pyproject-add-dep-plus-uvlock.diff"
+  # uv.lock contributes newpkg row from extract-deps.
+  [[ "$DEPS_TSV" == *"newpkg"* ]]
+  # pyproject still flagged unsupported.
+  [[ "$UNSUPPORTED_PATHS" == *"pyproject.toml"* ]]
+}
+
+@test "cross-helper dedup: same package in pyproject + uv.lock yields one row" {
+  run_chain_with_pyproject "$FIXTURES/cross-helper-dedup.diff"
+  # Count ruff rows in DEPS_TSV.
+  ruff_rows=$(printf '%s\n' "$DEPS_TSV" | grep -c $'^ruff\t' || true)
+  [ "$ruff_rows" -eq 1 ]
+  [ -z "$UNSUPPORTED_PATHS" ]
+}
+
+@test "comment-only pyproject does NOT trip Layer 3 zero-row guard" {
+  run_chain_with_pyproject "$FIXTURES/pyproject-comment-only.diff"
+  [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]
+  [ -z "$UNSUPPORTED_PATHS" ]
+  [ -z "$EFFECTIVE_TOUCHED" ]
 }

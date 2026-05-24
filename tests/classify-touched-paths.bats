@@ -54,7 +54,11 @@
   [ -z "$output" ]
 }
 
-@test "pyproject.toml — unsupported" {
+# Path-only classifier marks pyproject.toml unsupported. The
+# dependency-cooldown/safety workflows may clear it via
+# scripts/pyproject-bump-extract.sh after diff inspection (issue #66);
+# this test exercises the classifier in isolation.
+@test "pyproject.toml — unsupported (path-only)" {
   run bash -c 'printf "pyproject.toml\n" | bash scripts/classify-touched-paths.sh'
   [ "$status" -eq 0 ]
   [ "$output" = "pyproject.toml" ]

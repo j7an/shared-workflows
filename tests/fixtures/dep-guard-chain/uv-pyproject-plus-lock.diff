@@ -1,0 +1,21 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1111111..2222222 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,7 @@
+ [project]
+ dependencies = [
+-    "ruff>=0.15.12",
++    "ruff>=0.15.13",
+ ]
+diff --git a/uv.lock b/uv.lock
+index 3333333..4444444 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -100,7 +100,7 @@ wheels = [
+
+ [[package]]
+ name = "ruff"
+-version = "0.15.12"
++version = "0.15.13"
+ source = { registry = "https://pypi.org/simple" }
