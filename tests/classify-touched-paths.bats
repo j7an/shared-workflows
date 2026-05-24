@@ -55,7 +55,7 @@
 }
 
 # Path-only classifier marks pyproject.toml unsupported. The
-# the dependency-safety workflow may clear it via
+# dependency-safety workflow may clear it via
 # scripts/pyproject-bump-extract.sh after diff inspection (issue #66);
 # this test exercises the classifier in isolation.
 @test "pyproject.toml — unsupported (path-only)" {

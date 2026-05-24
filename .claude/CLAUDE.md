@@ -4,7 +4,7 @@ This file provides repository guidance for AI coding agents working in this repo
 
 ## What this repo is
 
-`j7an/shared-workflows` publishes **reusable GitHub Actions workflows** that other repos consume via `uses: j7an/shared-workflows/.github/workflows/<file>@v2`. There is no application code — the deliverables are the workflow YAMLs in `.github/workflows/` and the bash logic in `scripts/`.
+`j7an/shared-workflows` publishes **reusable GitHub Actions workflows** that other repos consume via `uses: j7an/shared-workflows/.github/workflows/<file>@v3`. There is no application code — the deliverables are the workflow YAMLs in `.github/workflows/` and the bash logic in `scripts/`.
 
 ## Commands
 
