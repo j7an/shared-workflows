@@ -52,15 +52,13 @@ jobs:
             gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
               -f state="success" \
               -f context="dependency-safety / gate" \
-              -f description="Non-bot PR — no cool-down required" \
-              -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              -f description="Non-bot PR — no cool-down required"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
               -f state="pending" \
               -f context="dependency-safety / gate" \
-              -f description="Scanning dependencies for known exploits..." \
-              -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              -f description="Scanning dependencies for known exploits..."
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -1896,5 +1894,4 @@ jobs:
           gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
             -f state="$GATE_STATE" \
             -f context="dependency-safety / gate" \
-            -f description="$STATUS_DESC" \
-            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            -f description="$STATUS_DESC"
