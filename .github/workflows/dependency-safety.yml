@@ -1,3 +1,8 @@
+# Reusable workflow. Consumed by external repos via
+# `uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v3`
+# and by this repo's own ci-safety.yml (dogfood; registered as "CI Safety"
+# to keep this workflow's display name unambiguous).
+
 name: Dependency Safety
 
 on:
