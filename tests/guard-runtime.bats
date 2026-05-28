@@ -22,7 +22,7 @@ extract_guard_block() {
 }
 
 @test "safety: issue #62 case (DEPS_TSV non-empty + UNSUPPORTED non-empty) — guard fires" {
-  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  block=$(extract_guard_block .github/workflows/dep-safety.yml)
   DEPS_TSV=$'mypy\t1.20.1\tpypi'
   TOUCHED_PATHS=$'package-lock.json\nuv.lock'
   EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
@@ -33,7 +33,7 @@ extract_guard_block() {
 }
 
 @test "safety: issue #52 case (DEPS_TSV empty + TOUCHED non-empty + UNSUPPORTED empty) — guard fires" {
-  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  block=$(extract_guard_block .github/workflows/dep-safety.yml)
   DEPS_TSV=""
   TOUCHED_PATHS="uv.lock"
   EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
@@ -44,7 +44,7 @@ extract_guard_block() {
 }
 
 @test "safety: clean supported case (DEPS_TSV non-empty + UNSUPPORTED empty) — guard does NOT fire" {
-  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  block=$(extract_guard_block .github/workflows/dep-safety.yml)
   DEPS_TSV=$'requests\t2.32.0\tpypi'
   TOUCHED_PATHS="requirements.txt"
   EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
@@ -54,7 +54,7 @@ extract_guard_block() {
 }
 
 @test "safety: no touched paths (empty diff) — guard does NOT fire" {
-  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  block=$(extract_guard_block .github/workflows/dep-safety.yml)
   DEPS_TSV=""
   TOUCHED_PATHS=""
   EFFECTIVE_TOUCHED=""
