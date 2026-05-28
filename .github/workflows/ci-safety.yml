@@ -1,4 +1,4 @@
-name: Dependency Safety
+name: CI Safety
 
 on:
   pull_request:
