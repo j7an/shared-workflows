@@ -7,11 +7,11 @@
 # unit-testable; this guard prevents accidental ordering regressions.
 
 WORKFLOWS=(
-  ".github/workflows/dependency-safety.yml"
+  ".github/workflows/dep-safety.yml"
 )
 
-@test "dependency-safety.yml: TOUCHED_PATHS/UNSUPPORTED_PATHS hoisted above Layer 2" {
-  yaml=".github/workflows/dependency-safety.yml"
+@test "dep-safety.yml: TOUCHED_PATHS/UNSUPPORTED_PATHS hoisted above Layer 2" {
+  yaml=".github/workflows/dep-safety.yml"
   hoist_line=$(grep -n "UNSUPPORTED_PATHS=\$(printf" "$yaml" | head -1 | cut -d: -f1)
   layer2_line=$(grep -n "Layer 2: PR-body fallback" "$yaml" | head -1 | cut -d: -f1)
   [ -n "$hoist_line" ]
@@ -19,8 +19,8 @@ WORKFLOWS=(
   [ "$hoist_line" -lt "$layer2_line" ]
 }
 
-@test "dependency-safety.yml: Layer 3 guard checks UNSUPPORTED_PATHS before zero-rows elif" {
-  yaml=".github/workflows/dependency-safety.yml"
+@test "dep-safety.yml: Layer 3 guard checks UNSUPPORTED_PATHS before zero-rows elif" {
+  yaml=".github/workflows/dep-safety.yml"
   unsupported_line=$(grep -n 'if \[ -n "\$UNSUPPORTED_PATHS" \]; then' "$yaml" | head -1 | cut -d: -f1)
   elif_line=$(grep -n 'elif \[ -z "\$(echo "\$DEPS_TSV" | sed' "$yaml" | head -1 | cut -d: -f1)
   [ -n "$unsupported_line" ]

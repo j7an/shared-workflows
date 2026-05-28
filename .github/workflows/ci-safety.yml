@@ -17,6 +17,6 @@ concurrency:
 
 jobs:
   safety:
-    uses: ./.github/workflows/dependency-safety.yml
+    uses: ./.github/workflows/dep-safety.yml
     with:
       auto_merge: true
