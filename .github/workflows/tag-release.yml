@@ -91,6 +91,9 @@ jobs:
         with:
           client-id: ${{ vars.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # Least privilege: read for checkout, write for Git Data API
+          # content/ref/tag operations (blobs, trees, commits, refs, tags).
+          permission-contents: write
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
