@@ -29,3 +29,7 @@ jobs:
         with:
           min-severity: medium
           min-confidence: medium
+          # Online audits do cross-repo GitHub tag lookups; in CI the default
+          # repository-scoped GITHUB_TOKEN returns 401 for public actions
+          # (e.g. astral-sh/setup-uv). Keep this required gate deterministic.
+          online-audits: false
