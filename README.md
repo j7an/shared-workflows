@@ -16,7 +16,7 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 
 - **Dependabot** configured for your repo (GitHub Actions and/or pip/uv ecosystems)
 - **Native cool-down** configured in `.github/dependabot.yml` (see Quick Start)
-- **No Renovate** — this workflow only scans `dependabot[bot]` PRs; other actors are passed through with a success status
+- **No Renovate** — this workflow only scans `dependabot[bot]` PRs; other actors are passed through with a success status (except external fork PRs, whose read-only token can't post the status — see [Fork PRs and the required gate](#fork-prs-and-the-required-gate))
 
 > **Scope: version-update PRs.** Dependabot's native `cooldown:` setting applies
 > only to *version updates*, not [security updates][gh-cooldown-scope]. The
@@ -90,6 +90,15 @@ jobs:
 > the last cooldown-bearing release (frozen, no further updates). Releases
 > in this repo are dispatched manually — see [Versioning](#versioning).
 
+> **External fork PRs:** by default GitHub gives `GITHUB_TOKEN` a **read-only**
+> token on PRs from forks even when you declare `statuses: write` — unless a
+> repo admin has enabled **Send write tokens to workflows from pull requests**
+> ([docs](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#changing-the-permissions-in-a-forked-repository)).
+> With a read-only token the reusable workflow cannot post the
+> `dependency-safety / gate` status from the fork run — it logs a notice and the
+> job stays green rather than failing. If you make that status **required**, see
+> [Fork PRs and the required gate](#fork-prs-and-the-required-gate).
+
 ## Inputs
 
 | Input | Type | Default | Description |
@@ -118,7 +127,7 @@ Dependabot opens the PR (target version is now ≥ cooldown days old)
     │
     ▼
 dependency-safety.yml fires on pull_request
-    ├── Non-dependabot PR? → status "success" (no-op)
+    ├── Non-dependabot PR? → status "success" (no-op; external forks can't post — see "Fork PRs and the required gate")
     ├── Status → "pending" ("Scanning dependencies for safety...")
     ├── Parses diff to extract package names + target versions
     │     ├── Falls back to PR body text when inline versions are absent
@@ -166,6 +175,81 @@ Labels:
 | `dependency-safety-error` | grey (`6E7781`) | Scan extraction failed or API errors occurred | Clean scan completes without errors |
 
 Reconciliation is authoritative when the scan succeeds. On the `error` path, labels are preserved (not removed) since the verdict is unreliable.
+
+## Fork PRs and the required gate
+
+`dependency-safety.yml` is a **Dependabot-automation** gate. It scans
+`dependabot[bot]` PRs and passes every other actor through with a neutral
+`success`. Human PRs from a branch **in your repo** also get that `success`
+write, because their token can write commit statuses.
+
+**External fork PRs are different.** For a `pull_request` triggered from a fork,
+GitHub gives `GITHUB_TOKEN` a read-only token on your repo by default —
+`statuses` included — *even when the caller workflow declares* `statuses: write`
+([GitHub docs][fork-perms]). The one exception is a repo admin enabling
+**Send write tokens to workflows from pull requests** in the repository's
+Actions settings; with that off (the default), the fork run cannot create the
+`dependency-safety / gate` commit status.
+
+**What the workflow does:** on a fork PR it attempts the status write, detects
+the read-only denial (`HTTP 403 Resource not accessible by integration`), logs a
+`notice` and a job-summary line, and **finishes green**. It does *not* present
+this as a dependency-safety scan failure. Genuine errors — and the real
+Dependabot scan/status path — still fail loudly.
+
+**The unavoidable gap:** a green job still cannot *post* the status from a fork
+run. If you require `dependency-safety / gate` as a status check, fork PRs will
+sit with that check **unsatisfied** until a *trusted* path posts it. The
+reusable workflow cannot close this gap from the fork run — add a companion in
+your repo.
+
+**Recommended safe companion** — a status-only `pull_request_target` job that
+posts the gate for fork PRs and **never checks out or runs PR-authored code**:
+
+```yaml
+# .github/workflows/fork-pr-gate.yml  (your repo — adapt as needed)
+name: Fork PR dependency-safety gate
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  statuses: write          # nothing else
+jobs:
+  gate:
+    # cross-repo (fork) PRs only — same-repo PRs are handled by the reusable workflow
+    if: github.event.pull_request.head.repo.id != github.event.pull_request.base.repo.id
+    runs-on: ubuntu-latest
+    steps:
+      # NO checkout. This job never fetches or runs PR-authored code.
+      - name: Post neutral gate status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO:  ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+            -f state="success" \
+            -f context="dependency-safety / gate" \
+            -f description="Fork PR: dependency-safety scan not run; human review required" \
+            -f target_url="${RUN_URL}"
+```
+
+**Why this is safe:** `pull_request_target` runs in your repo's context with a
+write token — exactly what's needed to post the status — and it is safe here
+*only because* the job has no `checkout`, runs no PR code, requests
+`statuses: write` and nothing else, and reads every PR-derived value through
+`env:` (never interpolated with `${{ … }}` inside `run:`). This is the
+constrained, status-only use of `pull_request_target` — **not** the broad
+"build/test the PR with elevated permissions" pattern, which would expose your
+secrets to fork-authored code. If a blanket `success` is too permissive for
+your repo, post `pending` instead and require a maintainer to flip the status
+after review. If you run [Zizmor](#security-analysis-zizmor) on your repo, it
+will flag this file for its `pull_request_target` trigger — that finding is
+expected here; the constraints above (no `checkout`, `statuses: write` only,
+`env:` indirection) are exactly the safe envelope to verify.
+
+[fork-perms]: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#changing-the-permissions-in-a-forked-repository
 
 ## v2 → v3 migration
 

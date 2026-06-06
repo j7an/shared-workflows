@@ -44,11 +44,28 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           if [[ "$PR_AUTHOR" != "dependabot[bot]" ]]; then
-            gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+            # Non-bot PR: post a neutral success and skip the scan. The status
+            # write can fail on external fork PRs, where GitHub downgrades the
+            # token to read-only even when the caller declares statuses: write.
+            # Treat ONLY that known denial as expected (notice, stay green); any
+            # other failure still aborts. Do NOT extend this handling to the
+            # bot/pending or final status writes — those stay fail-loud. See
+            # README › Fork PRs and the required gate.
+            if err=$(gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
               -f state="success" \
               -f context="dependency-safety / gate" \
               -f description="Non-bot PR — no cool-down required" \
-              -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" 2>&1); then
+              :  # posted (same-repo non-bot PR) — behaviorally unchanged
+            elif printf '%s' "$err" | grep -q "Resource not accessible by integration" \
+              && printf '%s' "$err" | grep -Eq 'HTTP 403|"status":"403"'; then
+              MSG="dependency-safety: cannot post the 'dependency-safety / gate' commit status — read-only token or missing statuses:write permission. On external fork PRs this is expected; see README › Fork PRs and the required gate."
+              echo "::notice::${MSG}"
+              echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' "$err" >&2
+              exit 1
+            fi
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
