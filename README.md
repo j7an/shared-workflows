@@ -370,6 +370,33 @@ Before opening a PR that adds or modifies a `workflow_call` file:
 2. **The lint rule enforces this in CI** — `scripts/lint-workflow-call.sh` runs as the `lint-workflow-call` job in `ci-scripts.yml` and will fail your PR if it detects a forbidden pattern
 3. **Cross-repo smoke testing is planned** ([#30](https://github.com/j7an/shared-workflows/issues/30)) — a companion repo will exercise reusable workflows from a genuinely external caller context to catch bugs that the self-consumption harness cannot detect
 
+## Validating workflow changes
+
+Run these locally before opening a PR that touches `.github/workflows/` or `scripts/`:
+
+```bash
+./scripts/lint-workflows.sh          # workflow/YAML structure (actionlint, non-hanging mode)
+bats tests/                          # script / runtime behavior
+./scripts/check-inline-sync.sh       # inline copies match scripts/*.sh
+./scripts/lint-workflow-call.sh      # no caller-context refs in workflow_call files
+```
+
+Optional, advisory shell analysis:
+
+```bash
+shellcheck scripts/*.sh              # completes, but has known info-level findings; not a gate
+```
+
+**Why `lint-workflows.sh` instead of plain `actionlint`?** Default `actionlint`
+(with its ShellCheck integration enabled) **hangs** on
+`.github/workflows/dependency-safety.yml`: that file carries a large inlined
+`Scan and report` Bash block (required by the [inline-sync architecture](#known-caller-side-constraints)),
+which interacts badly with actionlint's ShellCheck orchestration. The hang is a
+tool limitation, **not** a workflow syntax error, and it is pre-existing on
+`main`. The wrapper disables that integration (`actionlint -shellcheck=
+-pyflakes=`) so structural linting completes deterministically. ShellCheck still
+runs as a **separate, optional** signal against the source scripts.
+
 ## Release Bot App setup
 
 `tag-release.yml` needs a non-`GITHUB_TOKEN` identity to push new tags, otherwise GitHub's recursion guard silently suppresses the downstream `release.yml` run. We use a GitHub App for this.
