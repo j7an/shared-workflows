@@ -14,9 +14,10 @@ bats tests/extract-deps.bats                 # run one test file
 bats tests/extract-deps.bats --filter "name" # run tests whose name matches a substring
 ./scripts/check-inline-sync.sh               # verify embedded inline bash == scripts/*.sh
 ./scripts/lint-workflow-call.sh              # verify workflow_call files use no caller-context refs
+./scripts/lint-workflows.sh                  # actionlint structural lint (non-hanging mode)
 ```
 
-All three checks above run in `ci-scripts.yml` on every PR touching `scripts/`, `tests/`, or `.github/workflows/`. Tests are [bats](https://github.com/bats-core/bats-core); fixtures live under `tests/fixtures/<script-name>/`.
+The bats, inline-sync, and workflow-call checks run in `ci-scripts.yml` on every PR touching `scripts/`, `tests/`, or `.github/workflows/`. `lint-workflows.sh` is **local-only**: plain `actionlint` hangs on `dependency-safety.yml` (its large inlined `Scan and report` block × actionlint's ShellCheck orchestration), so the wrapper runs `actionlint -shellcheck= -pyflakes=`. Its bats contract test runs in CI, but actionlint itself is not installed there. ShellCheck is a **separate, optional** signal (`shellcheck scripts/*.sh`) with known info-level findings — not part of this gate. Tests are [bats](https://github.com/bats-core/bats-core); fixtures live under `tests/fixtures/<script-name>/`.
 
 ## The inline-sync invariant (most important architectural constraint)
 
