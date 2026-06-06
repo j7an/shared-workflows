@@ -35,3 +35,12 @@ WORKFLOWS=(
     [ "$count" -ge 2 ] || { echo "FAIL: $yaml has only $count classify_touched_paths references"; return 1; }
   done
 }
+
+@test "dependency-safety.yml: non-bot status write is permission-aware (dual matcher)" {
+  yaml=".github/workflows/dependency-safety.yml"
+  # The non-bot success POST is captured (not unconditional).
+  grep -q 'if err=$(gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}"' "$yaml"
+  # The known read-only denial is matched on BOTH the permission message and a 403 marker.
+  grep -q "Resource not accessible by integration" "$yaml"
+  grep -Eq "HTTP 403|\"status\":\"403\"" "$yaml"
+}
