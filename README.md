@@ -4,12 +4,12 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 
 ## Features
 
-- **Native-cooldown verification** — Dependabot's native `cooldown.default-days` owns the wait; `dependency-safety.yml` verifies the invariant on every scan and fails deterministically on violation
+- **Opt-in release-age verification** — Dependabot's native `cooldown.default-days` owns the wait before PR creation; `release_age_policy` (default `"off"`) can additionally label (`advisory`) or fail the gate (`blocking`) on target versions younger than `minimum_release_age_days`
 - **Version-aware advisory filtering** — advisories already patched at or below the PR's target version are collapsed into a non-blocking "historical" section
 - **GHSA + OSV dual-source scan** — every package is queried against both GitHub Advisory and OSV.dev; mismatches surface both
 - **OpenSSF Scorecard integration** — Scorecard results for each GitHub Action appear in the scan comment
 - **Update-or-create scan comments** — a single stable comment per PR; change detection posts a top-level PR comment only when advisory IDs actually change
-- **Optional auto-merge** — clean scans flip on `gh pr merge --auto`; dirty scans apply labels (`security-review-needed`, `dependency-age-violation`, or `dependency-safety-error`) instead
+- **Auto-merge by default** — clean scans enable `gh pr merge --auto` (set `auto_merge: false` to opt out); dirty scans apply labels (`security-review-needed`, `dependency-age-violation`, or `dependency-safety-error`) instead
 - **Grouped PR support** — handles both single-package and grouped Dependabot PRs
 
 ## Prerequisites
@@ -19,17 +19,12 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 - **No Renovate** — this workflow only scans `dependabot[bot]` PRs; other actors are passed through with a success status (except external fork PRs, whose read-only token can't post the status — see [Fork PRs and the required gate](#fork-prs-and-the-required-gate))
 
 > **Scope: version-update PRs.** Dependabot's native `cooldown:` setting applies
-> only to *version updates*, not [security updates][gh-cooldown-scope]. The
-> default `fail_on_age_violation: true` therefore treats young security-fix PRs
-> as invariant violations even though native cooldown never held them. For
-> repos with Dependabot security updates enabled, choose one:
->
-> - **Advisory mode (interim):** set `fail_on_age_violation: false` so age
->   violations apply the `dependency-age-violation` label instead of failing
->   the gate. The trade-off: the strict invariant is weakened for *all*
->   Dependabot PRs, not just security ones.
-> - **Wait for follow-up detection** that treats security-update PRs as a
->   distinct class (tracked separately; not in this release).
+> only to *version updates*, not [security updates][gh-cooldown-scope]. With the
+> default `release_age_policy: "off"` this distinction has no effect — the
+> workflow performs no post-PR age checks. If you opt into `advisory` or
+> `blocking`, young security-fix PRs will be flagged (or blocked) even though
+> native cooldown never held them — prefer `advisory` if that trade-off is not
+> acceptable for your repo.
 >
 > [gh-cooldown-scope]: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown--
 
@@ -37,7 +32,7 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 
 ### 1. Configure Dependabot cool-down
 
-The waiting period is owned by Dependabot itself — the workflow only verifies that the invariant holds. Add `cooldown:` to `.github/dependabot.yml`:
+The waiting period is owned by Dependabot itself — by default the workflow does not re-verify it (opt in with `release_age_policy`). Add `cooldown:` to `.github/dependabot.yml`:
 
 ```yaml
 # .github/dependabot.yml
@@ -78,17 +73,16 @@ concurrency:
 
 jobs:
   safety:
-    uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v3
+    uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v4
     secrets: inherit
-    with:
-      auto_merge: true
 ```
 
-`contents: write` is only required when `auto_merge: true`; otherwise `contents: read` is sufficient.
+`auto_merge` defaults to `true` and requires `contents: write`. If you grant only `contents: read`, set `auto_merge: false`.
 
-> **Note:** `@v3` is the current floating major. `@v2` continues to work at
-> the last cooldown-bearing release (frozen, no further updates). Releases
-> in this repo are dispatched manually — see [Versioning](#versioning).
+> **Note:** `@v4` is the current floating major. `@v3` (release-age enforcement
+> on by default, auto-merge opt-in) and `@v2` (last cooldown-bearing line)
+> continue to work but receive no further updates. Releases in this repo are
+> dispatched manually — see [Versioning](#versioning).
 
 > **External fork PRs:** by default GitHub gives `GITHUB_TOKEN` a **read-only**
 > token on PRs from forks even when you declare `statuses: write` — unless a
@@ -104,9 +98,9 @@ jobs:
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enable_scorecard` | boolean | `true` | Include OpenSSF Scorecard results for GitHub Actions in the scan comment |
-| `auto_merge` | boolean | `false` | On clean scans, enable `gh pr merge --auto`; on dirty scans, apply the appropriate label |
-| `minimum_release_age_days` | number | `5` | Floor for target-version release age. Verified at scan time; should match `cooldown.default-days` in `dependabot.yml` |
-| `fail_on_age_violation` | boolean | `true` | If `true`, age violations set the gate status to `failure`. If `false`, the gate is `success` with a `dependency-age-violation` label and a comment; auto-merge is suppressed in either case |
+| `auto_merge` | boolean | `true` | On clean scans, enable `gh pr merge --auto` (requires `contents: write`); on dirty scans, apply the appropriate label. Set `false` for manual merges |
+| `release_age_policy` | string | `"off"` | Post-PR release-age verification: `off` (no age lookup), `advisory` (label + comment on young targets, gate stays green, auto-merge suppressed), `blocking` (gate fails). Quote `"off"` in YAML |
+| `minimum_release_age_days` | number | `5` | Threshold used when `release_age_policy` is `advisory` or `blocking`; ignored when `off`. Should match `cooldown.default-days` in `dependabot.yml` |
 
 ## Supported Ecosystems
 
@@ -132,7 +126,7 @@ dependency-safety.yml fires on pull_request
     ├── Parses diff to extract package names + target versions
     │     ├── Falls back to PR body text when inline versions are absent
     │     └── Supports github-actions, pip, and uv ecosystems
-    ├── Verifies release age — fails if any target < minimum_release_age_days
+    ├── Verifies release age (only when release_age_policy is advisory or blocking; blocking fails the gate, advisory labels + suppresses auto-merge)
     ├── For each package:
     │     ├── GHSA GraphQL query (by ecosystem)
     │     ├── OSV.dev POST query (with version if known)
@@ -144,7 +138,7 @@ dependency-safety.yml fires on pull_request
     ├── Reconciles labels (security-review-needed, dependency-age-violation, dependency-safety-error)
     ├── Update-or-create single scan comment
     ├── If advisory IDs changed since last scan → post change-notification top-level PR comment
-    ├── If clean and auto_merge=true → gh pr merge --auto
+    ├── If clean and auto_merge=true (default) → gh pr merge --auto
     └── Sets final gate status (success / failure / error)
 ```
 
@@ -162,8 +156,8 @@ The `dependency-safety / gate` commit status uses three states:
 
 | State | When |
 |-------|------|
-| `success` | Clean scan, OR advisories present (label `security-review-needed`), OR age violation in advisory mode (label `dependency-age-violation`, `fail_on_age_violation: false`) |
-| `failure` | Strict age violation (`fail_on_age_violation: true`) — the Dependabot native cooldown invariant was violated |
+| `success` | Clean scan, OR advisories present (label `security-review-needed`), OR age violation under `release_age_policy: advisory` (label `dependency-age-violation`) |
+| `failure` | Age violation under `release_age_policy: blocking` |
 | `error` | Dependency extraction failed, or GHSA/OSV/age-lookup APIs errored — the verdict is unreliable; manual review required |
 
 Labels:
@@ -171,7 +165,7 @@ Labels:
 | Label | Color | Applied when | Removed when |
 |-------|-------|--------------|--------------|
 | `security-review-needed` | red (`B60205`) | Advisory scan finds vulnerabilities affecting target versions | Re-scan finds zero applicable advisories AND no `error` state |
-| `dependency-age-violation` | amber (`FBCA04`) | Any target version is younger than `minimum_release_age_days` | All versions pass age check AND no `error` state |
+| `dependency-age-violation` | amber (`FBCA04`) | Any target version is younger than `minimum_release_age_days` (only under `release_age_policy: advisory` or `blocking`) | All versions pass age check AND no `error` state |
 | `dependency-safety-error` | grey (`6E7781`) | Scan extraction failed or API errors occurred | Clean scan completes without errors |
 
 Reconciliation is authoritative when the scan succeeds. On the `error` path, labels are preserved (not removed) since the verdict is unreliable.
@@ -286,6 +280,37 @@ expected here; the constraints above (no `checkout`, `statuses: write` only,
 8. **Optional:** add `rebase-strategy: disabled` to your `dependabot.yml`
    ecosystem block — avoids `@dependabot rebase` pulling in newer versions
    that have not yet aged through native cooldown.
+
+## v3 → v4 migration
+
+`v4.0.0` makes post-PR release-age verification opt-in and enables auto-merge
+by default. Dependabot native `cooldown.default-days` remains the recommended
+mechanism for delaying version-update PRs; the workflow no longer re-verifies
+release age unless asked to.
+
+1. **Map `fail_on_age_violation` to `release_age_policy`.** The old input is
+   removed — passing it to `@v4` fails at startup with "Invalid input":
+
+   | v3 | v4 |
+   |----|----|
+   | `fail_on_age_violation: true` (or unset) | `release_age_policy: blocking` |
+   | `fail_on_age_violation: false` | `release_age_policy: advisory` |
+   | — (new default: no post-PR age checks) | omit the input (defaults to `"off"`) |
+
+2. **Auto-merge now defaults to on.** Set `auto_merge: false` to keep manual
+   merges. With auto-merge on, the calling job must grant `contents: write`.
+
+3. **Keep (or add) native cooldown** in `.github/dependabot.yml` — under the
+   default `release_age_policy: "off"` the workflow no longer verifies the
+   age invariant, so `cooldown.default-days` is the only waiting period.
+
+4. **Quote the policy value if you restate it.** `release_age_policy: "off"`
+   — unquoted `off` is a YAML boolean literal and may not survive parsing as
+   a string. `minimum_release_age_days` only takes effect with `advisory` or
+   `blocking`.
+
+5. **Stale labels self-heal.** A leftover `dependency-age-violation` label
+   from v3 is removed on the first error-free v4 scan of that PR.
 
 ## Security Analysis (Zizmor)
 
@@ -444,12 +469,12 @@ permissions:
 
 jobs:
   tag:
-    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v3
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v4
     secrets:
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
   publish:
     needs: tag
-    uses: j7an/shared-workflows/.github/workflows/release.yml@v3
+    uses: j7an/shared-workflows/.github/workflows/release.yml@v4
     with:
       tag: ${{ needs.tag.outputs.tag }}
 ```
@@ -476,14 +501,14 @@ permissions:
 
 jobs:
   tag:
-    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v3
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v4
     with:
       bump: ${{ inputs.bump }}
     secrets:
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
   publish:
     needs: tag
-    uses: j7an/shared-workflows/.github/workflows/release.yml@v3
+    uses: j7an/shared-workflows/.github/workflows/release.yml@v4
     with:
       tag: ${{ needs.tag.outputs.tag }}
 ```
@@ -501,16 +526,16 @@ If your repo has version strings in committed JSON files (e.g. `server.json`, `p
 
 The `environment: release` + `if: github.ref == 'refs/heads/main'` gate inside `tag-release.yml` runs in **your repo's** security context — `shared-workflows` cannot unilaterally enforce it across consumers. If you skip step 1, you lose the environment-side branch policy and secret protection; the in-file `if:` check still blocks non-`main` refs, but the extra GitHub-side gate is gone.
 
-### On the `@v3` pin
+### On the `@v4` pin
 
-`@v3` is the floating major tag for the current `v3.x.y` line. It always
-points at the latest `v3.x.y` release because `release.yml` force-updates
-floating majors on every publish. Pinning to `@v3` means you get all
-non-breaking updates within v3 automatically. Pin to `@v3.0` for patch-only
-updates, or `@v3.0.0` for an immutable freeze — see the [Versioning](#versioning)
+`@v4` is the floating major tag for the current `v4.x.y` line. It always
+points at the latest `v4.x.y` release because `release.yml` force-updates
+floating majors on every publish. Pinning to `@v4` means you get all
+non-breaking updates within v4 automatically. Pin to `@v4.0` for patch-only
+updates, or `@v4.0.0` for an immutable freeze — see the [Versioning](#versioning)
 section above.
 
-`@v2` is the frozen historical line, pinned at the last cooldown-bearing
-release. It continues to work for `tag-release.yml`, `publish-pypi.yml`, and
-`dependency-safety.yml`, but receives no further updates. Consumers on `@v2`
-should plan migration to `@v3` (see [v2 → v3 migration](#v2--v3-migration)).
+`@v3` is the previous line, frozen at the last release where post-PR
+release-age verification was on by default and auto-merge was opt-in. `@v2`
+is the frozen historical cooldown-bearing line. Both continue to work but
+receive no further updates — see [v3 → v4 migration](#v3--v4-migration).
