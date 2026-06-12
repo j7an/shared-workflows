@@ -9,16 +9,16 @@ on:
         description: "Include OpenSSF Scorecard in scan results"
       auto_merge:
         type: boolean
-        default: false
-        description: "Auto-merge clean PRs after scan completes"
+        default: true
+        description: "Auto-merge clean PRs after scan completes. Default on; set false for manual merges (required if the caller grants only contents: read)."
+      release_age_policy:
+        type: string
+        default: "off"
+        description: "Release-age verification policy: off (default - no age lookup), advisory (label + comment on young targets, gate stays green, auto-merge suppressed), blocking (gate fails on young targets). Quote off in caller YAML."
       minimum_release_age_days:
         type: number
         default: 5
-        description: "Floor for target-version release age. Verified at scan time; should match cooldown.default-days in your dependabot.yml."
-      fail_on_age_violation:
-        type: boolean
-        default: true
-        description: "If true, age violation sets gate to failure. If false, gate is success with a dependency-age-violation label only. Auto-merge is suppressed in either case."
+        description: "Threshold used when release_age_policy is advisory or blocking; ignored when off. Should match cooldown.default-days in your dependabot.yml."
 
 jobs:
   scan:
@@ -90,7 +90,7 @@ jobs:
           # MINIMUM_RELEASE_AGE_DAYS feeds safety-verdict.sh and human-readable strings.
           COOLDOWN_DAYS: ${{ inputs.minimum_release_age_days }}
           MINIMUM_RELEASE_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
-          FAIL_ON_AGE_VIOLATION: ${{ inputs.fail_on_age_violation }}
+          RELEASE_AGE_POLICY: ${{ inputs.release_age_policy }}
         run: |
           # --- BEGIN inline:scripts/extract-deps.sh ---
           extract_deps() (
@@ -1062,9 +1062,13 @@ jobs:
           #   AGE_VIOLATION_COUNT     int >=0
           #   SCAN_ERROR_COUNT        int >=0  (GHSA/OSV only — scorecard failures excluded)
           #   ADVISORY_COUNT          int >=0  (post version-aware filtering)
-          #   FAIL_ON_AGE_VIOLATION   true|false
-          #   MINIMUM_RELEASE_AGE_DAYS int >=0
+          #   RELEASE_AGE_POLICY      off|advisory|blocking
+          #   MINIMUM_RELEASE_AGE_DAYS int >=0 (status text only; ignored when policy=off)
           #   AUTO_MERGE              true|false
+          #
+          # Contract invariant: RELEASE_AGE_POLICY=off requires AGE_ERROR_COUNT=0 and
+          # AGE_VIOLATION_COUNT=0 — no age data may exist when no lookup ran. A
+          # violation indicates an orchestrator bug and fails closed (exit 2).
           #
           # Output (stdout, single TSV line, six fields, no trailing newline beyond one):
           #   gate_state\tauto_merge_ok\thas_safety_error\thas_age_violation\thas_security_review\tstatus_desc
@@ -1101,14 +1105,35 @@ jobs:
             esac
           }
 
+          require_policy() {
+            local val
+            val=${RELEASE_AGE_POLICY-__unset__}
+            case "$val" in
+              __unset__) die "missing required env: RELEASE_AGE_POLICY" ;;
+              off|advisory|blocking) ;;
+              false) die "RELEASE_AGE_POLICY must be off|advisory|blocking, got: false (unquoted YAML off parses as boolean false — quote it: \"off\")" ;;
+              *) die "RELEASE_AGE_POLICY must be off|advisory|blocking, got: $val" ;;
+            esac
+          }
+
           require_bool GUARD_TRIGGERED
-          require_bool FAIL_ON_AGE_VIOLATION
+          require_policy
           require_bool AUTO_MERGE
           require_nonneg_int AGE_ERROR_COUNT
           require_nonneg_int AGE_VIOLATION_COUNT
           require_nonneg_int SCAN_ERROR_COUNT
           require_nonneg_int ADVISORY_COUNT
           require_nonneg_int MINIMUM_RELEASE_AGE_DAYS
+
+          # Contract invariant (see header): no age data may exist when policy is off.
+          if [ "$RELEASE_AGE_POLICY" = "off" ]; then
+            if [ "$AGE_VIOLATION_COUNT" -gt 0 ]; then
+              die "RELEASE_AGE_POLICY=off but AGE_VIOLATION_COUNT=$AGE_VIOLATION_COUNT (orchestrator bug)"
+            fi
+            if [ "$AGE_ERROR_COUNT" -gt 0 ]; then
+              die "RELEASE_AGE_POLICY=off but AGE_ERROR_COUNT=$AGE_ERROR_COUNT (orchestrator bug)"
+            fi
+          fi
 
           error_total=$(( AGE_ERROR_COUNT + SCAN_ERROR_COUNT ))
 
@@ -1117,7 +1142,7 @@ jobs:
             gate_state="error"
           elif [ "$error_total" -gt 0 ]; then
             gate_state="error"
-          elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$FAIL_ON_AGE_VIOLATION" = "true" ]; then
+          elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
             gate_state="failure"
           else
             gate_state="success"
@@ -1158,16 +1183,24 @@ jobs:
             status_desc="Could not extract dependencies from diff. Manual review required."
           elif [ "$error_total" -gt 0 ]; then
             status_desc="Scan errors: ${AGE_ERROR_COUNT} age lookup(s), ${SCAN_ERROR_COUNT} advisory query/ies. Re-run or push to retry."
-          elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$FAIL_ON_AGE_VIOLATION" = "true" ]; then
-            status_desc="${AGE_VIOLATION_COUNT} package(s) younger than ${MINIMUM_RELEASE_AGE_DAYS}d cooldown — Dependabot native cooldown invariant violated."
+          elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
+            status_desc="${AGE_VIOLATION_COUNT} package(s) younger than ${MINIMUM_RELEASE_AGE_DAYS}d minimum release age (blocking policy)."
           elif [ "$ADVISORY_COUNT" -gt 0 ]; then
             status_desc="${ADVISORY_COUNT} advisory/ies found (version-filtered). Manual review required."
           elif [ "$AGE_VIOLATION_COUNT" -gt 0 ]; then
-            status_desc="${AGE_VIOLATION_COUNT} package(s) below ${MINIMUM_RELEASE_AGE_DAYS}d cooldown (advisory mode). Auto-merge suppressed."
+            status_desc="${AGE_VIOLATION_COUNT} package(s) below ${MINIMUM_RELEASE_AGE_DAYS}d minimum release age (advisory policy). Auto-merge suppressed."
           elif [ "$auto_merge_ok" = "true" ]; then
-            status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Auto-merge enabled."
+            if [ "$RELEASE_AGE_POLICY" = "off" ]; then
+              status_desc="Clean scan (no advisories). Auto-merge enabled."
+            else
+              status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Auto-merge enabled."
+            fi
           else
-            status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Ready for merge."
+            if [ "$RELEASE_AGE_POLICY" = "off" ]; then
+              status_desc="Clean scan (no advisories). Ready for merge."
+            else
+              status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Ready for merge."
+            fi
           fi
 
           printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -1314,17 +1347,25 @@ jobs:
             fi
           fi
 
-          # --- Check release age via standalone script (Task 9 — phase 2) ---
+          # --- Check release age via standalone script (opt-in per release_age_policy) ---
+          # Positive allowlist: only the two known-enabled policies run lookups.
+          # Invalid values (e.g. "false" from unquoted YAML off, or typos) fall
+          # through with AGE_TSV empty — no network calls, no Release Age
+          # section — and the verdict layer then fails closed on the bad enum.
           COOLDOWN_FAILURES=0
           AGE_TSV=""
-          if [ "$COOLDOWN_DAYS" -gt 0 ]; then
-            # check_release_age must be invoked via command substitution so
-            # bash's parent -e is dropped — this preserves per-row error
-            # tolerance (404s, parse failures, etc. emit error verdicts
-            # instead of killing the step). Do not convert to a direct call.
-            AGE_TSV=$(echo "$DEPS_TSV" | check_release_age)
-            COOLDOWN_FAILURES=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" || $6=="error"' | wc -l | tr -d ' ')
-          fi
+          case "$RELEASE_AGE_POLICY" in
+            advisory|blocking)
+              if [ "$COOLDOWN_DAYS" -gt 0 ]; then
+                # check_release_age must be invoked via command substitution so
+                # bash's parent -e is dropped — this preserves per-row error
+                # tolerance (404s, parse failures, etc. emit error verdicts
+                # instead of killing the step). Do not convert to a direct call.
+                AGE_TSV=$(echo "$DEPS_TSV" | check_release_age)
+                COOLDOWN_FAILURES=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" || $6=="error"' | wc -l | tr -d ' ')
+              fi
+              ;;
+          esac
 
           for ACTION in $ACTIONS; do
             [ -z "$ACTION" ] && continue
@@ -1613,7 +1654,7 @@ jobs:
                            AGE_VIOLATION_COUNT="$AGE_VIOLATION_COUNT" \
                            SCAN_ERROR_COUNT="$SCAN_ERROR_COUNT" \
                            ADVISORY_COUNT="$TOTAL" \
-                           FAIL_ON_AGE_VIOLATION="$FAIL_ON_AGE_VIOLATION" \
+                           RELEASE_AGE_POLICY="$RELEASE_AGE_POLICY" \
                            MINIMUM_RELEASE_AGE_DAYS="$MINIMUM_RELEASE_AGE_DAYS" \
                            AUTO_MERGE="$AUTO_MERGE" \
                            safety_verdict); then
@@ -1646,7 +1687,7 @@ jobs:
           LABEL_COLOR_security_review_needed="B60205"
           LABEL_DESC_security_review_needed="Dependency scan found advisories — manual review required"
           LABEL_COLOR_dependency_age_violation="FBCA04"
-          LABEL_DESC_dependency_age_violation="Target version younger than the configured minimum release age (Dependabot native cooldown invariant)"
+          LABEL_DESC_dependency_age_violation="Target version younger than the configured minimum release age (release_age_policy)"
           LABEL_COLOR_dependency_safety_error="6E7781"
           LABEL_DESC_dependency_safety_error="dependency-safety scan could not complete reliably — see scan comment"
 
@@ -1734,7 +1775,7 @@ jobs:
           fi
 
           # ---- Header + footer (from verdict priority — must match safety-verdict.sh order) ----
-          # Priority: guard > error > strict-age > advisories > non-strict-age > clean.
+          # Priority: guard > error > blocking-age > advisories > advisory-age > clean.
           # Spec §6.1 — keep this order in sync with the script.
           if [ "$GUARD_TRIGGERED" = "true" ]; then
             RESULTS_HEADER="Dependency extraction failed — manual review required."
@@ -1747,8 +1788,8 @@ jobs:
           elif [ "$HAS_SAFETY_ERROR" = "true" ]; then
             RESULTS_HEADER="Scan completed with errors — see workflow logs."
             RESULTS_FOOTER="> Scan errors prevented a clean verdict. Re-run or push to retry."
-          elif [ "$HAS_AGE_VIOLATION" = "true" ] && [ "$FAIL_ON_AGE_VIOLATION" = "true" ]; then
-            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) younger than ${MINIMUM_RELEASE_AGE_DAYS}-day cooldown — Dependabot native cooldown invariant violated."
+          elif [ "$HAS_AGE_VIOLATION" = "true" ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
+            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) younger than the ${MINIMUM_RELEASE_AGE_DAYS}-day minimum release age (blocking policy)."
             RESULTS_FOOTER="> Re-run by rebasing or recreating the PR after the age-compliant date below."
             if [ "$TOTAL" -gt 0 ]; then
               # Cross-reference: advisories are present too. Don't lose that signal under the age-violation header.
@@ -1758,9 +1799,9 @@ jobs:
             RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
             RESULTS_FOOTER="> Review the advisories above before deciding to merge."
           elif [ "$HAS_AGE_VIOLATION" = "true" ]; then
-            # fail_on_age_violation=false — advisory mode, not blocking.
-            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) below ${MINIMUM_RELEASE_AGE_DAYS}-day cooldown (advisory mode — not blocking)."
-            RESULTS_FOOTER="> Age violation reported in advisory mode (not blocking). Auto-merge suppressed."
+            # release_age_policy: advisory — reported, not blocking.
+            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) below the ${MINIMUM_RELEASE_AGE_DAYS}-day minimum release age (advisory policy — not blocking)."
+            RESULTS_FOOTER="> Release-age violation reported (advisory policy — not blocking). Auto-merge suppressed."
           else
             RESULTS_HEADER="No known exploits found affecting the target versions."
             if [ "$AUTO_MERGE_OK" = "true" ]; then

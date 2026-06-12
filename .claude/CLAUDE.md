@@ -4,7 +4,7 @@ This file provides repository guidance for AI coding agents working in this repo
 
 ## What this repo is
 
-`j7an/shared-workflows` publishes **reusable GitHub Actions workflows** that other repos consume via `uses: j7an/shared-workflows/.github/workflows/<file>@v3`. There is no application code — the deliverables are the workflow YAMLs in `.github/workflows/` and the bash logic in `scripts/`.
+`j7an/shared-workflows` publishes **reusable GitHub Actions workflows** that other repos consume via `uses: j7an/shared-workflows/.github/workflows/<file>@v4`. There is no application code — the deliverables are the workflow YAMLs in `.github/workflows/` and the bash logic in `scripts/`.
 
 ## Commands
 
@@ -40,7 +40,7 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 
 **Consumer-facing reusable workflows:**
 
-- `dependency-safety.yml` — verifies the native-Dependabot-cooldown invariant on each Dependabot PR. Pipeline: extract → fallback → guard → age check → GHSA/OSV scan → scorecard → comment → labels; the verdict layer is deterministic: `failure` on age violation (when `fail_on_age_violation: true`), `error` on extraction/scan failure, `success` otherwise. Verdict translation lives in `safety-verdict.sh`. No rescan companion — verifier is single-shot per PR event.
+- `dependency-safety.yml` — scans each Dependabot PR for advisories; post-PR release-age verification is opt-in via `release_age_policy` (default `"off"`; `advisory` labels + suppresses auto-merge, `blocking` fails the gate), and `auto_merge` defaults to `true`. Pipeline: extract → fallback → guard → age check (policy-gated) → GHSA/OSV scan → scorecard → comment → labels; the verdict layer is deterministic: `failure` on age violation only under `blocking`, `error` on extraction/scan failure, `success` otherwise. Verdict translation lives in `safety-verdict.sh`. No rescan companion — verifier is single-shot per PR event.
 - `tag-release.yml` — computes the next semver tag from Conventional Commits, optionally runs `bump-version-files.sh` against `.version-bump.json`, creates the tag via the GitHub Git Data API (so commits/tags auto-sign under the App identity). Requires a GitHub App key (`RELEASE_BOT_PRIVATE_KEY` secret, `RELEASE_BOT_APP_ID` var).
 - `publish-pypi.yml` — `uv build` → TestPyPI (with install verification) → PyPI via OIDC trusted publishing → GitHub Release.
 
