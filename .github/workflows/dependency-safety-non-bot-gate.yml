@@ -7,12 +7,14 @@ permissions: {}
 
 jobs:
   gate:
+    name: Post dependency-safety gate
     # Complements a scanner caller gated to Dependabot only. Use the PR author
     # field from the pull_request payload; github.actor can change on
     # synchronize events and must not drive this partition.
     if: github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
+      # Required to create the dependency-safety / gate commit status.
       statuses: write
     steps:
       - name: Post dependency-safety gate status

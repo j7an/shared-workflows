@@ -59,7 +59,7 @@ non_comment_content() {
 }
 
 @test "gate job requests exactly statuses: write" {
-  [ "$(extract_job_permissions_block)" = "      statuses: write" ]
+  [ "$(extract_job_permissions_block | sed '/^[[:space:]]*#/d')" = "      statuses: write" ]
 }
 
 @test "status post uses canonical context, description, and caller run target_url" {
