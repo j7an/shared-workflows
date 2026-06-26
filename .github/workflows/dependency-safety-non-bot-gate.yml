@@ -1,0 +1,33 @@
+name: Dependency Safety Non-Bot Gate
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  gate:
+    # Complements a scanner caller gated to Dependabot only. Use the PR author
+    # field from the pull_request payload; github.actor can change on
+    # synchronize events and must not drive this partition.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Post dependency-safety gate status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -z "${HEAD_SHA:-}" ]; then
+            echo "::error::dependency-safety non-bot gate requires a pull_request_target caller"
+            exit 1
+          fi
+
+          gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+            -f state=success \
+            -f context="dependency-safety / gate" \
+            -f description="Non-bot PR: dependency-safety scan not required" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
