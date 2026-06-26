@@ -4,6 +4,52 @@ This directory hosts reusable workflows under `j7an/shared-workflows`. Consumers
 
 > **Note:** `@v3` and `@v2` continue to work at their last-released revisions, but receive no further updates. See the root README's "v3 → v4 migration" section.
 
+## `dependency-safety-non-bot-gate.yml`
+
+Posts the required `dependency-safety / gate` commit status for pull requests
+whose author is not `dependabot[bot]`. This is a status-only companion for
+repos whose real `dependency-safety.yml` scanner caller is gated to
+Dependabot-only.
+
+The reusable workflow is `workflow_call`-only. The consumer keeps the trusted
+`pull_request_target` trigger in a tiny local wrapper:
+
+```yaml
+name: Dependency Safety Non-Bot Gate
+
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] status-only path; never checks out or runs PR code
+    types: [opened, synchronize, reopened]
+    branches: [main]  # include every branch where dependency-safety / gate is required
+
+permissions: {}
+
+concurrency:
+  group: dep-safety-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    permissions:
+      statuses: write
+    uses: j7an/shared-workflows/.github/workflows/dependency-safety-non-bot-gate.yml@v4
+```
+
+Pair it with a scanner caller that uses the complementary condition:
+
+```yaml
+jobs:
+  safety:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v4
+    secrets: inherit
+```
+
+The wrapper must not check out code, pass `secrets: inherit`, install
+dependencies, or run PR-authored files. The wrapper grants `statuses: write`;
+the reusable workflow requests `statuses: write`; the status is posted to
+`github.event.pull_request.head.sha` with context `dependency-safety / gate`.
+
 ## `tag-release.yml`
 
 Computes the next semver tag from Conventional Commits since the last tag, optionally bumps version files, and pushes the new tag (which typically triggers a downstream release workflow).

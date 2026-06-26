@@ -172,55 +172,106 @@ Reconciliation is authoritative when the scan succeeds. On the `error` path, lab
 
 ## Fork PRs and the required gate
 
-`dependency-safety.yml` is a **Dependabot-automation** gate. It scans
-`dependabot[bot]` PRs and passes every other actor through with a neutral
-`success`. Human PRs from a branch **in your repo** also get that `success`
-write, because their token can write commit statuses.
+`dependency-safety.yml` is a **Dependabot-automation** gate. Repos that make
+`dependency-safety / gate` required need exactly one trusted writer for every
+pull request head SHA. The correct companion depends on how your scanner caller
+is gated.
 
-**External fork PRs are different.** For a `pull_request` triggered from a fork,
-GitHub gives `GITHUB_TOKEN` a read-only token on your repo by default —
-`statuses` included — *even when the caller workflow declares* `statuses: write`
-([GitHub docs][fork-perms]). The one exception is a repo admin enabling
-**Send write tokens to workflows from pull requests** in the repository's
-Actions settings; with that off (the default), the fork run cannot create the
-`dependency-safety / gate` commit status.
-
-**What the workflow does:** on a fork PR it attempts the status write, detects
-the read-only denial (`HTTP 403 Resource not accessible by integration`), logs a
-`notice` and a job-summary line, and **finishes green**. It does *not* present
-this as a dependency-safety scan failure. Genuine errors — and the real
-Dependabot scan/status path — still fail loudly.
-
-**The unavoidable gap:** a green job still cannot *post* the status from a fork
-run. If you require `dependency-safety / gate` as a status check, fork PRs will
-sit with that check **unsatisfied** until a *trusted* path posts it. The
-reusable workflow cannot close this gap from the fork run — add a companion in
-your repo.
-
-**Recommended safe companion** — a status-only `pull_request_target` job that
-posts the gate for fork PRs and **never checks out or runs PR-authored code**:
+**Recommended matched pair: Dependabot-gated scanner plus non-bot gate.** This
+is the cleanest shape for repos that require `dependency-safety / gate` on all
+PRs: Dependabot PRs run the real scanner, and every other PR gets a
+status-only gate.
 
 ```yaml
-# .github/workflows/fork-pr-gate.yml  (your repo — adapt as needed)
+# .github/workflows/dependency-safety.yml
+name: Dependency Safety
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+  issues: write
+
+concurrency:
+  group: dependency-safety-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  safety:
+    # Real scan for Dependabot only; non-Dependabot PRs are handled by
+    # dependency-safety-non-bot-gate.yml. Keep this field paired with the
+    # non-bot gate's complementary condition.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v4
+    secrets: inherit
+```
+
+```yaml
+# .github/workflows/dependency-safety-non-bot-gate.yml
+name: Dependency Safety Non-Bot Gate
+
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] status-only path; never checks out or runs PR code
+    types: [opened, synchronize, reopened]
+    branches: [main]  # include every branch where dependency-safety / gate is required
+
+permissions: {}
+
+concurrency:
+  group: dep-safety-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    permissions:
+      statuses: write
+    uses: j7an/shared-workflows/.github/workflows/dependency-safety-non-bot-gate.yml@v4
+```
+
+This non-bot gate is the companion to a Dependabot-gated scanner caller. If
+your scanner caller runs ungated, use the fork-only pattern below instead. Do
+not mix a Dependabot-gated scanner with a fork-only gate: same-repo human PRs
+would have no writer for the required status. The non-bot wrapper's `branches:`
+filter must cover every branch where a ruleset or branch protection rule
+requires `dependency-safety / gate`.
+
+**Why the wrapper is safe:** `pull_request_target` runs in your repo's context
+with a write token, which is exactly what is needed to post the status, and it
+is safe here only because the wrapper delegates to a status-only reusable
+workflow. The reusable workflow performs no checkout, uses no third-party
+actions, runs no dependency install/build/test, executes no PR-authored files,
+requests only `statuses: write`, uses only the automatic `github.token`, and
+passes PR-derived values into shell through `env:`. Do not add
+`secrets: inherit` to the non-bot gate wrapper.
+
+**Alternative: ungated scanner plus fork-only gate.** If your scanner caller
+runs on every `pull_request`, same-repo non-bot PRs are handled by the scanner's
+own pass-through branch. In that architecture, add only a fork companion:
+
+```yaml
+# .github/workflows/fork-pr-gate.yml
 name: Fork PR dependency-safety gate
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
 permissions:
-  statuses: write          # nothing else
+  statuses: write
 jobs:
   gate:
-    # cross-repo (fork) PRs only — same-repo PRs are handled by the reusable workflow
+    # cross-repo fork PRs only; same-repo PRs are handled by the scanner workflow
     if: github.event.pull_request.head.repo.id != github.event.pull_request.base.repo.id
     runs-on: ubuntu-latest
     steps:
-      # NO checkout. This job never fetches or runs PR-authored code.
       - name: Post neutral gate status
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO:  ${{ github.repository }}
+          GH_REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RUN_URL:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
             -f state="success" \
@@ -229,19 +280,16 @@ jobs:
             -f target_url="${RUN_URL}"
 ```
 
-**Why this is safe:** `pull_request_target` runs in your repo's context with a
-write token — exactly what's needed to post the status — and it is safe here
-*only because* the job has no `checkout`, runs no PR code, requests
-`statuses: write` and nothing else, and reads every PR-derived value through
-`env:` (never interpolated with `${{ … }}` inside `run:`). This is the
-constrained, status-only use of `pull_request_target` — **not** the broad
-"build/test the PR with elevated permissions" pattern, which would expose your
-secrets to fork-authored code. If a blanket `success` is too permissive for
-your repo, post `pending` instead and require a maintainer to flip the status
-after review. If you run [Zizmor](#security-analysis-zizmor) on your repo, it
-will flag this file for its `pull_request_target` trigger — that finding is
-expected here; the constraints above (no `checkout`, `statuses: write` only,
-`env:` indirection) are exactly the safe envelope to verify.
+External fork PRs get a read-only `GITHUB_TOKEN` under `pull_request` by
+default, even when the caller declares `statuses: write`, unless a repo admin
+enables **Send write tokens to workflows from pull requests** ([docs][fork-perms]).
+The trusted `pull_request_target` wrapper closes that required-status gap
+without running untrusted PR code.
+
+If you run [Zizmor](#security-analysis-zizmor), it will flag the wrapper's
+`pull_request_target` trigger. That finding is expected for this constrained,
+status-only pattern; verify the no-checkout, no-PR-code, `statuses: write`-only
+envelope instead of suppressing the architectural review.
 
 [fork-perms]: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#changing-the-permissions-in-a-forked-repository
 
