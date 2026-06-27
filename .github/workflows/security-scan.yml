@@ -1,0 +1,228 @@
+name: Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      run_codeql:
+        type: boolean
+        default: true
+        description: "Run CodeQL analysis."
+      run_trufflehog:
+        type: boolean
+        default: true
+        description: "Run TruffleHog verified-secret scanning."
+      run_zizmor:
+        type: boolean
+        default: true
+        description: "Run Zizmor workflow analysis."
+      run_trivy:
+        type: boolean
+        default: true
+        description: "Run Trivy filesystem vulnerability scanning."
+      run_osv_full:
+        type: boolean
+        default: true
+        description: "Run OSV full scan on push and schedule events."
+      run_osv_pr:
+        type: boolean
+        default: true
+        description: "Run OSV PR diff scan on pull_request events."
+      codeql_language:
+        type: string
+        default: "python"
+        description: "Single CodeQL language token. Use javascript-typescript for Node repos."
+      codeql_queries:
+        type: string
+        default: "security-extended"
+        description: "CodeQL query set."
+      zizmor_online_audits:
+        type: boolean
+        default: true
+        description: "Enable Zizmor online audits, including vulnerable-action checks."
+      support_merge_group:
+        type: boolean
+        default: false
+        description: "Allow general scanner jobs on merge_group events. OSV PR remains pull_request-only."
+
+permissions: {}
+
+jobs:
+  validate-event:
+    name: Validate event
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Validate caller event
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SUPPORT_MERGE_GROUP: ${{ inputs.support_merge_group }}
+        run: |
+          case "$EVENT_NAME" in
+            push|pull_request|schedule)
+              exit 0
+              ;;
+            merge_group)
+              if [[ "$SUPPORT_MERGE_GROUP" == "true" ]]; then
+                exit 0
+              fi
+              echo "::error::merge_group event requires support_merge_group: true. Supported events are push, pull_request, schedule, and merge_group when support_merge_group is true."
+              exit 1
+              ;;
+            *)
+              echo "::error::Unsupported event '$EVENT_NAME'. Supported events are push, pull_request, schedule, and merge_group when support_merge_group is true."
+              exit 1
+              ;;
+          esac
+
+  codeql:
+    name: CodeQL
+    needs: validate-event
+    if: ${{ inputs.run_codeql && (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || (github.event_name == 'merge_group' && inputs.support_merge_group)) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          languages: ${{ inputs.codeql_language }}
+          queries: ${{ inputs.codeql_queries }}
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          category: /language:${{ inputs.codeql_language }}
+
+  trufflehog:
+    name: TruffleHog
+    needs: validate-event
+    if: ${{ inputs.run_trufflehog && (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || (github.event_name == 'merge_group' && inputs.support_merge_group)) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: TruffleHog secret scan
+        id: trufflehog
+        uses: trufflesecurity/trufflehog@30d5bb91af1a771378349dbbb0c82129392acf70 # v3.95.6
+        continue-on-error: true
+        with:
+          path: ./
+          extra_args: --results=verified
+
+      - name: Fail on verified secrets
+        if: steps.trufflehog.outcome == 'failure'
+        run: |
+          echo "::error::TruffleHog scan failed or detected verified secrets. Review the scan output above."
+          exit 1
+
+  zizmor:
+    name: Zizmor
+    needs: validate-event
+    if: ${{ inputs.run_zizmor && (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || (github.event_name == 'merge_group' && inputs.support_merge_group)) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Zizmor workflow scan
+        uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
+        with:
+          advanced-security: false
+          min-severity: medium
+          min-confidence: medium
+          online-audits: ${{ inputs.zizmor_online_audits }}
+          version: "1.26.1"
+
+  trivy:
+    name: Trivy
+    needs: validate-event
+    if: ${{ inputs.run_trivy && (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || (github.event_name == 'merge_group' && inputs.support_merge_group)) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+  osv-full:
+    name: OSV full
+    needs: validate-event
+    if: ${{ inputs.run_osv_full && (github.event_name == 'push' || github.event_name == 'schedule') }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    with:
+      scan-args: --recursive ./
+
+  osv-pr:
+    name: OSV PR
+    needs: validate-event
+    if: ${{ inputs.run_osv_pr && github.event_name == 'pull_request' }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    with:
+      scan-args: --recursive ./

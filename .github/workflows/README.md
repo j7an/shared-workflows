@@ -4,6 +4,181 @@ This directory hosts reusable workflows under `j7an/shared-workflows`. Consumers
 
 > **Note:** `@v3` and `@v2` continue to work at their last-released revisions, but receive no further updates. See the root README's "v3 → v4 migration" section.
 
+## `security-scan.yml`
+
+Runs the shared security scanning baseline for sibling repos: CodeQL,
+TruffleHog, Zizmor, Trivy, and OSV. The workflow is `workflow_call`-only; each
+consumer keeps its own local `push`, `pull_request`, `schedule`, and optional
+`merge_group` triggers in a thin caller.
+
+### Caller permission ceiling
+
+The caller job must grant the permission ceiling. The reusable workflow narrows
+permissions per scanner job, but a called workflow cannot grant itself
+permissions the caller withheld.
+
+```yaml
+permissions: {}
+
+jobs:
+  security:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: j7an/shared-workflows/.github/workflows/security-scan.yml@v4
+```
+
+### Inputs
+
+| Input | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `run_codeql` | boolean | no | `true` | Run CodeQL analysis. Set to `false` for repos using CodeQL default setup or another CodeQL workflow. |
+| `run_trufflehog` | boolean | no | `true` | Run TruffleHog verified-secret scanning. |
+| `run_zizmor` | boolean | no | `true` | Run Zizmor workflow analysis as a blocking console gate. |
+| `run_trivy` | boolean | no | `true` | Run Trivy filesystem vulnerability scanning. |
+| `run_osv_full` | boolean | no | `true` | Run OSV full scans on `push` and `schedule`. |
+| `run_osv_pr` | boolean | no | `true` | Run OSV PR diff scans on `pull_request`. Never runs on `merge_group`. |
+| `codeql_language` | string | no | `"python"` | Single CodeQL language token. Use `javascript-typescript` for Node callers. |
+| `codeql_queries` | string | no | `"security-extended"` | CodeQL query suite. Use `+security-and-quality` to include quality queries. |
+| `zizmor_online_audits` | boolean | no | `true` | Enable Zizmor online audits, including vulnerable-action checks. |
+| `support_merge_group` | boolean | no | `false` | Allow general scanners on `merge_group`; unsupported `merge_group` callers fail closed. |
+
+### Full caller
+
+This is the full scanner bundle without merge queue support.
+
+```yaml
+name: Security Scanning
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  security:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: j7an/shared-workflows/.github/workflows/security-scan.yml@v4
+```
+
+Repos with a protected merge queue add the caller trigger and opt in to
+`merge_group` scanning. If a caller triggers on `merge_group` without
+`support_merge_group: true`, the reusable workflow fails closed instead of
+silently reporting a green no-op run. OSV full remains limited to `push` and
+`schedule`; OSV PR remains limited to `pull_request`, so do not require OSV
+checks on `merge_group`.
+
+```yaml
+on:
+  merge_group:
+    branches: [main]
+
+jobs:
+  security:
+    with:
+      support_merge_group: true
+```
+
+Repos that want CodeQL's quality query set can also pass:
+
+```yaml
+jobs:
+  security:
+    with:
+      codeql_queries: +security-and-quality
+```
+
+### Minimal caller
+
+Use this shape for repos that want CodeQL, TruffleHog, Zizmor, and Trivy but do
+not want OSV scans.
+
+```yaml
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  security:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: j7an/shared-workflows/.github/workflows/security-scan.yml@v4
+    with:
+      run_osv_full: false
+      run_osv_pr: false
+```
+
+### Node callers
+
+For npm, pnpm, yarn, or bun repos, keep lockfiles committed and change only the
+CodeQL language when CodeQL is enabled. Do not pass package-manager inputs to
+this reusable workflow, because OSV and Trivy read committed manifests and lockfiles
+directly:
+
+```yaml
+jobs:
+  security:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: j7an/shared-workflows/.github/workflows/security-scan.yml@v4
+    with:
+      codeql_language: javascript-typescript
+```
+
+`npx` is an invocation style, not dependency metadata. OSV and Trivy scan
+committed manifests and lockfiles such as `package-lock.json`,
+`pnpm-lock.yaml`, `yarn.lock`, and text `bun.lock`. Older binary `bun.lockb`
+is not part of the supported lockfile set.
+
+### CodeQL default setup
+
+Set `run_codeql: false` if the consumer repo uses GitHub CodeQL default setup
+or another CodeQL workflow. GitHub rejects advanced-configuration CodeQL
+analyses when default setup owns CodeQL processing for the repo.
+
+### Required checks
+
+Only require checks that actually run on the protected event. If a repo marks a
+scanner job as required but disables that scanner, or requires OSV PR on an
+event where OSV PR is intentionally skipped, GitHub can wait forever for an
+expected check that will never report.
+
+### Fork pull requests
+
+Use `pull_request`, not `pull_request_target`, for this scanner workflow. Fork
+PRs should not run untrusted code under a privileged token. GitHub may restrict
+`security-events: write` on fork PRs, so SARIF upload from CodeQL, Trivy, and
+OSV can be limited on those runs.
+
 ## `dependency-safety-non-bot-gate.yml`
 
 Posts the required `dependency-safety / gate` commit status for pull requests
