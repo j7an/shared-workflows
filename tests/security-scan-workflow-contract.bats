@@ -12,6 +12,16 @@ on_block() {
   ' "$YAML"
 }
 
+on_trigger_keys() {
+  on_block | awk '
+    /^  [A-Za-z0-9_-]+:$/ {
+      sub(/^  /, "", $0);
+      sub(/:$/, "", $0);
+      print
+    }
+  '
+}
+
 job_block() {
   awk -v job="  $1:" '
     $0 == job { flag=1; print; next }
@@ -70,13 +80,7 @@ workflow_call_input_keys() {
 }
 
 @test "security-scan.yml is workflow_call only" {
-  block=$(on_block)
-  [[ "$block" == *"workflow_call:"* ]]
-  [[ "$block" != *"push:"* ]]
-  [[ "$block" != *"pull_request:"* ]]
-  [[ "$block" != *"schedule:"* ]]
-  [[ "$block" != *"merge_group:"* ]]
-  [[ "$block" != *"workflow_dispatch:"* ]]
+  [ "$(on_trigger_keys)" = "workflow_call" ]
 }
 
 @test "public inputs and defaults match the v1 contract" {
