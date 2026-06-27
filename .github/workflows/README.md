@@ -29,6 +29,21 @@ jobs:
     uses: j7an/shared-workflows/.github/workflows/security-scan.yml@v4
 ```
 
+### Inputs
+
+| Input | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `run_codeql` | boolean | no | `true` | Run CodeQL analysis. Set to `false` for repos using CodeQL default setup or another CodeQL workflow. |
+| `run_trufflehog` | boolean | no | `true` | Run TruffleHog verified-secret scanning. |
+| `run_zizmor` | boolean | no | `true` | Run Zizmor workflow analysis as a blocking console gate. |
+| `run_trivy` | boolean | no | `true` | Run Trivy filesystem vulnerability scanning. |
+| `run_osv_full` | boolean | no | `true` | Run OSV full scans on `push` and `schedule`. |
+| `run_osv_pr` | boolean | no | `true` | Run OSV PR diff scans on `pull_request`. Never runs on `merge_group`. |
+| `codeql_language` | string | no | `"python"` | Single CodeQL language token. Use `javascript-typescript` for Node callers. |
+| `codeql_queries` | string | no | `"security-extended"` | CodeQL query suite. Use `+security-and-quality` to include quality queries. |
+| `zizmor_online_audits` | boolean | no | `true` | Enable Zizmor online audits, including vulnerable-action checks. |
+| `support_merge_group` | boolean | no | `false` | Allow general scanners on `merge_group`; unsupported `merge_group` callers fail closed. |
+
 ### Full caller
 
 This is the full scanner bundle without merge queue support.
@@ -60,7 +75,11 @@ jobs:
 ```
 
 Repos with a protected merge queue add the caller trigger and opt in to
-`merge_group` scanning:
+`merge_group` scanning. If a caller triggers on `merge_group` without
+`support_merge_group: true`, the reusable workflow fails closed instead of
+silently reporting a green no-op run. OSV full remains limited to `push` and
+`schedule`; OSV PR remains limited to `pull_request`, so do not require OSV
+checks on `merge_group`.
 
 ```yaml
 on:
@@ -116,7 +135,7 @@ jobs:
       run_osv_pr: false
 ```
 
-### Node repos
+### Node callers
 
 For npm, pnpm, yarn, or bun repos, keep lockfiles committed and change only the
 CodeQL language when CodeQL is enabled. Do not pass package-manager inputs to

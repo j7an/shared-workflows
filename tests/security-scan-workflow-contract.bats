@@ -3,6 +3,34 @@
 # reusable security scanning workflow.
 
 YAML=".github/workflows/security-scan.yml"
+README=".github/workflows/README.md"
+
+assert_eq() {
+  if [ "$1" != "$2" ]; then
+    printf 'expected:\n%s\nactual:\n%s\n' "$2" "$1"
+    return 1
+  fi
+}
+
+assert_contains() {
+  case "$1" in
+    *"$2"*) return 0 ;;
+    *)
+      printf 'expected text to contain:\n%s\n' "$2"
+      return 1
+      ;;
+  esac
+}
+
+assert_lacks() {
+  case "$1" in
+    *"$2"*)
+      printf 'expected text not to contain:\n%s\n' "$2"
+      return 1
+      ;;
+    *) return 0 ;;
+  esac
+}
 
 on_block() {
   awk '
@@ -33,7 +61,10 @@ job_block() {
 input_block() {
   awk -v key="      $1:" '
     $0 == key { flag=1; print; next }
-    flag && /^      [a-z_]+:$/ { exit }
+    flag && /^      [a-z0-9_]+:$/ { exit }
+    flag && /^    [A-Za-z0-9_-]+:/ { exit }
+    flag && /^  [A-Za-z0-9_-]+:/ { exit }
+    flag && /^[^[:space:]][^:]*:/ { exit }
     flag { print }
   ' "$YAML"
 }
@@ -79,8 +110,16 @@ workflow_call_input_keys() {
   '
 }
 
+readme_security_section() {
+  awk '
+    /^## `security-scan.yml`$/ { flag=1; print; next }
+    flag && /^## `/ { exit }
+    flag { print }
+  ' "$README"
+}
+
 @test "security-scan.yml is workflow_call only" {
-  [ "$(on_trigger_keys)" = "workflow_call" ]
+  assert_eq "$(on_trigger_keys)" "workflow_call"
 }
 
 @test "public inputs and defaults match the v1 contract" {
@@ -97,25 +136,25 @@ codeql_queries'
 
   observed_inputs=$(workflow_call_input_keys | sort)
   expected_sorted=$(printf "%s\n" "$expected_inputs" | sort)
-  [[ "$observed_inputs" = "$expected_sorted" ]]
+  assert_eq "$observed_inputs" "$expected_sorted"
 
   for input in run_codeql run_trufflehog run_zizmor run_trivy run_osv_full run_osv_pr zizmor_online_audits support_merge_group; do
-    [ "$(input_type "$input")" = "boolean" ]
+    assert_eq "$(input_type "$input")" "boolean"
   done
 
-  [ "$(input_default run_codeql)" = "true" ]
-  [ "$(input_default run_trufflehog)" = "true" ]
-  [ "$(input_default run_zizmor)" = "true" ]
-  [ "$(input_default run_trivy)" = "true" ]
-  [ "$(input_default run_osv_full)" = "true" ]
-  [ "$(input_default run_osv_pr)" = "true" ]
-  [ "$(input_default zizmor_online_audits)" = "true" ]
-  [ "$(input_default support_merge_group)" = "false" ]
+  assert_eq "$(input_default run_codeql)" "true"
+  assert_eq "$(input_default run_trufflehog)" "true"
+  assert_eq "$(input_default run_zizmor)" "true"
+  assert_eq "$(input_default run_trivy)" "true"
+  assert_eq "$(input_default run_osv_full)" "true"
+  assert_eq "$(input_default run_osv_pr)" "true"
+  assert_eq "$(input_default zizmor_online_audits)" "true"
+  assert_eq "$(input_default support_merge_group)" "false"
 
-  [ "$(input_type codeql_language)" = "string" ]
-  [ "$(input_default codeql_language)" = '"python"' ]
-  [ "$(input_type codeql_queries)" = "string" ]
-  [ "$(input_default codeql_queries)" = '"security-extended"' ]
+  assert_eq "$(input_type codeql_language)" "string"
+  assert_eq "$(input_default codeql_language)" '"python"'
+  assert_eq "$(input_type codeql_queries)" "string"
+  assert_eq "$(input_default codeql_queries)" '"security-extended"'
 }
 
 @test "workflow denies permissions at top level" {
@@ -124,29 +163,30 @@ codeql_queries'
 
 @test "validate-event runs unconditionally with no permissions and fails unsupported events" {
   block=$(job_block validate-event)
-  [[ "$block" == *"permissions: {}"* ]]
-  [[ "$block" == *'EVENT_NAME: ${{ github.event_name }}'* ]]
-  [[ "$block" == *'SUPPORT_MERGE_GROUP: ${{ inputs.support_merge_group }}'* ]]
-  [[ "$block" == *"push|pull_request|schedule)"* ]]
-  [[ "$block" == *"merge_group)"* ]]
-  [[ "$block" == *"support_merge_group: true"* ]]
-  [[ "$block" == *"Unsupported event"* ]]
+  assert_contains "$block" "permissions: {}"
+  assert_contains "$block" 'EVENT_NAME: ${{ github.event_name }}'
+  assert_contains "$block" 'SUPPORT_MERGE_GROUP: ${{ inputs.support_merge_group }}'
+  assert_contains "$block" "push|pull_request|schedule)"
+  assert_contains "$block" "merge_group)"
+  assert_contains "$block" 'if [[ "$SUPPORT_MERGE_GROUP" == "true" ]]'
+  assert_contains "$block" "support_merge_group: true"
+  assert_contains "$block" "Unsupported event"
 }
 
 @test "all scanner jobs depend on validate-event" {
   for job in codeql trufflehog zizmor trivy osv-full osv-pr; do
-    [[ "$(job_block "$job")" == *"needs: validate-event"* ]]
+    assert_contains "$(job_block "$job")" "needs: validate-event"
   done
 }
 
 @test "general scanners use toggle plus supported-event gate including optional merge_group" {
   for job in codeql trufflehog zizmor trivy; do
     block=$(job_block "$job")
-    [[ "$block" == *"inputs.run_${job}"* ]]
-    [[ "$block" == *"github.event_name == 'push'"* ]]
-    [[ "$block" == *"github.event_name == 'pull_request'"* ]]
-    [[ "$block" == *"github.event_name == 'schedule'"* ]]
-    [[ "$block" == *"github.event_name == 'merge_group' && inputs.support_merge_group"* ]]
+    assert_contains "$block" "inputs.run_${job}"
+    assert_contains "$block" "github.event_name == 'push'"
+    assert_contains "$block" "github.event_name == 'pull_request'"
+    assert_contains "$block" "github.event_name == 'schedule'"
+    assert_contains "$block" "github.event_name == 'merge_group' && inputs.support_merge_group"
   done
 }
 
@@ -154,112 +194,119 @@ codeql_queries'
   full=$(job_block osv-full)
   pr=$(job_block osv-pr)
 
-  [[ "$full" == *"inputs.run_osv_full"* ]]
-  [[ "$full" == *"github.event_name == 'push'"* ]]
-  [[ "$full" == *"github.event_name == 'schedule'"* ]]
-  [[ "$full" != *"pull_request"* ]]
-  [[ "$full" != *"merge_group"* ]]
+  assert_contains "$full" "inputs.run_osv_full"
+  assert_contains "$full" "github.event_name == 'push'"
+  assert_contains "$full" "github.event_name == 'schedule'"
+  assert_lacks "$full" "pull_request"
+  assert_lacks "$full" "merge_group"
 
-  [[ "$pr" == *"inputs.run_osv_pr"* ]]
-  [[ "$pr" == *"github.event_name == 'pull_request'"* ]]
-  [[ "$pr" != *"merge_group"* ]]
+  assert_contains "$pr" "inputs.run_osv_pr"
+  assert_contains "$pr" "github.event_name == 'pull_request'"
+  assert_lacks "$pr" "github.event_name == 'push'"
+  assert_lacks "$pr" "github.event_name == 'schedule'"
+  assert_lacks "$pr" "merge_group"
 }
 
 @test "job permissions are least privilege" {
-  [ "$(job_permissions_block validate-event)" = "    permissions: {}" ]
-
-  codeql_perms=$(job_permissions_block codeql)
-  [[ "$codeql_perms" == *"contents: read"* ]]
-  [[ "$codeql_perms" == *"security-events: write"* ]]
-  [[ "$codeql_perms" == *"actions: read"* ]]
-
-  [ "$(job_permissions_block trufflehog)" = $'    permissions:\n      contents: read' ]
-
-  for job in zizmor trivy; do
-    perms=$(job_permissions_block "$job")
-    [[ "$perms" == *"contents: read"* ]]
-    [[ "$perms" == *"security-events: write"* ]]
-    [[ "$perms" != *"actions: read"* ]]
-  done
-
-  for job in osv-full osv-pr; do
-    perms=$(job_permissions_block "$job")
-    [[ "$perms" == *"actions: read"* ]]
-    [[ "$perms" == *"contents: read"* ]]
-    [[ "$perms" == *"security-events: write"* ]]
-  done
+  assert_eq "$(job_permissions_block validate-event)" "    permissions: {}"
+  assert_eq "$(job_permissions_block codeql)" $'    permissions:\n      actions: read\n      contents: read\n      security-events: write'
+  assert_eq "$(job_permissions_block trufflehog)" $'    permissions:\n      contents: read'
+  assert_eq "$(job_permissions_block zizmor)" $'    permissions:\n      contents: read'
+  assert_eq "$(job_permissions_block trivy)" $'    permissions:\n      actions: read\n      contents: read\n      security-events: write'
+  assert_eq "$(job_permissions_block osv-full)" $'    permissions:\n      actions: read\n      contents: read\n      security-events: write'
+  assert_eq "$(job_permissions_block osv-pr)" $'    permissions:\n      actions: read\n      contents: read\n      security-events: write'
 }
 
 @test "step-based scanner jobs put harden-runner first" {
   for job in codeql trufflehog zizmor trivy; do
-    [ "$(first_step_uses "$job")" = "step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4" ]
-    [[ "$(job_block "$job")" == *"egress-policy: audit"* ]]
+    assert_eq "$(first_step_uses "$job")" "step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4"
+    assert_contains "$(job_block "$job")" "egress-policy: audit"
   done
 }
 
 @test "CodeQL is single-language, build-free, and category derives from codeql_language" {
   block=$(job_block codeql)
-  [[ "$block" == *"github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2"* ]]
-  [[ "$block" == *"github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2"* ]]
-  [[ "$block" == *'languages: ${{ inputs.codeql_language }}'* ]]
-  [[ "$block" == *'queries: ${{ inputs.codeql_queries }}'* ]]
-  [[ "$block" == *"build-mode: none"* ]]
-  [[ "$block" == *'category: /language:${{ inputs.codeql_language }}'* ]]
-  [[ "$block" != *"matrix"* ]]
+  assert_contains "$block" "github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2"
+  assert_contains "$block" "github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2"
+  assert_contains "$block" 'languages: ${{ inputs.codeql_language }}'
+  assert_contains "$block" 'queries: ${{ inputs.codeql_queries }}'
+  assert_contains "$block" "build-mode: none"
+  assert_contains "$block" 'category: /language:${{ inputs.codeql_language }}'
+  assert_lacks "$block" "matrix"
 }
 
 @test "TruffleHog defers range selection to the action default and uses verified results" {
   block=$(job_block trufflehog)
-  [[ "$block" == *"actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"* ]]
-  [[ "$block" == *"fetch-depth: 0"* ]]
-  [[ "$block" == *"persist-credentials: false"* ]]
-  [[ "$block" == *"trufflesecurity/trufflehog@30d5bb91af1a771378349dbbb0c82129392acf70 # v3.95.6"* ]]
-  [[ "$block" == *"continue-on-error: true"* ]]
-  [[ "$block" == *"extra_args: --results=verified"* ]]
-  [[ "$block" == *"steps.trufflehog.outcome == 'failure'"* ]]
-  [[ "$block" != *"base:"* ]]
-  [[ "$block" != *"head:"* ]]
-  [[ "$block" != *"--only-verified"* ]]
+  assert_contains "$block" "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
+  assert_contains "$block" "fetch-depth: 0"
+  assert_contains "$block" "persist-credentials: false"
+  assert_contains "$block" "trufflesecurity/trufflehog@30d5bb91af1a771378349dbbb0c82129392acf70 # v3.95.6"
+  assert_contains "$block" "continue-on-error: true"
+  assert_contains "$block" "extra_args: --results=verified"
+  assert_contains "$block" "steps.trufflehog.outcome == 'failure'"
+  assert_contains "$block" "TruffleHog scan failed or detected verified secrets."
+  assert_lacks "$block" "base:"
+  assert_lacks "$block" "head:"
+  assert_lacks "$block" "--only-verified"
 }
 
 @test "Zizmor is blocking with medium thresholds, online-audits input, and pinned CLI" {
   block=$(job_block zizmor)
-  [[ "$block" == *"zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7"* ]]
-  [[ "$block" == *'online-audits: ${{ inputs.zizmor_online_audits }}'* ]]
-  [[ "$block" == *"advanced-security: false"* ]]
-  [[ "$block" == *"min-severity: medium"* ]]
-  [[ "$block" == *"min-confidence: medium"* ]]
-  [[ "$block" == *'version: "1.26.1"'* ]]
+  assert_contains "$block" "zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7"
+  assert_contains "$block" 'online-audits: ${{ inputs.zizmor_online_audits }}'
+  assert_contains "$block" "advanced-security: false"
+  assert_contains "$block" "min-severity: medium"
+  assert_contains "$block" "min-confidence: medium"
+  assert_contains "$block" 'version: "1.26.1"'
 }
 
 @test "Trivy is one fs SARIF run with fail-on-findings and explicit SARIF category" {
   block=$(job_block trivy)
   [ "$(grep -c "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0" <<< "$block")" -eq 1 ]
-  [[ "$block" == *"scan-type: fs"* ]]
-  [[ "$block" == *"format: sarif"* ]]
-  [[ "$block" == *"output: trivy-results.sarif"* ]]
-  [[ "$block" == *"severity: CRITICAL,HIGH"* ]]
-  [[ "$block" == *'exit-code: "1"'* ]]
-  [[ "$block" == *"if: always()"* ]]
-  [[ "$block" == *"github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2"* ]]
-  [[ "$block" == *"category: trivy"* ]]
+  assert_contains "$block" "scan-type: fs"
+  assert_contains "$block" "format: sarif"
+  assert_contains "$block" "output: trivy-results.sarif"
+  assert_contains "$block" "severity: CRITICAL,HIGH"
+  assert_contains "$block" "limit-severities-for-sarif: true"
+  assert_contains "$block" 'exit-code: "1"'
+  assert_contains "$block" "if: always()"
+  assert_contains "$block" "github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2"
+  assert_contains "$block" "category: trivy"
 }
 
 @test "OSV wraps Google reusable workflows with explicit recursive scan args" {
   full=$(job_block osv-full)
   pr=$(job_block osv-pr)
 
-  [[ "$full" == *"google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8"* ]]
-  [[ "$pr" == *"google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8"* ]]
-  [[ "$full" == *"scan-args: --recursive ./"* ]]
-  [[ "$pr" == *"scan-args: --recursive ./"* ]]
+  assert_contains "$full" "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8"
+  assert_contains "$pr" "google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8"
+  assert_contains "$full" "scan-args: --recursive ./"
+  assert_contains "$pr" "scan-args: --recursive ./"
 }
 
 @test "no scanner threshold or package-manager inputs are exposed" {
+  [ -f "$YAML" ]
+
   for forbidden in trivy_severity trivy_scanners trivy_ignore_unfixed zizmor_min_severity zizmor_min_confidence package_manager; do
     if grep -q "$forbidden" "$YAML"; then
       echo "unexpected public input or setting: $forbidden"
       return 1
     fi
   done
+}
+
+@test "README documents the security-scan input contract" {
+  block=$(readme_security_section)
+
+  assert_contains "$block" "### Inputs"
+  assert_contains "$block" '| `run_codeql` | boolean | no | `true` | Run CodeQL analysis. Set to `false` for repos using CodeQL default setup or another CodeQL workflow. |'
+  assert_contains "$block" '| `run_trufflehog` | boolean | no | `true` | Run TruffleHog verified-secret scanning. |'
+  assert_contains "$block" '| `run_zizmor` | boolean | no | `true` | Run Zizmor workflow analysis as a blocking console gate. |'
+  assert_contains "$block" '| `run_trivy` | boolean | no | `true` | Run Trivy filesystem vulnerability scanning. |'
+  assert_contains "$block" '| `run_osv_full` | boolean | no | `true` | Run OSV full scans on `push` and `schedule`. |'
+  assert_contains "$block" '| `run_osv_pr` | boolean | no | `true` | Run OSV PR diff scans on `pull_request`. Never runs on `merge_group`. |'
+  assert_contains "$block" '| `codeql_language` | string | no | `"python"` | Single CodeQL language token. Use `javascript-typescript` for Node callers. |'
+  assert_contains "$block" '| `codeql_queries` | string | no | `"security-extended"` | CodeQL query suite. Use `+security-and-quality` to include quality queries. |'
+  assert_contains "$block" '| `zizmor_online_audits` | boolean | no | `true` | Enable Zizmor online audits, including vulnerable-action checks. |'
+  assert_contains "$block" '| `support_merge_group` | boolean | no | `false` | Allow general scanners on `merge_group`; unsupported `merge_group` callers fail closed. |'
 }

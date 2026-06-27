@@ -136,7 +136,7 @@ jobs:
       - name: Fail on verified secrets
         if: steps.trufflehog.outcome == 'failure'
         run: |
-          echo "::error::TruffleHog detected verified secrets. Review the scan output above."
+          echo "::error::TruffleHog scan failed or detected verified secrets. Review the scan output above."
           exit 1
 
   zizmor:
@@ -146,7 +146,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
@@ -173,6 +172,7 @@ jobs:
     if: ${{ inputs.run_trivy && (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || (github.event_name == 'merge_group' && inputs.support_merge_group)) }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
     steps:
@@ -193,6 +193,7 @@ jobs:
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
           exit-code: "1"
 
       - name: Upload Trivy SARIF
