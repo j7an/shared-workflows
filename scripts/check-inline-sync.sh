@@ -18,6 +18,7 @@ INLINE_PAIRS=(
   ".github/workflows/dependency-safety.yml:scripts/safety-verdict.sh"
   ".github/workflows/dependency-safety.yml:scripts/classify-touched-paths.sh"
   ".github/workflows/tag-release.yml:scripts/bump-version-files.sh"
+  ".github/workflows/pre-commit-autoupdate.yml:scripts/pre-commit-autoupdate-preflight.sh"
   ".github/workflows/dependency-safety.yml:scripts/pyproject-bump-extract.sh"
 )
 

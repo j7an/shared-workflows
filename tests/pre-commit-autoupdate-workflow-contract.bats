@@ -234,22 +234,24 @@ title'
 
   assert_contains "$run_block" 'USE_PINNED_PRE_COMMIT: ${{ steps.preflight.outputs.use_pinned_pre_commit }}'
   assert_contains "$run_block" 'PRE_COMMIT_VERSION: ${{ steps.preflight.outputs.pre_commit_version }}'
+  assert_contains "$run_block" 'CONFIG_PATH: ${{ steps.preflight.outputs.config_path }}'
   assert_contains "$diff_block" 'CONFIG_PATH: ${{ steps.preflight.outputs.config_path }}'
   assert_lacks "$run_block" 'PRE_COMMIT_VERSION: ${{ inputs.pre_commit_version }}'
+  assert_lacks "$run_block" 'CONFIG_PATH: ${{ inputs.config_path }}'
   assert_lacks "$diff_block" 'CONFIG_PATH: ${{ inputs.config_path }}'
 }
 
 @test "uvx commands are fixed workflow branches, not emitted command strings" {
   block=$(step_block "Run pre-commit autoupdate")
   assert_contains "$block" 'if [ "$USE_PINNED_PRE_COMMIT" = "true" ]; then'
-  assert_contains "$block" 'uvx --from "pre-commit==$PRE_COMMIT_VERSION" pre-commit autoupdate'
-  assert_contains "$block" "uvx pre-commit autoupdate"
+  assert_contains "$block" 'uvx --from "pre-commit==$PRE_COMMIT_VERSION" pre-commit autoupdate -c "$CONFIG_PATH"'
+  assert_contains "$block" 'uvx pre-commit autoupdate -c "$CONFIG_PATH"'
   assert_lacks "$block" "eval"
 }
 
 @test "change detection is set -e safe and gates PR creation" {
   block=$(step_block "Check for changes")
-  assert_contains "$block" 'if git diff --quiet "$CONFIG_PATH"; then'
+  assert_contains "$block" 'if git diff --quiet -- "$CONFIG_PATH"; then'
   assert_contains "$block" 'echo "changed=false" >> "$GITHUB_OUTPUT"'
   assert_contains "$block" 'echo "changed=true" >> "$GITHUB_OUTPUT"'
 
