@@ -105,3 +105,11 @@ normalize_text() {
   assert_contains "$section" '`v1.2.3rc1`'
   assert_contains "$section" 'Do not tag prereleases as `v1.2.3-rc1`'
 }
+
+@test "template documents trigger adjustment for path-prefixed tags" {
+  section=$(normalize_text "$(template_section)")
+  assert_contains "$section" "path-prefixed (for example"
+  assert_contains "$section" "standard trigger"
+  assert_contains "$section" "tools/v*.*.*"
+  assert_contains "$section" "add the matching trigger pattern"
+}

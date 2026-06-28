@@ -528,6 +528,11 @@ Use normalized tag tails such as `v1.2.3`, `tools/v1.2.3`, `v1.2.3rc1`, or
 requires the tag tail to exactly equal the normalized version emitted by the
 wheel.
 
+The standard trigger shown below matches only plain tags (`v*.*.*`). If your
+tag stream is path-prefixed (for example `tools/v`), add the matching trigger
+pattern (for example `tools/v*.*.*`) so pushes to `tools/v1.2.3` trigger this
+release workflow.
+
 ### Standard release workflow
 
 ```yaml
@@ -536,7 +541,7 @@ name: Release Python Package
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'v*.*.*'   # for plain tags like `v1.2.3`
 
 permissions:
   contents: read
