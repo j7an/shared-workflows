@@ -4,6 +4,103 @@ This directory hosts reusable workflows under `j7an/shared-workflows`. Consumers
 
 > **Note:** `@v3` and `@v2` continue to work at their last-released revisions, but receive no further updates. See the root README's "v3 → v4 migration" section.
 
+## `pre-commit-autoupdate.yml`
+
+Runs `pre-commit autoupdate` for consumer repos, detects changes to the
+configured pre-commit config file, and opens a dependency-update pull request.
+The workflow is `workflow_call`-only: each caller keeps its own schedule,
+manual dispatch trigger, branch filters, and optional concurrency.
+
+The runner path is language-neutral but uv-runner scoped. The consumer repo
+needs a pre-commit config file (defaults to `.pre-commit-config.yaml` via
+`config_path`); it does not need to be a Python or uv project because the
+reusable workflow installs uv and runs `uvx`.
+
+### Recommended App-token caller
+
+Use this shape for repos with required checks or branch protection. The caller
+repository must define `vars.RELEASE_BOT_APP_ID` and the
+`RELEASE_BOT_PRIVATE_KEY` secret.
+
+```yaml
+name: Pre-commit Autoupdate
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pre-commit-autoupdate
+  cancel-in-progress: true
+
+jobs:
+  autoupdate:
+    permissions:
+      contents: read
+    uses: j7an/shared-workflows/.github/workflows/pre-commit-autoupdate.yml@v4
+    secrets:
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+```
+
+Pass the private key explicitly rather than using `secrets: inherit`. The App
+token is minted inside the reusable workflow with contents and pull-request
+write scopes, while the caller's automatic `GITHUB_TOKEN` remains read-only.
+
+### Minimal GITHUB_TOKEN fallback caller
+
+Use this shape only for repos that accept the trigger caveat or have no
+required checks on the generated PRs.
+
+```yaml
+name: Pre-commit Autoupdate
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pre-commit-autoupdate
+  cancel-in-progress: true
+
+jobs:
+  autoupdate:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: j7an/shared-workflows/.github/workflows/pre-commit-autoupdate.yml@v4
+```
+
+No App var and no private-key secret are passed. If PR creation fails with a
+403 in this mode, grant `contents: write` and `pull-requests: write` on the
+caller job.
+
+GITHUB_TOKEN-authored PRs may not trigger required CI automatically due to
+GitHub's recursion guard. If checks do not start, close and reopen the PR or
+push an empty commit. Prefer the App-token caller for repos with required
+checks.
+
+### Inputs
+
+| Input | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `config_path` | string | no | `.pre-commit-config.yaml` | File to check for changes and, when `restrict_paths` is true, the only path committed. |
+| `branch` | string | no | `deps/pre-commit-autoupdate` | Pull request branch. |
+| `title` | string | no | `deps: update pre-commit hooks` | Pull request title. |
+| `commit_message` | string | no | `deps: update pre-commit hooks` | Commit message for hook updates. |
+| `labels` | string | no | `dependencies` | Labels passed to `create-pull-request`. |
+| `sign_commits` | boolean | no | `true` | Whether `create-pull-request` signs commits. |
+| `restrict_paths` | boolean | no | `true` | When true, passes `add-paths: config_path` so only the pre-commit config is committed. |
+| `pre_commit_version` | string | no | `""` | Optional pre-commit runner version. Empty uses latest; set it as a regression circuit-breaker. |
+
+`delete-branch: true` is standardized by the reusable workflow, so recurring
+automation branches are cleaned up after merge.
+
 ## `security-scan.yml`
 
 Runs the shared security scanning baseline for sibling repos: CodeQL,

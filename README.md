@@ -11,6 +11,7 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 - **Update-or-create scan comments** — a single stable comment per PR; change detection posts a top-level PR comment only when advisory IDs actually change
 - **Auto-merge by default** — clean scans enable `gh pr merge --auto` (set `auto_merge: false` to opt out); dirty scans apply labels (`security-review-needed`, `dependency-age-violation`, or `dependency-safety-error`) instead
 - **Grouped PR support** — handles both single-package and grouped Dependabot PRs
+- **Reusable pre-commit autoupdate PRs** — shared `pre-commit-autoupdate.yml` runs `uvx pre-commit autoupdate`, opens a dependency PR only when the configured pre-commit config changes, recommends Release Bot App auth for required checks, and keeps a documented `GITHUB_TOKEN` fallback
 
 ## Prerequisites
 
@@ -92,6 +93,46 @@ jobs:
 > `dependency-safety / gate` status from the fork run — it logs a notice and the
 > job stays green rather than failing. If you make that status **required**, see
 > [Fork PRs and the required gate](#fork-prs-and-the-required-gate).
+
+## Pre-commit Autoupdate
+
+`pre-commit-autoupdate.yml` is a `workflow_call`-only reusable workflow for
+repos that keep a pre-commit config file (default path `.pre-commit-config.yaml`
+via `config_path`). Callers keep their own `schedule`,
+`workflow_dispatch`, and optional `concurrency`; the shared workflow installs
+uv and runs `uvx`, so the caller repo does not need to be a uv-managed Python
+project.
+
+Prefer the App-token caller for repos with required checks:
+
+```yaml
+name: Pre-commit Autoupdate
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pre-commit-autoupdate
+  cancel-in-progress: true
+
+jobs:
+  autoupdate:
+    permissions:
+      contents: read
+    uses: j7an/shared-workflows/.github/workflows/pre-commit-autoupdate.yml@v4
+    secrets:
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+```
+
+The caller repo must define `vars.RELEASE_BOT_APP_ID`. Without that var, the
+workflow falls back to `GITHUB_TOKEN`; fallback callers must grant
+`contents: write` and `pull-requests: write`, and their generated PRs may need
+a close/reopen or empty commit to start required CI because of GitHub's
+recursion guard.
 
 ## Inputs
 
