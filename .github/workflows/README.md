@@ -470,60 +470,363 @@ The workflow run summary includes a per-entry table:
 
 ## `publish-pypi.yml`
 
-Builds a Python package with `uv build`, stages on TestPyPI with install verification, promotes to production PyPI via OIDC trusted publishing, and creates a GitHub Release.
+Builds a Python package with `uv build`, stages on TestPyPI with install
+verification, promotes to production PyPI via OIDC trusted publishing, and
+creates a GitHub Release.
+
+> **Trusted Publishing status:** this reusable workflow is not supported for
+> PyPI/TestPyPI Trusted Publishing from package repos. Current PyPI behavior
+> does not authorize cross-repo reusable workflows as Trusted Publisher
+> workflows: the caller repo owns the OIDC repository claim, while the called
+> workflow path points at `j7an/shared-workflows`.
+
+Long-lived API-token publishing is intentionally out of scope for this repo's
+recommended PyPI release path. Keep package publish jobs in the package repo and
+use the caller-owned template below for Trusted Publishing.
+
+The workflow file remains in this repo for compatibility with the published
+`@v4` surface. Do not use it as the trusted-publisher workflow for new package
+releases.
 
 ### Inputs
 
 | Input | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `tag` | string | yes | — | Semver tag to publish (e.g. `tools/v0.1.0`). |
-| `package-dir` | string | no | `.` | Directory containing `pyproject.toml` (relative to repo root). |
-| `testpypi-package` | string | yes | — | Distribution name on TestPyPI for install verification. |
+| `tag` | string | yes | - | Semver tag to publish, such as `tools/v0.1.0` or `v1.2.3`. |
+| `package-dir` | string | no | `.` | Directory containing `pyproject.toml` relative to repo root. |
+| `testpypi-package` | string | yes | - | Distribution name on TestPyPI for install verification. |
 | `draft-release` | boolean | no | `false` | Create the GitHub release as a draft. |
-| `attach-assets` | boolean | no | `true` | Attach wheel + sdist to the GitHub release. |
+| `attach-assets` | boolean | no | `true` | Attach wheel and sdist to the GitHub release. |
 
-### Secrets
+### Compatibility note
 
-None. OIDC handles publishing; `GITHUB_TOKEN` handles the release.
+If PyPI later supports cross-repo reusable workflows as Trusted Publisher
+workflows, reassess whether this reusable workflow should become the recommended
+path again. Until then, prefer the caller-owned template.
 
-### Pipeline
+## Caller-owned PyPI Trusted Publishing template
 
-1. **build** — `uv build` produces wheel + sdist; uploaded as `pypi-dist` artifact. Includes a tag-on-main guard.
-2. **publish-testpypi** (`environment: testpypi`) — publishes to TestPyPI; verifies install in a clean venv with exponential backoff (5 attempts at 30/60/90/120/150s).
-3. **publish-pypi** (`environment: pypi`) — publishes to production PyPI.
-4. **github-release** — creates a GitHub release with auto-generated notes; attaches artifacts; auto-detects prerelease from `-` in tag.
+Use this pattern in each package repo that publishes to TestPyPI and PyPI with
+Trusted Publishing. The caller repo owns the workflow identity, GitHub
+Environments, PyPI Trusted Publisher records, and any package-specific jobs.
 
-### Caller example
+### One-time package setup
+
+- Claim the package name on [PyPI](https://pypi.org/) and
+  [TestPyPI](https://test.pypi.org/).
+- Create GitHub Environments `testpypi` and `pypi` in the package repo.
+- Configure PyPI Trusted Publisher for the package repo, the workflow path of
+  the caller-owned release workflow, and environment `pypi`.
+- Configure TestPyPI Trusted Publisher for the package repo, the same workflow
+  path, and environment `testpypi`.
+- Copy `scripts/derive-published-version.sh` and
+  `scripts/classify-prerelease.sh` into the package repo, or embed their bodies
+  directly in the local workflow steps.
+
+Use normalized tag tails such as `v1.2.3`, `tools/v1.2.3`, `v1.2.3rc1`, or
+`tools/v1.2.3rc1`. Do not tag prereleases as `v1.2.3-rc1`; the build guard
+requires the tag tail to exactly equal the normalized version emitted by the
+wheel.
+
+The standard trigger shown below matches only plain tags (`v*.*.*`). If your
+tag stream is path-prefixed (for example `tools/v`), add the matching trigger
+pattern (for example `tools/v*.*.*`) so pushes to `tools/v1.2.3` trigger this
+release workflow.
+
+### Standard release workflow
 
 ```yaml
-# .github/workflows/release-tools.yml — tag-driven publish
+name: Release Python Package
+
 on:
   push:
     tags:
-      - 'tools/v*.*.*'
+      - 'v*.*.*'   # for plain tags like `v1.2.3`
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  PACKAGE_NAME: example-pkg
+  PACKAGE_DIR: .
+  VERIFY_COMMAND: example-pkg --version
+  DRAFT_RELEASE: "true"
+  ATTACH_ASSETS: "true"
 
 jobs:
-  publish:
-    uses: j7an/shared-workflows/.github/workflows/publish-pypi.yml@v4
-    with:
-      tag: ${{ github.ref_name }}
-      package-dir: tools
-      testpypi-package: epiphany-tools
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout at tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Verify tag is ancestor of main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          TAG_SHA=$(git rev-list -n1 "$TAG")
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "::error::Tag ${TAG} (${TAG_SHA}) is not an ancestor of origin/main"
+            exit 1
+          fi
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Build wheel and sdist
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: uv build
+
+      - name: Verify built version matches tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/derive-published-version.sh "${PACKAGE_DIR}/dist" "$TAG"
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi-dist
+          path: ${{ env.PACKAGE_DIR }}/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/example-pkg
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pypi-dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          skip-existing: false
+
+  verify-testpypi:
+    needs: publish-testpypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Verify install from TestPyPI
+        env:
+          PACKAGE_NAME: ${{ env.PACKAGE_NAME }}
+          VERIFY_COMMAND: ${{ env.VERIFY_COMMAND }}
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION_TAG##*/}"
+          VERSION="${VERSION#v}"
+          echo "Verifying TestPyPI install of ${PACKAGE_NAME}==${VERSION}"
+
+          INSTALLED=false
+          ATTEMPT=0
+          for SLEEP_SECONDS in 30 60 90 120 150; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Attempt ${ATTEMPT}/5: sleeping ${SLEEP_SECONDS}s before install..."
+            sleep "$SLEEP_SECONDS"
+            rm -rf .verify
+            uv venv .verify
+            . .verify/bin/activate
+            if uv pip install \
+              --index-url https://test.pypi.org/simple/ \
+              --extra-index-url https://pypi.org/simple/ \
+              "${PACKAGE_NAME}==${VERSION}"; then
+              INSTALLED=true
+              break
+            fi
+            echo "Attempt ${ATTEMPT} failed; retrying."
+          done
+
+          if [ "$INSTALLED" != "true" ]; then
+            echo "::error::TestPyPI install verification failed after 5 attempts"
+            exit 1
+          fi
+
+          if [ -n "${VERIFY_COMMAND:-}" ]; then
+            if ! VERIFY_OUTPUT=$(bash -euo pipefail -c "$VERIFY_COMMAND" 2>&1); then
+              printf '%s\n' "$VERIFY_OUTPUT"
+              echo "::error::Verification command failed"
+              exit 1
+            fi
+            printf '%s\n' "$VERIFY_OUTPUT"
+            case "$VERIFY_OUTPUT" in
+              *"$VERSION"*) ;;
+              *)
+                echo "::error::Verification command output did not contain version '${VERSION}'"
+                exit 1
+                ;;
+            esac
+          fi
+
+  publish-pypi:
+    needs: verify-testpypi
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/example-pkg
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pypi-dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: dist/
+
+  github-release:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout at tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Download dist artifact
+        if: env.ATTACH_ASSETS == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pypi-dist
+          path: dist/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION_TAG##*/}"
+          VERSION="${VERSION#v}"
+          IS_PRERELEASE=$(bash scripts/classify-prerelease.sh "$VERSION")
+
+          ARGS=( "$TAG" --generate-notes --title "$TAG" )
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            ARGS+=( --prerelease )
+          fi
+          if [ "$DRAFT_RELEASE" = "true" ]; then
+            ARGS+=( --draft )
+          fi
+          if [ "$ATTACH_ASSETS" = "true" ]; then
+            ARGS+=( dist/*.whl dist/*.tar.gz )
+          fi
+
+          gh release create "${ARGS[@]}"
 ```
 
-### Per-package onboarding checklist
+Set TestPyPI `skip-existing: true` only when rerun ergonomics are worth the
+freshness tradeoff: enabling it can let verification install an old same-version
+artifact already present on TestPyPI. Do not set `skip-existing` on the
+production PyPI publish step.
 
-For each new PyPI package that uses this workflow, complete **once**:
+The verification command is caller-controlled shell text. Pass it through
+`env:` and execute it intentionally with `bash -euo pipefail -c
+"$VERIFY_COMMAND"`; it must never be interpolated directly into `run:`.
 
-- [ ] Claim the package name on [PyPI](https://pypi.org/) and [TestPyPI](https://test.pypi.org/).
-- [ ] On PyPI, configure trusted publisher: workflow `j7an/shared-workflows/.github/workflows/publish-pypi.yml`, ref `v4`, environment `pypi`.
-- [ ] On TestPyPI, configure the same trusted publisher with environment `testpypi`.
-- [ ] Confirm GitHub Environments `testpypi` and `pypi` exist in `j7an/shared-workflows` repo settings.
+### Add a pre-publish CI gate
+
+For packages that run tests before publishing, add a local `test` job and make
+`build` depend on it:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv run ruff check .
+      - run: uv run mypy .
+      - run: uv run pytest
+
+  build:
+    needs: test
+```
+
+### Migration parity table
+
+| To reproduce this behavior | Template setting |
+|---|---|
+| Release stays a draft for human publish | Set `DRAFT_RELEASE: "true"` so `gh release create` receives `--draft`. |
+| Post-install runs console script and asserts version | Set `VERIFY_COMMAND`, for example `example-pkg --version`. |
+| TestPyPI re-upload is skipped for reruns | Set TestPyPI `skip-existing: true`, acknowledging the freshness tradeoff. |
+| Install verification targets the package name | Set `PACKAGE_NAME` to the PyPI/TestPyPI distribution name. |
+| Deployment UI links are preserved | Set caller-local `environment.url` values on `publish-testpypi` and `publish-pypi`. |
+| MCP Registry publish runs after package release | Keep a caller-local MCP job gated on `github-release` success. |
+
+MCP Registry publishing remains caller-local. A package such as `nexus-mcp`
+should keep its MCP job in the package repo with its own `id-token: write`
+permission and gate it on the local release workflow result.
 
 ### Recovery from a failed publish
 
-PyPI never lets you re-publish the same version, even after deletion. If a publish fails:
+PyPI never lets you re-publish the same version, even after deletion. If a
+publish fails:
 
-- **TestPyPI fail, PyPI not yet attempted:** the workflow halts; recover by tagging a new prerelease (`tools/v0.1.0-rc2`) once the underlying issue is fixed.
-- **PyPI fail after TestPyPI success:** rare; usually a transient GitHub→PyPI handshake problem. Re-run the failed job from the Actions UI. If it persists, tag a new patch.
-- **GitHub release fail after PyPI success:** the package is live on PyPI; manually create the release with `gh release create` against the same tag, or re-run the `github-release` job (note: `gh release create` is not idempotent — if a release already exists for the tag, the re-run will fail with "release already exists" and you'll need to use `gh release edit` to update it).
+- **TestPyPI fail, PyPI not yet attempted:** fix the issue, then tag a new
+  prerelease or intentionally rerun with TestPyPI `skip-existing: true` when
+  the existing TestPyPI artifact is the artifact you meant to verify.
+- **PyPI fail after TestPyPI success:** re-run the failed job from the Actions
+  UI if the failure was transient. If the version was rejected as already
+  existing, tag a new patch or prerelease.
+- **GitHub release fail after PyPI success:** the package is live on PyPI.
+  Create or repair the release with the first-party `gh` CLI. `gh release
+  create` fails loudly when the release already exists.
