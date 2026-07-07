@@ -240,7 +240,7 @@ codeql_queries'
   assert_contains "$block" "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
   assert_contains "$block" "fetch-depth: 0"
   assert_contains "$block" "persist-credentials: false"
-  assert_contains "$block" "trufflesecurity/trufflehog@30d5bb91af1a771378349dbbb0c82129392acf70 # v3.95.6"
+  assert_contains "$block" "trufflesecurity/trufflehog@00155c9dc586f34d189adc83d3ac2698c2ec551f # v3.95.8"
   assert_contains "$block" "continue-on-error: true"
   assert_contains "$block" "extra_args: --results=verified"
   assert_contains "$block" "steps.trufflehog.outcome == 'failure'"
