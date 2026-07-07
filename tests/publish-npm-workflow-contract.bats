@@ -70,12 +70,12 @@ run_blocks() {
   grep -qF 'cancel-in-progress: false' "$YAML"
 }
 
-@test "build job checks out the tag and verifies it is on main" {
+@test "build job checks out full tag history and verifies it is on main" {
   job="$(build_job)"
   assert_contains "$job" 'ref: ${{ inputs.tag }}'
   assert_contains "$job" 'fetch-depth: 0'
   assert_contains "$job" 'persist-credentials: false'
-  assert_contains "$job" 'git fetch origin main'
+  assert_lacks "$job" 'git fetch origin main'
   assert_contains "$job" 'merge-base --is-ancestor'
 }
 
