@@ -468,6 +468,99 @@ The workflow run summary includes a per-entry table:
 | `server.json` | `.packages[0].version` | `0.8.1` -> `0.10.0` | updated |
 | `package.json` | `.version` | `0.10.0` | already up to date |
 
+## `publish-npm.yml`
+
+Builds one npm tarball with `npm pack --json`, publishes that verified tarball
+to npm through npm trusted publishing, verifies registry visibility, optionally
+runs a caller-owned install check, and creates or updates a GitHub Release with
+the same `*.tgz` attached.
+
+### Trusted Publishing status
+
+This reusable workflow is intentionally supported for npm trusted publishing
+under npm's current GitHub Actions semantics.
+
+This differs from the PyPI guidance below. PyPI currently does not authorize a
+cross-repo reusable workflow as the Trusted Publisher workflow, so new PyPI
+package repos should use the caller-owned template. npm validates the caller workflow filename for `workflow_call` releases, not the reusable workflow
+that contains the `npm publish` command. That means each package repo configures
+npm trusted publishing against its own caller workflow, while the shared publish
+logic can live in `j7an/shared-workflows`.
+
+If npm changes this validation model to require the workflow containing
+`npm publish`, revisit this workflow and move npm publishing to a caller-owned
+template.
+
+### Inputs
+
+| Input | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `tag` | string | yes | - | Semver tag to publish, such as `v1.2.3`. |
+| `package-name` | string | yes | - | npm package name used for registry verification. |
+| `test-command` | string | no | `""` | Optional pre-pack command run in the caller checkout. |
+| `pack-contents-script` | string | no | `""` | Optional script run as `sh <script> pack.json` after `npm pack --json`. |
+| `verify-command` | string | no | `""` | Optional post-registry verification command run with `PACKAGE` and `VERSION` in the environment. |
+
+If `npm pack` depends on installed dependencies, generated files, or lifecycle
+scripts such as `prepare` or `prepack`, include the required setup in
+`test-command`, for example `npm ci && npm test && npm run build`. The reusable
+workflow does not run `npm ci` by default because not every npm package uses a
+lockfile or a build step.
+
+### Caller setup
+
+The caller workflow must grant:
+
+```yaml
+permissions:
+  contents: write
+  id-token: write
+```
+
+Configure the npm trusted publisher in the package settings, not in this repo:
+
+- Repository: the package repo, for example `j7an/superpowers-wrapper`
+- Workflow filename: the workflow filename in the package repo, for example
+  `release.yml`
+- Environment: `npm`
+- Allowed actions: `npm publish` only, not `npm stage publish`
+
+npm trusted publishing requires npm CLI `>= 11.5.1`; the reusable workflow
+enforces that floor before publishing. Do not pass `--provenance` or set
+`NPM_CONFIG_PROVENANCE`. npm generates provenance automatically for a public package
+published from a public repository through trusted publishing.
+
+### Example caller
+
+```yaml
+name: Publish npm
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    uses: j7an/shared-workflows/.github/workflows/publish-npm.yml@v4
+    with:
+      tag: ${{ github.ref_name }}
+      package-name: superpowers-wrapper
+      test-command: sh tests/run.sh
+      pack-contents-script: tests/assert_pack_contents.sh
+      verify-command: |
+        OUT=$(npx --yes "${PACKAGE}@${VERSION}" --version)
+        test "$OUT" = "$VERSION"
+```
+
+For packages without a CLI or install smoke test, omit `verify-command`. The
+workflow still verifies that `npm view <package>@<version> version` returns
+success before creating the GitHub Release.
+
 ## `publish-pypi.yml`
 
 Builds a Python package with `uv build`, stages on TestPyPI with install
