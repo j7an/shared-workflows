@@ -1,0 +1,243 @@
+name: Publish npm
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+        description: "Semver tag to publish, such as v1.2.3"
+      package-name:
+        type: string
+        required: true
+        description: "npm package name used for post-publish registry verification"
+      test-command:
+        type: string
+        required: false
+        default: ""
+        description: "Optional caller repo command to run before packing"
+      pack-contents-script:
+        type: string
+        required: false
+        default: ""
+        description: "Optional caller repo script run as 'sh <script> pack.json' after npm pack"
+      verify-command:
+        type: string
+        required: false
+        default: ""
+        description: "Optional post-registry verification command run with PACKAGE and VERSION in env"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-npm-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout at tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag is ancestor of main
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          TAG_SHA=$(git rev-list -n1 "$TAG")
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "::error::Tag ${TAG} (${TAG_SHA}) is not an ancestor of origin/main - refusing to publish"
+            exit 1
+          fi
+          echo "Tag ${TAG} (${TAG_SHA}) is an ancestor of main - proceeding."
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+
+      - name: Verify tag version matches package.json
+        id: version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION=$(printf '%s' "$TAG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$' || true)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not parse semver version from tag '$TAG'"
+            exit 1
+          fi
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version ${VERSION} != package.json version ${PKG_VERSION} - refusing to publish"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Run caller test command
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: |
+          if [ -n "$TEST_COMMAND" ]; then
+            sh -c "$TEST_COMMAND"
+          else
+            echo "No caller test command configured; skipping."
+          fi
+
+      - name: Pack once and assert tarball contents
+        env:
+          PACK_CONTENTS_SCRIPT: ${{ inputs.pack-contents-script }}
+        run: |
+          npm pack --json > pack.json
+          if [ -n "$PACK_CONTENTS_SCRIPT" ]; then
+            sh "$PACK_CONTENTS_SCRIPT" pack.json
+          fi
+          TARBALL_COUNT=$(find . -maxdepth 1 -type f -name '*.tgz' | wc -l | tr -d ' ')
+          if [ "$TARBALL_COUNT" != "1" ]; then
+            echo "::error::Expected exactly one npm tarball, found ${TARBALL_COUNT}"
+            find . -maxdepth 1 -type f -name '*.tgz' -print
+            exit 1
+          fi
+          ls -lh ./*.tgz
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-dist
+          path: "*.tgz"
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write   # OIDC for npm trusted publishing
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+
+      - name: Enforce publish runtime floors
+        run: |
+          NODE_V=$(node --version | sed 's/^v//')
+          NPM_V=$(npm --version)
+          printf '24.0.0\n%s\n' "$NODE_V" | sort -V -C || { echo "::error::node ${NODE_V} is below the Node 24 LTS publish floor"; exit 1; }
+          printf '11.5.1\n%s\n' "$NPM_V" | sort -V -C || { echo "::error::npm ${NPM_V} is below the 11.5.1 trusted-publishing floor"; exit 1; }
+          echo "node ${NODE_V} / npm ${NPM_V} meet the publish runtime floors"
+
+      - name: Download tarball artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-dist
+          path: .
+
+      - name: Publish to npm
+        env:
+          PACKAGE: ${{ inputs.package-name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${PACKAGE}@${VERSION} already exists on npm; skipping npm publish."
+            exit 0
+          fi
+          npm publish ./*.tgz
+
+      - name: Verify on registry and run caller verification
+        env:
+          PACKAGE: ${{ inputs.package-name }}
+          VERSION: ${{ needs.build.outputs.version }}
+          VERIFY_COMMAND: ${{ inputs.verify-command }}
+        run: |
+          run_caller_verification() {
+            if [ -n "$VERIFY_COMMAND" ]; then
+              sh -c "$VERIFY_COMMAND"
+            else
+              echo "No caller verify command configured; registry check is the final verification."
+            fi
+          }
+
+          ATTEMPT=1
+          echo "Attempt 1/6: checking registry before sleep..."
+          if npm view "${PACKAGE}@${VERSION}" version; then
+            echo "Registry lists ${PACKAGE}@${VERSION}"
+            run_caller_verification
+            exit 0
+          fi
+          echo "Attempt ${ATTEMPT} failed - will retry."
+
+          SLEEPS="30 60 90 120 150"
+          for s in $SLEEPS; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Attempt ${ATTEMPT}/6: sleeping ${s}s before registry check..."
+            sleep "$s"
+            if npm view "${PACKAGE}@${VERSION}" version; then
+              echo "Registry lists ${PACKAGE}@${VERSION}"
+              run_caller_verification
+              exit 0
+            fi
+            echo "Attempt ${ATTEMPT} failed - will retry."
+          done
+          echo "::error::Registry verification failed after 6 attempts"
+          exit 1
+
+  github-release:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create GitHub release, upload tarball asset
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout at tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download tarball artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-dist
+          path: .
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          ls ./*.tgz >/dev/null
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, uploading tarball asset"
+            gh release upload "$TAG" ./*.tgz --clobber
+            exit 0
+          fi
+          ARGS=( "$TAG" --title "$TAG" --generate-notes --verify-tag )
+          if [[ "$VERSION" == *-* ]]; then
+            ARGS+=( --prerelease )
+          fi
+          ARGS+=( ./*.tgz )
+          gh release create "${ARGS[@]}"
