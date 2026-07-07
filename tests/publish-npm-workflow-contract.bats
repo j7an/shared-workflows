@@ -39,6 +39,7 @@ assert_lacks() {
 run_blocks() {
   awk '
     /^        run: \|$/ { in_run=1; next }
+    /^        run: / { sub(/^        run: /, ""); print; next }
     in_run && /^      - / { in_run=0; next }
     in_run && /^    [A-Za-z0-9_-]+:/ { in_run=0; next }
     in_run { print }
@@ -73,6 +74,7 @@ run_blocks() {
   job="$(build_job)"
   assert_contains "$job" 'ref: ${{ inputs.tag }}'
   assert_contains "$job" 'fetch-depth: 0'
+  assert_contains "$job" 'persist-credentials: false'
   assert_contains "$job" 'git fetch origin main'
   assert_contains "$job" 'merge-base --is-ancestor'
 }
@@ -117,12 +119,15 @@ run_blocks() {
 @test "publish job publishes the downloaded tarball without explicit provenance config" {
   job="$(publish_job)"
   assert_contains "$job" 'name: npm-dist'
+  assert_contains "$job" 'if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>&1; then'
+  assert_contains "$job" 'already exists on npm; skipping npm publish.'
   assert_contains "$job" 'npm publish ./*.tgz'
   ! grep -qE -- '--provenance|NPM_CONFIG_PROVENANCE' "$YAML"
 }
 
 @test "publish job verifies registry visibility and optional caller verify-command" {
   job="$(publish_job)"
+  assert_contains "$job" 'Attempt 1/6: checking registry before sleep...'
   assert_contains "$job" 'npm view "${PACKAGE}@${VERSION}" version'
   assert_contains "$job" 'VERIFY_COMMAND: ${{ inputs.verify-command }}'
   assert_contains "$job" 'if [ -n "$VERIFY_COMMAND" ]; then'
@@ -134,6 +139,7 @@ run_blocks() {
   assert_contains "$job" 'needs: [build, publish]'
   assert_contains "$job" 'contents: write'
   assert_contains "$job" 'name: npm-dist'
+  assert_contains "$job" 'persist-credentials: false'
   assert_contains "$job" 'gh release upload "$TAG" ./*.tgz --clobber'
   assert_contains "$job" 'ARGS+=( ./*.tgz )'
   assert_contains "$job" '--generate-notes'
@@ -149,5 +155,6 @@ run_blocks() {
 
 @test "inputs reach shell run blocks through env indirection" {
   runs="$(run_blocks)"
+  assert_contains "$runs" 'npm publish ./*.tgz'
   assert_lacks "$runs" '${{ inputs.'
 }

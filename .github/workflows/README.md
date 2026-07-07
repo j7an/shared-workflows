@@ -482,9 +482,10 @@ under npm's current GitHub Actions semantics.
 
 This differs from the PyPI guidance below. PyPI currently does not authorize a
 cross-repo reusable workflow as the Trusted Publisher workflow, so new PyPI
-package repos should use the caller-owned template. npm validates the caller workflow filename for `workflow_call` releases, not the reusable workflow
-that contains the `npm publish` command. That means each package repo configures
-npm trusted publishing against its own caller workflow, while the shared publish
+package repos should use the caller-owned template. npm validates the caller
+workflow filename for `workflow_call` releases, not the reusable workflow that
+contains the `npm publish` command. That means each package repo configures npm
+trusted publishing against its own caller workflow, while the shared publish
 logic can live in `j7an/shared-workflows`.
 
 If npm changes this validation model to require the workflow containing
@@ -527,8 +528,8 @@ Configure the npm trusted publisher in the package settings, not in this repo:
 
 npm trusted publishing requires npm CLI `>= 11.5.1`; the reusable workflow
 enforces that floor before publishing. Do not pass `--provenance` or set
-`NPM_CONFIG_PROVENANCE`. npm generates provenance automatically for a public package
-published from a public repository through trusted publishing.
+`NPM_CONFIG_PROVENANCE`. npm generates provenance automatically for a public
+package published from a public repository through trusted publishing.
 
 ### Example caller
 

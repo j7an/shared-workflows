@@ -17,6 +17,10 @@ assert_contains() {
   [[ "$text" == *"$expected"* ]]
 }
 
+normalize_ws() {
+  tr '\n' ' ' | tr -s ' '
+}
+
 @test "README documents publish-npm.yml" {
   section="$(publish_npm_section)"
   assert_contains "$section" '## `publish-npm.yml`'
@@ -25,7 +29,8 @@ assert_contains() {
 
 @test "README records npm-vs-PyPI reusable workflow distinction" {
   section="$(publish_npm_section)"
-  assert_contains "$section" 'npm validates the caller workflow filename'
+  normalized="$(printf '%s\n' "$section" | normalize_ws)"
+  assert_contains "$normalized" 'npm validates the caller workflow filename'
   assert_contains "$section" 'If npm changes this validation model'
   assert_contains "$section" 'caller-owned template'
 }
@@ -39,8 +44,9 @@ assert_contains() {
 
 @test "README documents provenance caveat" {
   section="$(publish_npm_section)"
-  assert_contains "$section" 'public package'
-  assert_contains "$section" 'public repository'
+  normalized="$(printf '%s\n' "$section" | normalize_ws)"
+  assert_contains "$normalized" 'public package'
+  assert_contains "$normalized" 'public repository'
   assert_contains "$section" 'Do not pass `--provenance`'
 }
 
@@ -63,4 +69,22 @@ assert_contains() {
   assert_contains "$section" 'prepare` or `prepack`'
   assert_contains "$section" 'npm ci && npm test && npm run build'
   assert_contains "$section" 'does not run `npm ci` by default'
+}
+
+@test "README publish-npm prose lines stay wrapped" {
+  section="$(publish_npm_section)"
+  in_fence=0
+  while IFS= read -r line; do
+    if [[ "$line" == '```'* ]]; then
+      if [ "$in_fence" -eq 0 ]; then
+        in_fence=1
+      else
+        in_fence=0
+      fi
+      continue
+    fi
+    [ "$in_fence" -eq 1 ] && continue
+    [[ "$line" == '|'* ]] && continue
+    [ "${#line}" -le 88 ]
+  done <<< "$section"
 }
