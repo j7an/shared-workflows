@@ -589,6 +589,7 @@ releases.
 | `tag` | string | yes | - | Semver tag to publish, such as `tools/v0.1.0` or `v1.2.3`. |
 | `package-dir` | string | no | `.` | Directory containing `pyproject.toml` relative to repo root. |
 | `testpypi-package` | string | yes | - | Distribution name on TestPyPI for install verification. |
+| `verify-python` | string | no | `3.13` | Python version used for TestPyPI install verification. |
 | `draft-release` | boolean | no | `false` | Create the GitHub release as a draft. |
 | `attach-assets` | boolean | no | `true` | Attach wheel and sdist to the GitHub release. |
 
@@ -647,6 +648,7 @@ concurrency:
 env:
   PACKAGE_NAME: example-pkg
   PACKAGE_DIR: .
+  VERIFY_PYTHON: "3.13"
   VERIFY_COMMAND: example-pkg --version
   DRAFT_RELEASE: "true"
   ATTACH_ASSETS: "true"
@@ -742,12 +744,21 @@ jobs:
       - name: Verify install from TestPyPI
         env:
           PACKAGE_NAME: ${{ env.PACKAGE_NAME }}
+          VERIFY_PYTHON: ${{ env.VERIFY_PYTHON }}
           VERIFY_COMMAND: ${{ env.VERIFY_COMMAND }}
           VERSION_TAG: ${{ github.ref_name }}
         run: |
           VERSION="${VERSION_TAG##*/}"
           VERSION="${VERSION#v}"
-          echo "Verifying TestPyPI install of ${PACKAGE_NAME}==${VERSION}"
+          if ! printf '%s' "$VERIFY_PYTHON" | grep -qE '^[0-9]+(\.[0-9]+){1,2}$'; then
+            echo "::error::VERIFY_PYTHON must be a version like 3.13 or 3.13.2, got '$VERIFY_PYTHON'"
+            exit 1
+          fi
+          if ! printf '%s' "$PACKAGE_NAME" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+            echo "::error::PACKAGE_NAME contains characters that cannot be safely written to pyproject.toml: '$PACKAGE_NAME'"
+            exit 1
+          fi
+          echo "Verifying TestPyPI install of ${PACKAGE_NAME}==${VERSION} with Python ${VERIFY_PYTHON}"
 
           INSTALLED=false
           ATTEMPT=0
@@ -756,12 +767,25 @@ jobs:
             echo "Attempt ${ATTEMPT}/5: sleeping ${SLEEP_SECONDS}s before install..."
             sleep "$SLEEP_SECONDS"
             rm -rf .verify
-            uv venv .verify
-            . .verify/bin/activate
-            if uv pip install \
-              --index-url https://test.pypi.org/simple/ \
-              --extra-index-url https://pypi.org/simple/ \
-              "${PACKAGE_NAME}==${VERSION}"; then
+            mkdir -p .verify
+            cat > .verify/pyproject.toml <<EOF
+          [project]
+          name = "testpypi-verify"
+          version = "0.0.0"
+          requires-python = ">=${VERIFY_PYTHON}"
+          dependencies = [
+            "${PACKAGE_NAME}==${VERSION}",
+          ]
+
+          [tool.uv.sources]
+          "${PACKAGE_NAME}" = { index = "testpypi" }
+
+          [[tool.uv.index]]
+          name = "testpypi"
+          url = "https://test.pypi.org/simple/"
+          explicit = true
+          EOF
+            if (cd .verify && uv sync --python "$VERIFY_PYTHON" --refresh-package "$PACKAGE_NAME"); then
               INSTALLED=true
               break
             fi
@@ -774,7 +798,7 @@ jobs:
           fi
 
           if [ -n "${VERIFY_COMMAND:-}" ]; then
-            if ! VERIFY_OUTPUT=$(bash -euo pipefail -c "$VERIFY_COMMAND" 2>&1); then
+            if ! VERIFY_OUTPUT=$(cd .verify && uv run --no-sync bash -euo pipefail -c "$VERIFY_COMMAND" 2>&1); then
               printf '%s\n' "$VERIFY_OUTPUT"
               echo "::error::Verification command failed"
               exit 1
@@ -860,7 +884,16 @@ jobs:
           fi
 
           gh release create "${ARGS[@]}"
-```
+  ```
+
+TestPyPI install verification uses the explicit `VERIFY_PYTHON` version. Set it to a
+Python version supported by the package under test.
+
+The template writes an ephemeral `.verify/pyproject.toml` and pins only the package
+under test to TestPyPI with an explicit uv source. Normal dependencies continue to
+resolve from PyPI. Do not replace this with the pip-interface multi-index pattern;
+that pattern prioritizes extra indexes over the default index, which is not the
+intended source policy here.
 
 Set TestPyPI `skip-existing: true` only when rerun ergonomics are worth the
 freshness tradeoff: enabling it can let verification install an old same-version
@@ -868,10 +901,12 @@ artifact already present on TestPyPI. Do not set `skip-existing` on the
 production PyPI publish step.
 
 The verification command is caller-controlled shell text. Pass it through
-`env:` and execute it intentionally with `bash -euo pipefail -c
-"$VERIFY_COMMAND"`; it must never be interpolated directly into `run:`.
+`env:` and execute it intentionally with
+`bash -euo pipefail -c "$VERIFY_COMMAND"`; it must never be interpolated
+directly into `run:`.
 
 ### Add a pre-publish CI gate
+
 
 For packages that run tests before publishing, add a local `test` job and make
 `build` depend on it:

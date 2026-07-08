@@ -41,10 +41,20 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 **Consumer-facing reusable workflows:**
 
 - `dependency-safety.yml` — scans each Dependabot PR for advisories; post-PR release-age verification is opt-in via `release_age_policy` (default `"off"`; `advisory` labels + suppresses auto-merge, `blocking` fails the gate), and `auto_merge` defaults to `true`. Pipeline: extract → fallback → guard → age check (policy-gated) → GHSA/OSV scan → scorecard → comment → labels; the verdict layer is deterministic: `failure` on age violation only under `blocking`, `error` on extraction/scan failure, `success` otherwise. Verdict translation lives in `safety-verdict.sh`. No rescan companion — verifier is single-shot per PR event.
-- `tag-release.yml` — computes the next semver tag from Conventional Commits, optionally runs `bump-version-files.sh` against `.version-bump.json`, creates the tag via the GitHub Git Data API (so commits/tags auto-sign under the App identity). Requires a GitHub App key (`RELEASE_BOT_PRIVATE_KEY` secret, `RELEASE_BOT_APP_ID` var).
+- `tag-release.yml` — computes the next semver tag from Conventional Commits, optionally runs `bump-version-files.sh` against `.version-bump.json`, creates any bump commit through the GitHub Git Data API, verifies that workflow-created bump commit before advancing `main`, then creates the release tag as a lightweight ref to the target commit. Requires a GitHub App key (`RELEASE_BOT_PRIVATE_KEY` secret, `RELEASE_BOT_APP_ID` var). Do not assume GitHub auto-signs annotated tag objects.
 - `publish-pypi.yml` — `uv build` → TestPyPI (with install verification) → PyPI via OIDC trusted publishing → GitHub Release.
 
-**Release machinery for this repo itself:** `release-self.yml` (manual `workflow_dispatch`) → calls `tag-release.yml` → calls `release.yml`. `release.yml` is `workflow_call`-only (no `push: tags` trigger) and floats the major/minor tags (`v2` → `v2.3` → `v2.3.1`). Merging to `main` does **not** auto-release; a release is always a deliberate `release-self.yml` dispatch.
+**Release machinery for this repo itself:** `release-self.yml` (manual `workflow_dispatch`) → calls `tag-release.yml` → calls `release.yml`. `release.yml` is `workflow_call`-only (no `push: tags` trigger) and floats the major/minor tags (`v2` → `v2.3` → `v2.3.1`) as lightweight refs to the release target commit.
+
+### Release provenance guardrails
+
+- GitHub App-created release bump commits can verify when created through the Git Data API without custom author/committer fields; keep that verification as a hard gate before `main` advances.
+- Release tags and floating major/minor tags should be lightweight refs to the target commit. Do not assume GitHub auto-signs annotated tag objects.
+- Distinguish tag refs, tag objects, and peeled target commits when reviewing release changes.
+- Target commit verification is reported for provenance, but it is not a hard gate when the target is the caller/analyzed commit; consumer repos may legitimately have unverified commits.
+- Do not rely on runner default Python in release verification jobs. Make the interpreter explicit.
+- For TestPyPI plus PyPI verification with uv, use an ephemeral project with a TestPyPI source pin for the package under test. Do not use `uv pip install --index-url TestPyPI --extra-index-url PyPI` for this check.
+- Require downstream canary evidence before declaring release workflow changes fixed.
 
 **CI:** `ci-scripts.yml` (bats + inline-sync + workflow-call lint), `ci-safety.yml` (dogfoods `dependency-safety.yml` on this repo's own Dependabot PRs), `security.yml` (zizmor workflow analysis).
 

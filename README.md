@@ -460,6 +460,14 @@ jobs:
 
 Releases are cut manually via the `release-self.yml` workflow dispatch. Merging a PR to `main` does **not** create a tag on its own. When a maintainer dispatches `release-self.yml` (with `bump: auto`), it scans Conventional Commits since the last tag, computes the next semver tag, and updates the floating `vX` / `vX.Y` tags to point at the new commit.
 
+Release tags are created as lightweight refs that point directly at the target
+commit. When `tag-release.yml` creates a version-bump commit, that commit must
+verify before `main` advances. When no bump commit is created, target commit
+verification is reported in the summary but is not a hard gate, because caller
+repositories may legitimately pass unverified commits.
+
+Floating major and minor tags are also lightweight refs. `release.yml` peels the immutable release tag to its target commit, then updates or creates the floating refs through the GitHub API with forced ref updates for existing floating tags.
+
 ## Known caller-side constraints
 
 The reusable workflows in this repo are **self-contained at runtime**: they must not fetch `j7an/shared-workflows` source at runtime, and they must not reference caller-scoped context variables as if they were reusable-workflow-scoped.
