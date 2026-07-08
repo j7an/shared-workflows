@@ -35,8 +35,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          [ -n "$TAG" ] || { echo "::error::tag input is empty — caller did not pass a tag"; exit 1; }
-          # Parse semver components: v1.2.3 → MAJOR=v1, MINOR=v1.2
+          [ -n "$TAG" ] || { echo "::error::tag input is empty - caller did not pass a tag"; exit 1; }
+          REPO="${GITHUB_REPOSITORY}"
+
+          # Parse semver components: v1.2.3 -> MAJOR=v1, MINOR=v1.2
           MAJOR=${TAG%%.*}
           MINOR=${TAG%.*}
 
@@ -44,18 +46,75 @@ jobs:
           echo "Minor tag:  $MINOR (floats to latest patch)"
           echo "Major tag:  $MAJOR (floats to latest minor+patch)"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TAG_REF=$(gh api "repos/${REPO}/git/ref/tags/${TAG}")
+          TAG_TYPE=$(printf '%s\n' "$TAG_REF" | jq -r '.object.type')
+          TAG_SHA=$(printf '%s\n' "$TAG_REF" | jq -r '.object.sha')
 
-          # Update minor floating tag (e.g., v1.2 → v1.2.3)
-          git tag -fa "$MINOR" -m "Release $TAG"
-          git push origin "$MINOR" --force
-          echo "Updated $MINOR → $TAG"
+          case "$TAG_TYPE" in
+            commit)
+              TARGET_SHA="$TAG_SHA"
+              ;;
+            tag)
+              TAG_OBJECT=$(gh api "repos/${REPO}/git/tags/${TAG_SHA}")
+              PEELED_TYPE=$(printf '%s\n' "$TAG_OBJECT" | jq -r '.object.type')
+              if [ "$PEELED_TYPE" != "commit" ]; then
+                echo "::error::Tag ${TAG} points at tag object ${TAG_SHA}, which points at ${PEELED_TYPE}; expected commit"
+                exit 1
+              fi
+              TARGET_SHA=$(printf '%s\n' "$TAG_OBJECT" | jq -r '.object.sha')
+              ;;
+            *)
+              echo "::error::Tag ${TAG} points at ${TAG_TYPE}; expected commit or tag object"
+              exit 1
+              ;;
+          esac
 
-          # Update major floating tag (e.g., v1 → v1.2.3)
-          git tag -fa "$MAJOR" -m "Release $TAG"
-          git push origin "$MAJOR" --force
-          echo "Updated $MAJOR → $TAG"
+          TARGET_VERIFIED=$(gh api "repos/${REPO}/git/commits/${TARGET_SHA}" --jq '.verification.verified')
+          TARGET_REASON=$(gh api "repos/${REPO}/git/commits/${TARGET_SHA}" --jq '.verification.reason')
+
+          update_floating_ref() {
+            local ref_name="$1" target_sha="$2"
+            local err_file patch_status
+            err_file=$(mktemp)
+
+            if gh api -X PATCH "repos/${REPO}/git/refs/tags/${ref_name}" \
+              -f sha="$target_sha" \
+              -F force=true 2>"$err_file"; then
+              rm -f "$err_file"
+              echo "Updated ${ref_name} -> ${target_sha}"
+              return 0
+            else
+              patch_status=$?
+            fi
+
+            if gh api "repos/${REPO}/git/ref/tags/${ref_name}" >/dev/null 2>&1; then
+              cat "$err_file" >&2
+              rm -f "$err_file"
+              echo "::error::Failed to move existing refs/tags/${ref_name}"
+              return "$patch_status"
+            fi
+
+            rm -f "$err_file"
+            gh api -X POST "repos/${REPO}/git/refs" \
+              -f ref="refs/tags/${ref_name}" \
+              -f sha="$target_sha"
+            echo "Created ${ref_name} -> ${target_sha}"
+          }
+
+          update_floating_ref "$MINOR" "$TARGET_SHA"
+          update_floating_ref "$MAJOR" "$TARGET_SHA"
+
+          {
+            echo "### Floating tags updated"
+            echo ""
+            echo "**Immutable tag:** \`$TAG\`"
+            echo "**Target commit SHA:** \`$TARGET_SHA\`"
+            echo "**Target commit verification:** \`verified=$TARGET_VERIFIED\` \`reason=$TARGET_REASON\`"
+            echo "**Minor tag:** \`$MINOR\` -> \`$TARGET_SHA\`"
+            echo "**Major tag:** \`$MAJOR\` -> \`$TARGET_SHA\`"
+            echo ""
+            echo "Floating tags were updated as lightweight refs. Target verification is reported for provenance and is not a gate in this workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish GitHub Release
         env:
