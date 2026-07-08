@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # pypi-publish-template-docs.bats - lint-grade checks for PyPI publish docs.
 
-README=".github/workflows/README.md"
+README="README.md"
 
 assert_contains() {
   case "$1" in
@@ -112,4 +112,25 @@ normalize_text() {
   assert_contains "$section" "standard trigger"
   assert_contains "$section" "tools/v*.*.*"
   assert_contains "$section" "add the matching trigger pattern"
+}
+
+@test "template verifies TestPyPI through an explicit uv project source pin" {
+  section=$(normalize_text "$(template_section)")
+  assert_contains "$section" 'VERIFY_PYTHON: "3.13"'
+  assert_contains "$section" 'TestPyPI install verification uses the explicit `VERIFY_PYTHON` version'
+  assert_contains "$section" 'Set it to a Python version supported by the package under test.'
+  assert_contains "$section" 'The template writes an ephemeral `.verify/pyproject.toml`'
+  assert_contains "$section" 'Do not replace this with the pip-interface multi-index pattern'
+  assert_contains "$section" 'rm -rf .verify'
+  assert_contains "$section" 'cat > .verify/pyproject.toml'
+  assert_contains "$section" 'requires-python = ">='
+  assert_contains "$section" '[tool.uv.sources]'
+  assert_contains "$section" '"${PACKAGE_NAME}" = { index = "testpypi" }'
+  assert_contains "$section" '[[tool.uv.index]]'
+  assert_contains "$section" 'explicit = true'
+  assert_contains "$section" 'uv sync --python "$VERIFY_PYTHON" --refresh-package "$PACKAGE_NAME"'
+  assert_contains "$section" 'uv run --no-sync bash -euo pipefail -c "$VERIFY_COMMAND"'
+  assert_lacks "$section" 'uv pip install'
+  assert_lacks "$section" '--index-url https://test.pypi.org/simple/'
+  assert_lacks "$section" '--extra-index-url https://pypi.org/simple/'
 }
