@@ -95,33 +95,77 @@ extract_step_body() {
   fi
 }
 
-@test "invariant: bump-commit and tag payloads omit author/committer/tagger fields" {
-  # Strip comment-only lines first — the workflow code's own commentary
-  # legitimately mentions these field names (e.g., "NO author/committer
-  # fields — auto-signs"). The test enforces that the words appear ONLY
-  # in comments, never in code positions where they could become real
-  # identity overrides via a jq object literal, gh api -f/-F/--field flag,
-  # or YAML key.
+@test "invariant: bump-commit payload omits author and committer fields" {
   body_bump=$(extract_step_body "Bump version files" | grep -v '^[[:space:]]*#')
-  body_tag=$(extract_step_body "Create and push tag" | grep -v '^[[:space:]]*#')
   if printf '%s' "$body_bump" | grep -qF 'git push origin HEAD:main'; then
-    skip "Phase A baseline — checks apply after Phase B"
+    skip "Phase A baseline - checks apply after Git Data API bump path"
   fi
-  # Word-boundary match catches every escape hatch: "author", 'author',
-  # author: (jq literal), -f author=, -F author=, --field author=.
-  # If a real workflow change needs one of these field names in code
-  # for a non-identity-override reason, the test must be updated
-  # deliberately, with a comment explaining why.
   for field in 'author' 'committer'; do
     if printf '%s' "$body_bump" | grep -qE "\\b${field}\\b"; then
-      echo "VIOLATION: '$field' appears in Bump step (non-comment context) — disables auto-signing if used as a payload field name (spec §3.3)"
+      echo "VIOLATION: '$field' appears in Bump step (non-comment context) - disables auto-signing if used as a payload field name"
       printf '%s' "$body_bump" | grep -nE "\\b${field}\\b"
       false
     fi
   done
-  if printf '%s' "$body_tag" | grep -qE '\btagger\b'; then
-    echo "VIOLATION: 'tagger' appears in Tag step (non-comment context) — disables auto-signing if used as a payload field name (spec §3.3)"
-    printf '%s' "$body_tag" | grep -nE '\btagger\b'
+}
+
+@test "invariant: release workflows do not create annotated tag objects" {
+  for workflow in "$REPO_ROOT/.github/workflows/tag-release.yml" "$REPO_ROOT/.github/workflows/release.yml"; do
+    body=$(grep -v '^[[:space:]]*#' "$workflow")
+    if printf '%s' "$body" | grep -qE 'POST "repos/\$\{REPO\}/git/tags"|POST "repos/[^"]*/git/tags"'; then
+      echo "VIOLATION: $workflow creates annotated tag objects with POST /git/tags"
+      false
+    fi
+    if printf '%s' "$body" | grep -qE 'git tag -a|git tag -fa|git push origin "\$MINOR"|git push origin "\$MAJOR"'; then
+      echo "VIOLATION: $workflow uses local tag creation or push for release tags"
+      false
+    fi
+  done
+}
+
+@test "invariant: tag-release creates immutable tag refs directly to TAG_TARGET_SHA" {
+  body=$(extract_step_body "Create and push tag")
+  [ -n "$body" ]
+  printf '%s' "$body" | grep -qF 'gh api -X POST "repos/${REPO}/git/refs"' || {
+    echo "VIOLATION: Create and push tag does not create refs via GitHub API"
+    false
+  }
+  printf '%s' "$body" | grep -qF -- '-f ref="refs/tags/${NEXT_TAG}"' || {
+    echo "VIOLATION: immutable tag ref is not refs/tags/\${NEXT_TAG}"
+    false
+  }
+  printf '%s' "$body" | grep -qF -- '-f sha="$TAG_TARGET_SHA"' || {
+    echo "VIOLATION: immutable tag ref does not point directly at TAG_TARGET_SHA"
+    false
+  }
+  if printf '%s' "$body" | grep -qF 'TAG_OBJECT_SHA'; then
+    echo "VIOLATION: Create and push tag still carries annotated tag object state"
     false
   fi
+}
+
+@test "invariant: tag-release target verification is report-only" {
+  body=$(extract_step_body "Create and push tag")
+  [ -n "$body" ]
+  printf '%s' "$body" | grep -qF 'Target commit verification' || {
+    echo "VIOLATION: target commit verification is not reported in the tag summary"
+    false
+  }
+  if printf '%s' "$body" | grep -qF 'TARGET_VERIFIED" != "true"'; then
+    echo "VIOLATION: target commit verification became a hard gate in the tag step"
+    false
+  fi
+}
+
+@test "invariant: bump commit verification remains a hard gate before main advances" {
+  body=$(extract_step_body "Bump version files")
+  [ -n "$body" ]
+  printf '%s' "$body" | grep -qF 'if [ "$VERIFIED" != "true" ]; then' || {
+    echo "VIOLATION: bump commit verification hard gate is missing"
+    false
+  }
+  printf '%s' "$body" | grep -qF 'gh api -X PATCH "repos/${REPO}/git/refs/heads/main"' || {
+    echo "VIOLATION: main update API call is missing"
+    false
+  }
 }
