@@ -16,6 +16,11 @@ on:
         type: string
         required: true
         description: "Distribution name on TestPyPI for install verification"
+      verify-python:
+        type: string
+        required: false
+        default: "3.13"
+        description: "Python version used for TestPyPI install verification."
       draft-release:
         type: boolean
         required: false
@@ -113,6 +118,7 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
           TESTPYPI_PACKAGE: ${{ inputs.testpypi-package }}
+          VERIFY_PYTHON: ${{ inputs.verify-python }}
         run: |
           # Parse semver from the tail of TAG, prefix-agnostic.
           # Matches: 1.2.3, 1.2.3-rc1, 1.2.3-alpha.1
@@ -121,7 +127,15 @@ jobs:
             echo "::error::Could not parse semver version from tag '$TAG'"
             exit 1
           fi
-          echo "Verifying TestPyPI install of ${TESTPYPI_PACKAGE}==${VERSION}"
+          if ! printf '%s' "$VERIFY_PYTHON" | grep -qE '^[0-9]+(\.[0-9]+){1,2}$'; then
+            echo "::error::verify-python must be a version like 3.13 or 3.13.2, got '$VERIFY_PYTHON'"
+            exit 1
+          fi
+          if ! printf '%s' "$TESTPYPI_PACKAGE" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+            echo "::error::testpypi-package contains characters that cannot be safely written to pyproject.toml: '$TESTPYPI_PACKAGE'"
+            exit 1
+          fi
+          echo "Verifying TestPyPI install of ${TESTPYPI_PACKAGE}==${VERSION} with Python ${VERIFY_PYTHON}"
 
           SLEEPS="30 60 90 120 150"
           ATTEMPT=0
@@ -130,13 +144,25 @@ jobs:
             echo "Attempt ${ATTEMPT}/5: sleeping ${s}s before install..."
             sleep "$s"
             rm -rf .verify
-            uv venv .verify
-            # shellcheck disable=SC1091
-            . .verify/bin/activate
-            if uv pip install \
-                 --index-url https://test.pypi.org/simple/ \
-                 --extra-index-url https://pypi.org/simple/ \
-                 "${TESTPYPI_PACKAGE}==${VERSION}"; then
+            mkdir -p .verify
+            cat > .verify/pyproject.toml <<EOF
+          [project]
+          name = "testpypi-verify"
+          version = "0.0.0"
+          requires-python = ">=${VERIFY_PYTHON}"
+          dependencies = [
+            "${TESTPYPI_PACKAGE}==${VERSION}",
+          ]
+
+          [tool.uv.sources]
+          "${TESTPYPI_PACKAGE}" = { index = "testpypi" }
+
+          [[tool.uv.index]]
+          name = "testpypi"
+          url = "https://test.pypi.org/simple/"
+          explicit = true
+          EOF
+            if (cd .verify && uv sync --python "$VERIFY_PYTHON" --refresh-package "$TESTPYPI_PACKAGE"); then
               echo "TestPyPI install verified for ${TESTPYPI_PACKAGE}==${VERSION} on attempt ${ATTEMPT}"
               exit 0
             fi
