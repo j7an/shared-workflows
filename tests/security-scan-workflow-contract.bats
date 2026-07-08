@@ -32,6 +32,71 @@ assert_lacks() {
   esac
 }
 
+assert_action_pin() {
+  matches=$(printf '%s\n' "$1" | awk -v target="$2" '
+    {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]+uses:[[:space:]]*/, "", line)
+      sub(/^[[:space:]]*uses:[[:space:]]*/, "", line)
+
+      separator = index(line, " # ")
+      if (separator == 0) {
+        next
+      }
+
+      ref = substr(line, 1, separator - 1)
+      comment = substr(line, separator + 3)
+      if (index(ref, target "@") != 1) {
+        next
+      }
+
+      sha = substr(ref, length(target) + 2)
+      if (sha ~ /^[0-9a-f]{40}$/ && comment ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/) {
+        count++
+      }
+    }
+    END { print count + 0 }
+  ')
+
+  if [ "$matches" -ne 1 ]; then
+    printf 'expected exactly one semantic action pin for:\n%s\n' "$2"
+    return 1
+  fi
+}
+
+@test "action pin helper accepts Dependabot SHA and version bumps" {
+  block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@1111111111111111111111111111111111111111 # v4.99.0'
+  assert_action_pin "$block" "github/codeql-action/analyze"
+}
+
+@test "action pin helper rejects malformed pins" {
+  block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@v4.99.0 # v4.99.0'
+  if assert_action_pin "$block" "github/codeql-action/analyze"; then
+    echo "expected non-SHA action ref to fail"
+    return 1
+  fi
+
+  block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@1111111111111111111111111111111111111111 # v4'
+  if assert_action_pin "$block" "github/codeql-action/analyze"; then
+    echo "expected malformed version comment to fail"
+    return 1
+  fi
+
+  block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@1111111111111111111111111111111111111111'
+  if assert_action_pin "$block" "github/codeql-action/analyze"; then
+    echo "expected missing version comment to fail"
+    return 1
+  fi
+}
+
+@test "action pin helper requires an exact dotted target match" {
+  block=$'    uses: google/osv-scanner-action/Xgithub/workflows/osv-scanner-reusableXyml@1111111111111111111111111111111111111111 # v2.99.0'
+  if assert_action_pin "$block" "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml"; then
+    echo "expected exact dotted target match"
+    return 1
+  fi
+}
+
 on_block() {
   awk '
     /^on:$/ { flag=1; print; next }
@@ -88,12 +153,32 @@ job_permissions_block() {
 first_step_uses() {
   job_block "$1" | awk '
     /^    steps:/ { in_steps=1; next }
-    in_steps && /^      - uses:[[:space:]]*/ { sub(/^      - uses:[[:space:]]*/, "", $0); print; exit }
+    in_steps && /^      - uses:[[:space:]]*/ { print; exit }
     in_steps && /^      - name:/ { in_first=1; next }
-    in_steps && in_first && /^        uses:[[:space:]]*/ { sub(/^        uses:[[:space:]]*/, "", $0); print; exit }
+    in_steps && in_first && /^        uses:[[:space:]]*/ { print; exit }
     in_steps && in_first && /^      - / { exit }
     in_steps && /^    [A-Za-z0-9_-]+:/ { exit }
   '
+}
+
+@test "first_step_uses returns the first uses line for semantic pin checks" {
+  tmp_yaml=$(mktemp "${TMPDIR:-/tmp}/security-scan-first-step.XXXXXX")
+  cat >"$tmp_yaml" <<'EOF'
+jobs:
+  sample:
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111 # v7.0.0
+      - name: Harden runner
+        uses: step-security/harden-runner@2222222222222222222222222222222222222222 # v2.99.0
+EOF
+
+  original_yaml=$YAML
+  YAML="$tmp_yaml"
+  first_step=$(first_step_uses sample)
+  YAML=$original_yaml
+  rm -f "$tmp_yaml"
+
+  assert_action_pin "$first_step" "actions/checkout"
 }
 
 workflow_call_input_keys() {
@@ -219,15 +304,19 @@ codeql_queries'
 
 @test "step-based scanner jobs put harden-runner first" {
   for job in codeql trufflehog zizmor trivy; do
-    assert_eq "$(first_step_uses "$job")" "step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4"
-    assert_contains "$(job_block "$job")" "egress-policy: audit"
+    first_step=$(first_step_uses "$job")
+    assert_action_pin "$first_step" "step-security/harden-runner"
+    block=$(job_block "$job")
+    assert_contains "$block" "egress-policy: audit"
   done
 }
 
 @test "CodeQL is single-language, build-free, and category derives from codeql_language" {
   block=$(job_block codeql)
-  assert_contains "$block" "github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2"
-  assert_contains "$block" "github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2"
+  # CodeQL init/analyze/upload-sarif are independent semantic pins; same
+  # SHA/version is not required, and Dependabot grouping is not desired here.
+  assert_action_pin "$block" "github/codeql-action/init"
+  assert_action_pin "$block" "github/codeql-action/analyze"
   assert_contains "$block" 'languages: ${{ inputs.codeql_language }}'
   assert_contains "$block" 'queries: ${{ inputs.codeql_queries }}'
   assert_contains "$block" "build-mode: none"
@@ -237,10 +326,10 @@ codeql_queries'
 
 @test "TruffleHog defers range selection to the action default and uses verified results" {
   block=$(job_block trufflehog)
-  assert_contains "$block" "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
+  assert_action_pin "$block" "actions/checkout"
   assert_contains "$block" "fetch-depth: 0"
   assert_contains "$block" "persist-credentials: false"
-  assert_contains "$block" "trufflesecurity/trufflehog@00155c9dc586f34d189adc83d3ac2698c2ec551f # v3.95.8"
+  assert_action_pin "$block" "trufflesecurity/trufflehog"
   assert_contains "$block" "continue-on-error: true"
   assert_contains "$block" "extra_args: --results=verified"
   assert_contains "$block" "steps.trufflehog.outcome == 'failure'"
@@ -252,7 +341,7 @@ codeql_queries'
 
 @test "Zizmor is blocking with medium thresholds, online-audits input, and pinned CLI" {
   block=$(job_block zizmor)
-  assert_contains "$block" "zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7"
+  assert_action_pin "$block" "zizmorcore/zizmor-action"
   assert_contains "$block" 'online-audits: ${{ inputs.zizmor_online_audits }}'
   assert_contains "$block" "advanced-security: false"
   assert_contains "$block" "min-severity: medium"
@@ -262,7 +351,7 @@ codeql_queries'
 
 @test "Trivy is one fs SARIF run with fail-on-findings and explicit SARIF category" {
   block=$(job_block trivy)
-  [ "$(grep -c "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0" <<< "$block")" -eq 1 ]
+  assert_action_pin "$block" "aquasecurity/trivy-action"
   assert_contains "$block" "scan-type: fs"
   assert_contains "$block" "format: sarif"
   assert_contains "$block" "output: trivy-results.sarif"
@@ -270,7 +359,7 @@ codeql_queries'
   assert_contains "$block" "limit-severities-for-sarif: true"
   assert_contains "$block" 'exit-code: "1"'
   assert_contains "$block" "if: always()"
-  assert_contains "$block" "github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2"
+  assert_action_pin "$block" "github/codeql-action/upload-sarif"
   assert_contains "$block" "category: trivy"
 }
 
@@ -278,8 +367,8 @@ codeql_queries'
   full=$(job_block osv-full)
   pr=$(job_block osv-pr)
 
-  assert_contains "$full" "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8"
-  assert_contains "$pr" "google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8"
+  assert_action_pin "$full" "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml"
+  assert_action_pin "$pr" "google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml"
   assert_contains "$full" "scan-args: --recursive ./"
   assert_contains "$pr" "scan-args: --recursive ./"
 }
