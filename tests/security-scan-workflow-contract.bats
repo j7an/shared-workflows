@@ -34,8 +34,26 @@ assert_lacks() {
 
 assert_action_pin() {
   matches=$(printf '%s\n' "$1" | awk -v target="$2" '
-    $0 ~ ("^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*" target "@[0-9a-f]{40}[[:space:]]+# v[0-9]+\\.[0-9]+\\.[0-9]+$") {
-      count++
+    {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]+uses:[[:space:]]*/, "", line)
+      sub(/^[[:space:]]*uses:[[:space:]]*/, "", line)
+
+      separator = index(line, " # ")
+      if (separator == 0) {
+        next
+      }
+
+      ref = substr(line, 1, separator - 1)
+      comment = substr(line, separator + 3)
+      if (index(ref, target "@") != 1) {
+        next
+      }
+
+      sha = substr(ref, length(target) + 2)
+      if (sha ~ /^[0-9a-f]{40}$/ && comment ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/) {
+        count++
+      }
     }
     END { print count + 0 }
   ')
@@ -61,6 +79,14 @@ assert_action_pin() {
   block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@1111111111111111111111111111111111111111'
   if assert_action_pin "$block" "github/codeql-action/analyze"; then
     echo "expected missing version comment to fail"
+    return 1
+  fi
+}
+
+@test "action pin helper requires an exact dotted target match" {
+  block=$'    uses: google/osv-scanner-action/Xgithub/workflows/osv-scanner-reusableXyml@1111111111111111111111111111111111111111 # v2.99.0'
+  if assert_action_pin "$block" "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml"; then
+    echo "expected exact dotted target match"
     return 1
   fi
 }
@@ -121,12 +147,32 @@ job_permissions_block() {
 first_step_uses() {
   job_block "$1" | awk '
     /^    steps:/ { in_steps=1; next }
-    in_steps && /^      - uses:[[:space:]]*/ { sub(/^      - uses:[[:space:]]*/, "", $0); print; exit }
+    in_steps && /^      - uses:[[:space:]]*/ { print; exit }
     in_steps && /^      - name:/ { in_first=1; next }
-    in_steps && in_first && /^        uses:[[:space:]]*/ { sub(/^        uses:[[:space:]]*/, "", $0); print; exit }
+    in_steps && in_first && /^        uses:[[:space:]]*/ { print; exit }
     in_steps && in_first && /^      - / { exit }
     in_steps && /^    [A-Za-z0-9_-]+:/ { exit }
   '
+}
+
+@test "first_step_uses returns the first uses line for semantic pin checks" {
+  tmp_yaml=$(mktemp "${TMPDIR:-/tmp}/security-scan-first-step.XXXXXX")
+  cat >"$tmp_yaml" <<'EOF'
+jobs:
+  sample:
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111 # v7.0.0
+      - name: Harden runner
+        uses: step-security/harden-runner@2222222222222222222222222222222222222222 # v2.99.0
+EOF
+
+  original_yaml=$YAML
+  YAML="$tmp_yaml"
+  first_step=$(first_step_uses sample)
+  YAML=$original_yaml
+  rm -f "$tmp_yaml"
+
+  assert_action_pin "$first_step" "actions/checkout"
 }
 
 workflow_call_input_keys() {
@@ -252,8 +298,9 @@ codeql_queries'
 
 @test "step-based scanner jobs put harden-runner first" {
   for job in codeql trufflehog zizmor trivy; do
+    first_step=$(first_step_uses "$job")
+    assert_action_pin "$first_step" "step-security/harden-runner"
     block=$(job_block "$job")
-    assert_action_pin "$block" "step-security/harden-runner"
     assert_contains "$block" "egress-policy: audit"
   done
 }
