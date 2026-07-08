@@ -76,6 +76,12 @@ assert_action_pin() {
     return 1
   fi
 
+  block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@1111111111111111111111111111111111111111 # v4'
+  if assert_action_pin "$block" "github/codeql-action/analyze"; then
+    echo "expected malformed version comment to fail"
+    return 1
+  fi
+
   block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@1111111111111111111111111111111111111111'
   if assert_action_pin "$block" "github/codeql-action/analyze"; then
     echo "expected missing version comment to fail"
@@ -307,6 +313,8 @@ codeql_queries'
 
 @test "CodeQL is single-language, build-free, and category derives from codeql_language" {
   block=$(job_block codeql)
+  # CodeQL init/analyze/upload-sarif are independent semantic pins; same
+  # SHA/version is not required, and Dependabot grouping is not desired here.
   assert_action_pin "$block" "github/codeql-action/init"
   assert_action_pin "$block" "github/codeql-action/analyze"
   assert_contains "$block" 'languages: ${{ inputs.codeql_language }}'
