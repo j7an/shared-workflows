@@ -64,6 +64,13 @@ assert_lacks() {
   assert_contains "$step" 'uv sync --python "$VERIFY_PYTHON" --refresh-package "$TESTPYPI_PACKAGE"'
 }
 
+@test "TestPyPI verification parses normalized PEP 440 tag tails" {
+  step="$(verify_step)"
+  assert_contains "$step" "[0-9]+\\.[0-9]+\\.[0-9]+([A-Za-z][A-Za-z0-9.]*)?$"
+  assert_contains "$step" "1.2.3rc1"
+  assert_lacks "$step" "-[A-Za-z0-9.]"
+}
+
 @test "TestPyPI verification does not use uv pip multi-index install" {
   step="$(verify_step)"
   assert_lacks "$step" 'uv pip install'

@@ -121,8 +121,8 @@ jobs:
           VERIFY_PYTHON: ${{ inputs.verify-python }}
         run: |
           # Parse semver from the tail of TAG, prefix-agnostic.
-          # Matches: 1.2.3, 1.2.3-rc1, 1.2.3-alpha.1
-          VERSION=$(printf '%s' "$TAG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' || true)
+          # Matches normalized PEP 440 tag tails: 1.2.3, 1.2.3rc1, 1.2.3a1.
+          VERSION=$(printf '%s' "$TAG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([A-Za-z][A-Za-z0-9.]*)?$' || true)
           if [ -z "$VERSION" ]; then
             echo "::error::Could not parse semver version from tag '$TAG'"
             exit 1

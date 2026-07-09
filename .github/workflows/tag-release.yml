@@ -578,15 +578,15 @@ jobs:
             exit 1
           fi
 
-          TARGET_VERIFIED=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.verified')
-          TARGET_REASON=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.reason')
-
           # Create a lightweight tag ref directly to the target commit.
           # Do not create an annotated tag object; GitHub does not auto-sign
           # App-created tag objects under the release provenance model we need.
           gh api -X POST "repos/${REPO}/git/refs" \
             -f ref="refs/tags/${NEXT_TAG}" \
             -f sha="$TAG_TARGET_SHA"
+
+          TARGET_VERIFIED=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.verified' 2>/dev/null || printf 'unknown')
+          TARGET_REASON=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.reason' 2>/dev/null || printf 'unavailable')
 
           {
             echo "### Tag created"

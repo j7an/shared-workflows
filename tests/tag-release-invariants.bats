@@ -112,11 +112,17 @@ extract_step_body() {
 @test "invariant: release workflows do not create annotated tag objects" {
   for workflow in "$REPO_ROOT/.github/workflows/tag-release.yml" "$REPO_ROOT/.github/workflows/release.yml"; do
     body=$(grep -v '^[[:space:]]*#' "$workflow")
-    if printf '%s' "$body" | grep -qE 'POST "repos/\$\{REPO\}/git/tags"|POST "repos/[^"]*/git/tags"'; then
+    compact=$(printf '%s' "$body" | tr '\n' ' ')
+    if printf '%s' "$compact" | grep -qE 'gh api[^;|&]*((-X[[:space:]]*POST|--method[ =]POST)[^;|&]*git/tags|git/tags[^;|&]*(-X[[:space:]]*POST|--method[ =]POST))'; then
       echo "VIOLATION: $workflow creates annotated tag objects with POST /git/tags"
       false
     fi
-    if printf '%s' "$body" | grep -qE 'git tag -a|git tag -fa|git push origin "\$MINOR"|git push origin "\$MAJOR"'; then
+    tag_creation_lines=$(printf '%s\n' "$body" | grep -E 'git[[:space:]]+tag' | grep -vE 'git[[:space:]]+tag[[:space:]]+-l([[:space:]]|$)' || true)
+    if printf '%s' "$tag_creation_lines" | grep -qE '(^|[[:space:]])(--annotate|-s|--sign|-[[:alnum:]]*a[[:alnum:]]*)([[:space:]]|$)'; then
+      echo "VIOLATION: $workflow uses local annotated tag creation"
+      false
+    fi
+    if printf '%s' "$body" | grep -qE 'git[[:space:]]+push[^;&|]*(\$MINOR|\$MAJOR)'; then
       echo "VIOLATION: $workflow uses local tag creation or push for release tags"
       false
     fi
@@ -155,6 +161,18 @@ extract_step_body() {
     echo "VIOLATION: target commit verification became a hard gate in the tag step"
     false
   fi
+  post_line=$(printf '%s\n' "$body" | grep -nF 'gh api -X POST "repos/${REPO}/git/refs"' | head -1 | cut -d: -f1)
+  verify_line=$(printf '%s\n' "$body" | grep -nF 'git/commits/${TAG_TARGET_SHA}' | head -1 | cut -d: -f1)
+  [ -n "$post_line" ]
+  [ -n "$verify_line" ]
+  if [ "$verify_line" -lt "$post_line" ]; then
+    echo "VIOLATION: report-only target verification runs before immutable tag creation"
+    false
+  fi
+  printf '%s' "$body" | grep -qF '|| printf' || {
+    echo "VIOLATION: report-only target verification failures can still fail the tag step"
+    false
+  }
 }
 
 @test "invariant: bump commit verification remains a hard gate before main advances" {

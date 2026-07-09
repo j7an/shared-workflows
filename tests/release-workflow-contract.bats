@@ -37,6 +37,7 @@ assert_lacks() {
   step="$(update_step)"
   assert_contains "$step" 'gh api -X PATCH "repos/${REPO}/git/refs/tags/${ref_name}"'
   assert_contains "$step" '-F force=true'
+  assert_contains "$step" '>/dev/null 2>"$err_file"'
   assert_contains "$step" 'gh api -X POST "repos/${REPO}/git/refs"'
   assert_contains "$step" '-f ref="refs/tags/${ref_name}"'
   assert_contains "$step" '-f sha="$target_sha"'
@@ -51,11 +52,16 @@ assert_lacks() {
 
 @test "release.yml does not use local tag commands or annotated tag object creation" {
   body="$(grep -v '^[[:space:]]*#' "$YAML")"
-  assert_lacks "$body" 'git tag -a'
-  assert_lacks "$body" 'git tag -fa'
+  compact="$(printf '%s' "$body" | tr '\n' ' ')"
+  tag_creation_lines=$(printf '%s\n' "$body" | grep -E 'git[[:space:]]+tag' | grep -vE 'git[[:space:]]+tag[[:space:]]+-l([[:space:]]|$)' || true)
+  if printf '%s' "$tag_creation_lines" | grep -qE '(^|[[:space:]])(--annotate|-s|--sign|-[[:alnum:]]*a[[:alnum:]]*)([[:space:]]|$)'; then
+    false
+  fi
   assert_lacks "$body" 'git push origin "$MINOR"'
   assert_lacks "$body" 'git push origin "$MAJOR"'
-  assert_lacks "$body" 'gh api -X POST "repos/${REPO}/git/tags"'
+  if printf '%s' "$compact" | grep -qE 'gh api[^;|&]*((-X[[:space:]]*POST|--method[ =]POST)[^;|&]*git/tags|git/tags[^;|&]*(-X[[:space:]]*POST|--method[ =]POST))'; then
+    false
+  fi
   assert_lacks "$body" 'git config user.name'
   assert_lacks "$body" 'git config user.email'
 }

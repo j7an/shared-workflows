@@ -79,7 +79,7 @@ jobs:
 
             if gh api -X PATCH "repos/${REPO}/git/refs/tags/${ref_name}" \
               -f sha="$target_sha" \
-              -F force=true 2>"$err_file"; then
+              -F force=true >/dev/null 2>"$err_file"; then
               rm -f "$err_file"
               echo "Updated ${ref_name} -> ${target_sha}"
               return 0
