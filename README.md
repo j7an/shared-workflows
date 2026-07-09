@@ -460,6 +460,14 @@ jobs:
 
 Releases are cut manually via the `release-self.yml` workflow dispatch. Merging a PR to `main` does **not** create a tag on its own. When a maintainer dispatches `release-self.yml` (with `bump: auto`), it scans Conventional Commits since the last tag, computes the next semver tag, and updates the floating `vX` / `vX.Y` tags to point at the new commit.
 
+Release tags are created as lightweight refs that point directly at the target
+commit. When `tag-release.yml` creates a version-bump commit, that commit must
+verify before `main` advances. When no bump commit is created, target commit
+verification is reported in the summary but is not a hard gate, because caller
+repositories may legitimately pass unverified commits.
+
+Floating major and minor tags are also lightweight refs. `release.yml` peels the immutable release tag to its target commit, then updates or creates the floating refs through the GitHub API with forced ref updates for existing floating tags.
+
 ## Known caller-side constraints
 
 The reusable workflows in this repo are **self-contained at runtime**: they must not fetch `j7an/shared-workflows` source at runtime, and they must not reference caller-scoped context variables as if they were reusable-workflow-scoped.
@@ -628,3 +636,16 @@ section above.
 release-age verification was on by default and auto-merge was opt-in. `@v2`
 is the frozen historical cooldown-bearing line. Both continue to work but
 receive no further updates — see [v3 → v4 migration](#v3--v4-migration).
+
+## `publish-pypi.yml`
+
+`publish-pypi.yml` remains in this repo for compatibility with the published
+`@v4` surface, but it is not the recommended Trusted Publishing path for new
+package releases. The caller-owned template in
+[`.github/workflows/README.md`](.github/workflows/README.md#caller-owned-pypi-trusted-publishing-template)
+is the canonical PyPI/TestPyPI guidance.
+
+TestPyPI install verification uses an explicit Python version (`verify-python`
+for the reusable workflow). The verification job writes an ephemeral
+`.verify/pyproject.toml` and pins only the package under test to TestPyPI with
+an explicit uv source. Normal dependencies continue to resolve from PyPI.

@@ -566,7 +566,6 @@ jobs:
           NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          # --- Git Data API rewrite (spec §3.2) ---
           # TAG_TARGET_SHA is set by the prior "Bump version files" step:
           #   - case 0: the new bump commit's SHA (returned by POST /git/commits)
           #   - case 2: GITHUB_SHA — the semver-analyzed commit, no ref read
@@ -579,40 +578,24 @@ jobs:
             exit 1
           fi
 
-          # Create tag OBJECT. NO tagger field — GitHub auto-signs with the
-          # bot/web-flow key only when authenticated as the App AND the body
-          # has no identity overrides (spec §3.3).
-          TAG_OBJECT_SHA=$(jq -nc \
-            --arg tag "$NEXT_TAG" \
-            --arg msg "Release $NEXT_TAG" \
-            --arg sha "$TAG_TARGET_SHA" \
-            '{tag: $tag, message: $msg, object: $sha, type: "commit"}' \
-            | gh api -X POST "repos/${REPO}/git/tags" --input - --jq '.sha')
-
-          # Create tag REF. 422 = ref already exists → fail loudly (spec §4
-          # row 3): re-creating an existing tag is not a workflow-level
-          # decision; operator must intentionally delete/replace before rerun.
+          # Create a lightweight tag ref directly to the target commit.
+          # Do not create an annotated tag object; GitHub does not auto-sign
+          # App-created tag objects under the release provenance model we need.
           gh api -X POST "repos/${REPO}/git/refs" \
             -f ref="refs/tags/${NEXT_TAG}" \
-            -f sha="$TAG_OBJECT_SHA"
+            -f sha="$TAG_TARGET_SHA"
 
-          # Report tag verification status (acceptance criterion #3 OR #4
-          # per spec §6 — the canary run records which path locks in for v2.5.3).
-          # Note jq path: GET /git/tags/{sha} returns the raw Git tag object
-          # with `verification` at the TOP level (same convention as
-          # /git/commits/{sha} — see Bump step's verification check).
-          TAG_VERIFIED=$(gh api "repos/${REPO}/git/tags/${TAG_OBJECT_SHA}" --jq '.verification.verified')
-          TAG_REASON=$(gh api "repos/${REPO}/git/tags/${TAG_OBJECT_SHA}" --jq '.verification.reason')
+          TARGET_VERIFIED=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.verified' 2>/dev/null || printf 'unknown')
+          TARGET_REASON=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.reason' 2>/dev/null || printf 'unavailable')
 
           {
             echo "### Tag created"
             echo ""
             echo "**Tag:** \`$NEXT_TAG\`"
-            echo "**Tag object SHA:** \`$TAG_OBJECT_SHA\`"
             echo "**Target commit SHA:** \`$TAG_TARGET_SHA\`"
-            echo "**Tag object verification:** \`verified=$TAG_VERIFIED\` \`reason=$TAG_REASON\`"
+            echo "**Target commit verification:** \`verified=$TARGET_VERIFIED\` \`reason=$TARGET_REASON\`"
             echo ""
-            echo "Tag created via Git Data API. If the caller workflow chains a publish step, it will pick up from here."
+            echo "Tag created as a lightweight ref via the GitHub API. Target verification is reported here; only workflow-created bump commits are hard-gated before \`main\` advances."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "Tag $NEXT_TAG created via Git Data API (verified=$TAG_VERIFIED reason=$TAG_REASON)."
+          echo "Tag $NEXT_TAG created as lightweight ref to ${TAG_TARGET_SHA} (target verified=$TARGET_VERIFIED reason=$TARGET_REASON)."
