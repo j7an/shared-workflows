@@ -72,6 +72,12 @@ normalize_text() {
   assert_contains "$section" '| `verify-python` | string | no | `3.13` | Python version used for TestPyPI install verification. |'
 }
 
+@test "publish-pypi.yml docs mention normalized prerelease tag spelling" {
+  section=$(normalize_text "$(publish_pypi_section "$WORKFLOW_README")")
+  assert_contains "$section" '`v1.2.3rc1`'
+  assert_contains "$section" 'Do not use `v1.2.3-rc1`'
+}
+
 @test "caller-owned template documents required local trusted-publisher setup" {
   section=$(normalize_text "$(template_section "$WORKFLOW_README")")
   assert_contains "$section" 'Create GitHub Environments `testpypi` and `pypi` in the package repo'

@@ -593,6 +593,10 @@ releases.
 | `draft-release` | boolean | no | `false` | Create the GitHub release as a draft. |
 | `attach-assets` | boolean | no | `true` | Attach wheel and sdist to the GitHub release. |
 
+Use normalized prerelease tag tails such as `v1.2.3rc1` or `tools/v1.2.3rc1`.
+Do not use `v1.2.3-rc1`; PyPI artifacts normalize that spelling to `1.2.3rc1`,
+and the verification step requires the tag tail to match the published version.
+
 ### Compatibility note
 
 If PyPI later supports cross-repo reusable workflows as Trusted Publisher

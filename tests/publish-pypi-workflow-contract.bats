@@ -20,6 +20,13 @@ verify_step() {
   ' "$YAML"
 }
 
+github_release_step() {
+  awk '
+    /^      - name: Create GitHub Release$/ { flag=1; next }
+    flag { print }
+  ' "$YAML"
+}
+
 assert_contains() {
   local text="$1"
   local expected="$2"
@@ -69,6 +76,14 @@ assert_lacks() {
   assert_contains "$step" "[0-9]+\\.[0-9]+\\.[0-9]+([A-Za-z][A-Za-z0-9.]*)?$"
   assert_contains "$step" "1.2.3rc1"
   assert_lacks "$step" "-[A-Za-z0-9.]"
+}
+
+@test "GitHub Release prerelease classification uses normalized version tail" {
+  step="$(github_release_step)"
+  assert_contains "$step" 'VERSION=$(printf'
+  assert_contains "$step" "(a|b|rc)[0-9]"
+  assert_contains "$step" 'ARGS+=( --prerelease )'
+  assert_lacks "$step" '[[ "$TAG" == *-* ]]'
 }
 
 @test "TestPyPI verification does not use uv pip multi-index install" {
