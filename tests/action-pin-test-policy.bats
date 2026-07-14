@@ -13,6 +13,20 @@
   assert_action_pin "$block" "github/codeql-action/analyze"
 }
 
+@test "action pin helper accepts a single-quoted scalar" {
+  sha=$(printf '%040d' 1)
+  block="        uses: 'github/codeql-action/analyze@$sha' # v4.99.0"
+
+  assert_action_pin "$block" "github/codeql-action/analyze"
+}
+
+@test "action pin helper accepts a double-quoted scalar" {
+  sha=$(printf '%040d' 1)
+  block="        uses: \"github/codeql-action/analyze@$sha\" # v4.99.0"
+
+  assert_action_pin "$block" "github/codeql-action/analyze"
+}
+
 @test "action pin helper rejects malformed pins" {
   sha=$(printf '%040d' 1)
 
@@ -66,6 +80,30 @@
 
   if assert_action_pin "$block" "actions/checkout"; then
     echo "expected malformed duplicate action reference to fail"
+    return 1
+  fi
+}
+
+@test "action pin helper rejects a malformed single-quoted duplicate" {
+  sha=$(printf '%040d' 1)
+  block=$(printf '%s\n%s\n' \
+    "        uses: actions/checkout@$sha # v7.0.0" \
+    "        uses: 'actions/checkout@v7' # v7.0.0")
+
+  if assert_action_pin "$block" "actions/checkout"; then
+    echo "expected malformed single-quoted duplicate action reference to fail"
+    return 1
+  fi
+}
+
+@test "action pin helper rejects a malformed double-quoted duplicate" {
+  sha=$(printf '%040d' 1)
+  block=$(printf '%s\n%s\n' \
+    "        uses: actions/checkout@$sha # v7.0.0" \
+    "        uses: \"actions/checkout@v7\" # v7.0.0")
+
+  if assert_action_pin "$block" "actions/checkout"; then
+    echo "expected malformed double-quoted duplicate action reference to fail"
     return 1
   fi
 }

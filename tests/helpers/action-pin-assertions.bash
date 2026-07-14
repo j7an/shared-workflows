@@ -13,6 +13,13 @@ assert_action_pin() {
       sub(/^[[:space:]]*-[[:space:]]+uses:[[:space:]]*/, "", line)
       sub(/^[[:space:]]*uses:[[:space:]]*/, "", line)
 
+      quote = substr(line, 1, 1)
+      if (quote == "\"" || quote == "\047") {
+        line = substr(line, 2)
+      } else {
+        quote = ""
+      }
+
       if (index(line, target "@") != 1) {
         next
       }
@@ -25,6 +32,12 @@ assert_action_pin() {
 
       ref = substr(line, 1, separator - 1)
       comment = substr(line, separator + 3)
+      if (quote != "") {
+        if (substr(ref, length(ref), 1) != quote) {
+          next
+        }
+        ref = substr(ref, 1, length(ref) - 1)
+      }
       sha = substr(ref, length(target) + 2)
       if (sha ~ /^[0-9a-f]{40}$/ && comment ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/) {
         valid_count++
