@@ -2,6 +2,8 @@
 # pre-commit-autoupdate-workflow-contract.bats - static contract tests for the
 # reusable pre-commit autoupdate workflow.
 
+. "$BATS_TEST_DIRNAME/helpers/action-pin-assertions.bash"
+
 YAML=".github/workflows/pre-commit-autoupdate.yml"
 WORKFLOW_README=".github/workflows/README.md"
 ROOT_README="README.md"
@@ -190,13 +192,15 @@ title'
   assert_eq "$(job_permissions_block autoupdate)" $'    permissions:\n      contents: write\n      pull-requests: write'
 }
 
-@test "third-party actions are pinned with version comments" {
+@test "single-instance third-party actions use semantic pins" {
   block=$(job_block autoupdate)
-  assert_contains "$block" "step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4"
-  assert_contains "$block" "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0"
-  assert_contains "$block" "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
-  assert_contains "$block" "astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0"
-  assert_contains "$block" "peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1"
+  for target in \
+    step-security/harden-runner \
+    actions/create-github-app-token \
+    actions/checkout \
+    astral-sh/setup-uv; do
+    assert_action_pin "$block" "$target"
+  done
 }
 
 @test "App token minting is conditional and requests contents plus pull-requests write" {
@@ -210,7 +214,7 @@ title'
 
 @test "checkout does not persist credentials" {
   block=$(step_block "Checkout repository")
-  assert_contains "$block" "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
+  assert_action_pin "$block" "actions/checkout"
   assert_contains "$block" "persist-credentials: false"
 }
 
@@ -265,6 +269,8 @@ title'
   restricted=$(step_block "Open restricted PR with updates")
   unrestricted=$(step_block "Open unrestricted PR with updates")
 
+  assert_action_pin "$restricted" "peter-evans/create-pull-request"
+  assert_action_pin "$unrestricted" "peter-evans/create-pull-request"
   assert_contains "$restricted" "inputs.restrict_paths"
   assert_contains "$restricted" 'add-paths: ${{ inputs.config_path }}'
   assert_contains "$restricted" "delete-branch: true"
