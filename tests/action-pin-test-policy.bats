@@ -110,7 +110,7 @@
 
 find_literal_action_pin_snapshots() {
   awk '
-    /[[:alnum:]_.-]+\/[[:alnum:]_.\/-]+@[0-9A-Fa-f]{40}[[:space:]]+#[[:space:]]+v[0-9]+\.[0-9]+\.[0-9]+([^0-9.]|$)/ {
+    /[[:alnum:]_.-]+\/[[:alnum:]_.\/-]+@[0-9A-Fa-f]{40}(\\?["'"'"'])?[[:space:]]+#[[:space:]]+v[0-9]+\.[0-9]+\.[0-9]+([^0-9.]|$)/ {
       printf "%s:%d:%s\n", FILENAME, FNR, $0
     }
   ' "$@"
@@ -120,6 +120,42 @@ find_literal_action_pin_snapshots() {
   source_file="$BATS_TEST_TMPDIR/literal-action-pin.bats"
   sha=$(printf '%040d' 1)
   line="assert_contains \"\$block\" \"actions/checkout@$sha # v7.0.0\""
+  printf '%s\n' "$line" >"$source_file"
+
+  run find_literal_action_pin_snapshots "$source_file"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = "$source_file:1:$line" ]
+}
+
+@test "literal action-pin detector reports a single-quoted action scalar" {
+  source_file="$BATS_TEST_TMPDIR/single-quoted-action-pin.bats"
+  sha=$(printf '%040d' 3)
+  line=$(printf "uses: '%s@%s' # %s" "actions/checkout" "$sha" "v7.0.0")
+  printf '%s\n' "$line" >"$source_file"
+
+  run find_literal_action_pin_snapshots "$source_file"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = "$source_file:1:$line" ]
+}
+
+@test "literal action-pin detector reports a double-quoted action scalar" {
+  source_file="$BATS_TEST_TMPDIR/double-quoted-action-pin.bats"
+  sha=$(printf '%040d' 0 | tr 0 A)
+  line=$(printf 'uses: "%s@%s" # %s' "actions/checkout" "$sha" "v7.0.0")
+  printf '%s\n' "$line" >"$source_file"
+
+  run find_literal_action_pin_snapshots "$source_file"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = "$source_file:1:$line" ]
+}
+
+@test "literal action-pin detector reports a raw escaped closing quote" {
+  source_file="$BATS_TEST_TMPDIR/escaped-quote-action-pin.bats"
+  sha=$(printf '%040d' 5)
+  line=$(printf 'block="uses: \\"%s@%s\\" # %s"' "actions/checkout" "$sha" "v7.0.0")
   printf '%s\n' "$line" >"$source_file"
 
   run find_literal_action_pin_snapshots "$source_file"
