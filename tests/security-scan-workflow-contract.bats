@@ -2,6 +2,8 @@
 # security-scan-workflow-contract.bats - static contract tests for the
 # reusable security scanning workflow.
 
+. "$BATS_TEST_DIRNAME/helpers/action-pin-assertions.bash"
+
 YAML=".github/workflows/security-scan.yml"
 README=".github/workflows/README.md"
 
@@ -30,71 +32,6 @@ assert_lacks() {
       ;;
     *) return 0 ;;
   esac
-}
-
-assert_action_pin() {
-  matches=$(printf '%s\n' "$1" | awk -v target="$2" '
-    {
-      line = $0
-      sub(/^[[:space:]]*-[[:space:]]+uses:[[:space:]]*/, "", line)
-      sub(/^[[:space:]]*uses:[[:space:]]*/, "", line)
-
-      separator = index(line, " # ")
-      if (separator == 0) {
-        next
-      }
-
-      ref = substr(line, 1, separator - 1)
-      comment = substr(line, separator + 3)
-      if (index(ref, target "@") != 1) {
-        next
-      }
-
-      sha = substr(ref, length(target) + 2)
-      if (sha ~ /^[0-9a-f]{40}$/ && comment ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/) {
-        count++
-      }
-    }
-    END { print count + 0 }
-  ')
-
-  if [ "$matches" -ne 1 ]; then
-    printf 'expected exactly one semantic action pin for:\n%s\n' "$2"
-    return 1
-  fi
-}
-
-@test "action pin helper accepts Dependabot SHA and version bumps" {
-  block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@1111111111111111111111111111111111111111 # v4.99.0'
-  assert_action_pin "$block" "github/codeql-action/analyze"
-}
-
-@test "action pin helper rejects malformed pins" {
-  block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@v4.99.0 # v4.99.0'
-  if assert_action_pin "$block" "github/codeql-action/analyze"; then
-    echo "expected non-SHA action ref to fail"
-    return 1
-  fi
-
-  block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@1111111111111111111111111111111111111111 # v4'
-  if assert_action_pin "$block" "github/codeql-action/analyze"; then
-    echo "expected malformed version comment to fail"
-    return 1
-  fi
-
-  block=$'      - name: Perform CodeQL analysis\n        uses: github/codeql-action/analyze@1111111111111111111111111111111111111111'
-  if assert_action_pin "$block" "github/codeql-action/analyze"; then
-    echo "expected missing version comment to fail"
-    return 1
-  fi
-}
-
-@test "action pin helper requires an exact dotted target match" {
-  block=$'    uses: google/osv-scanner-action/Xgithub/workflows/osv-scanner-reusableXyml@1111111111111111111111111111111111111111 # v2.99.0'
-  if assert_action_pin "$block" "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml"; then
-    echo "expected exact dotted target match"
-    return 1
-  fi
 }
 
 on_block() {
@@ -163,13 +100,15 @@ first_step_uses() {
 
 @test "first_step_uses returns the first uses line for semantic pin checks" {
   tmp_yaml=$(mktemp "${TMPDIR:-/tmp}/security-scan-first-step.XXXXXX")
-  cat >"$tmp_yaml" <<'EOF'
+  checkout_sha=$(printf '%040d' 1)
+  harden_runner_sha=$(printf '%040d' 2)
+  cat >"$tmp_yaml" <<EOF
 jobs:
   sample:
     steps:
-      - uses: actions/checkout@1111111111111111111111111111111111111111 # v7.0.0
+      - uses: actions/checkout@$checkout_sha # v7.0.0
       - name: Harden runner
-        uses: step-security/harden-runner@2222222222222222222222222222222222222222 # v2.99.0
+        uses: step-security/harden-runner@$harden_runner_sha # v2.99.0
 EOF
 
   original_yaml=$YAML

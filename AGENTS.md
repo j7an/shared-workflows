@@ -62,7 +62,7 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 
 - **Bash 3.2 compatible** — scripts run on macOS system bash; no associative arrays, no `mapfile`/`readarray`.
 - **Actions are SHA-pinned** with a trailing `# vX.Y.Z` comment. When bumping, dereference the tag to the *commit* SHA, not the tag-object SHA.
-- Workflow contract tests for action pins should assert semantic policy: expected action target, full-length commit SHA, and trailing `# vX.Y.Z` comment. Do not snapshot the current SHA/version literally unless exact equality is the behavior being protected; when exact equality is intentional, say why in the test name or nearby comment and keep Dependabot grouping aligned.
+- Workflow contract tests for action pins must assert semantic policy: expected action target, full-length lowercase commit SHA, and trailing `# vX.Y.Z` comment. Never snapshot the current action SHA/version pair in Bats source. Use `tests/helpers/action-pin-assertions.bash`; `tests/action-pin-test-policy.bats` enforces this rule.
 - **Conventional Commits drive release bumps** — `tag-release.yml`'s `auto` mode infers patch/minor/major from commit subjects since the last tag. A stray `feat:` in an otherwise-`fix:` PR flips a patch release to minor.
 - `scripts/*.sh` read stdin and write TSV/line-oriented stdout; exit `2` signals malformed input, exit `0` covers the zero-rows case. See each script's header comment for its exact schema.
 - Specs and plans under `docs/superpowers/` are working notes — untracked, never committed. `.worktrees/` (gitignored) holds isolated checkouts for parallel feature work.
