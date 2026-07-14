@@ -3,13 +3,20 @@
 assert_action_pin() {
   local block=$1
   local target=$2
-  local matches
+  local counts
+  local reference_count
+  local valid_count
 
-  matches=$(printf '%s\n' "$block" | awk -v target="$target" '
+  counts=$(printf '%s\n' "$block" | awk -v target="$target" '
     {
       line = $0
       sub(/^[[:space:]]*-[[:space:]]+uses:[[:space:]]*/, "", line)
       sub(/^[[:space:]]*uses:[[:space:]]*/, "", line)
+
+      if (index(line, target "@") != 1) {
+        next
+      }
+      reference_count++
 
       separator = index(line, " # ")
       if (separator == 0) {
@@ -18,19 +25,17 @@ assert_action_pin() {
 
       ref = substr(line, 1, separator - 1)
       comment = substr(line, separator + 3)
-      if (index(ref, target "@") != 1) {
-        next
-      }
-
       sha = substr(ref, length(target) + 2)
       if (sha ~ /^[0-9a-f]{40}$/ && comment ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/) {
-        count++
+        valid_count++
       }
     }
-    END { print count + 0 }
+    END { print reference_count + 0, valid_count + 0 }
   ')
+  reference_count=${counts%% *}
+  valid_count=${counts#* }
 
-  if [ "$matches" -ne 1 ]; then
+  if [ "$reference_count" -ne 1 ] || [ "$valid_count" -ne 1 ]; then
     printf 'expected exactly one semantic action pin for:\n%s\n' "$target"
     return 1
   fi

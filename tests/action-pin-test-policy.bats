@@ -58,6 +58,18 @@
   fi
 }
 
+@test "action pin helper rejects a malformed duplicate matching reference" {
+  sha=$(printf '%040d' 1)
+  block=$(printf '%s\n%s\n' \
+    "        uses: actions/checkout@$sha # v7.0.0" \
+    "        uses: actions/checkout@v7 # v7.0.0")
+
+  if assert_action_pin "$block" "actions/checkout"; then
+    echo "expected malformed duplicate action reference to fail"
+    return 1
+  fi
+}
+
 find_literal_action_pin_snapshots() {
   awk '
     /[[:alnum:]_.-]+\/[[:alnum:]_.\/-]+@[0-9A-Fa-f]{40}[[:space:]]+#[[:space:]]+v[0-9]+\.[0-9]+\.[0-9]+([^0-9.]|$)/ {
