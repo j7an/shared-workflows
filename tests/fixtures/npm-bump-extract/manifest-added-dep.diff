@@ -1,0 +1,18 @@
+diff --git a/package.json b/package.json
+index 1111111..2222222 100644
+--- a/package.json
++++ b/package.json
+@@ -168,3 +168,4 @@
+   "devDependencies": {
++    "brand-new-pkg": "^1.0.0",
+     "typescript": "^5.9.3"
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 3333333..4444444 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -199,3 +199,6 @@ importers:
+     devDependencies:
++      brand-new-pkg:
++        specifier: ^1.0.0
++        version: 1.0.0
+       typescript:

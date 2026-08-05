@@ -191,6 +191,188 @@ split_package_key() {
   [ -n "$_pkg_name" ] && [ -n "$_pkg_version" ]
 }
 
+# Lifecycle-script keys. Corroboration already excludes these structurally —
+# a lifecycle key can never appear in an importers-derived dependency set —
+# but the denylist makes the security property visible in the code rather
+# than implied.
+#
+# Lifecycle script names ONLY. `version` and `dependencies` were removed: there
+# is a real npm package named `version`, and denylisting it would reject a
+# legitimate bump. A denylist must not overlap the namespace it sits beside.
+LIFECYCLE_KEYS=$'\npreinstall\ninstall\npostinstall\npreprepare\nprepare\npostprepare\nprepublish\nprepublishOnly\npublish\npostpublish\nprepack\npostpack\npreuninstall\nuninstall\npostuninstall\npreversion\npostversion\n'
+
+# is_valid_range <specifier> — npm version-range grammar. A shell command is
+# not a range, which is what keeps `"postinstall": "curl … | sh"` out.
+#
+# The grammar must accept everything npm permits, or it becomes a
+# false-positive generator that red-gates real manifests on unrelated bumps.
+# Verified against live registry data: eslint declares `"jiti": "*"`, and vite
+# declares `"esbuild": "^0.27.0 || ^0.28.0"` and
+# `"@types/node": "^20.19.0 || >=22.12.0"`.
+is_valid_range() {
+  local spec="$1" part rest
+  # Protocol forms are whole-string.
+  case "$spec" in
+    workspace:*|catalog:*|npm:*) return 0 ;;
+  esac
+  # `||` unions: every alternative must itself be a valid range.
+  case "$spec" in
+    *\|\|*)
+      rest="$spec"
+      while [ -n "$rest" ]; do
+        part="${rest%%\|\|*}"
+        is_valid_simple_range "$part" || return 1
+        [ "$part" = "$rest" ] && break
+        rest="${rest#*\|\|}"
+      done
+      return 0
+      ;;
+  esac
+  is_valid_simple_range "$spec"
+}
+
+# is_valid_simple_range <specifier> — one alternative of a range union.
+# Accepts space-joined intersections (">=1.0.0 <2.0.0") and hyphen ranges
+# ("1.2.3 - 2.3.4") by validating each whitespace-separated token.
+#
+# GLOBBING MUST BE OFF around the word-split loop. With globbing on, an
+# unquoted `$spec` of `*` is expanded against the working directory, so the
+# bare `*` range (eslint declares `"jiti": "*"`) is accepted or rejected
+# depending on whether the cwd happens to contain files. That makes the
+# result environment-dependent — the test suite would pass locally and fail
+# in CI, or vice versa. Verified: without `set -f`, `*` is rejected from a
+# populated directory and accepted from an empty one.
+is_valid_simple_range() {
+  local spec="$1" tok rc=0 restore_glob=0
+  # Trim.
+  spec="${spec#"${spec%%[![:space:]]*}"}"
+  spec="${spec%"${spec##*[![:space:]]}"}"
+  [ -z "$spec" ] && return 1
+  case "$-" in *f*) ;; *) restore_glob=1; set -f ;; esac
+  for tok in $spec; do
+    case "$tok" in
+      -) continue ;;                 # hyphen-range separator
+      \*|x|X) continue ;;            # bare wildcard
+    esac
+    # Comparator/caret/tilde prefix, then a (possibly partial, possibly
+    # wildcarded) version with optional prerelease/build metadata.
+    if ! [[ "$tok" =~ ^(\^|~\>?|\>=|\<=|\>|\<|=|v)?[0-9]+(\.([0-9]+|[xX\*]))*([-+][0-9A-Za-z.-]+)?$ ]]; then
+      rc=1
+      break
+    fi
+  done
+  # Restore on every exit path — a bare `return 1` inside the loop would leave
+  # globbing disabled for the rest of the script.
+  [ "$restore_glob" -eq 1 ] && set +f
+  return "$rc"
+}
+
+manifest_verdict="clean"
+minus_names=$'\n'
+plus_names=$'\n'
+
+disqualify_manifest() {
+  manifest_verdict="disqualified"
+  echo "npm-bump-extract.sh: $1" >&2
+}
+
+# --- Pass 2: manifests ---
+pass2_manifests() {
+  local line path kind name spec prefix
+  local in_manifest=0 current=""
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
+      path="${BASH_REMATCH[2]}"
+      kind=$(classify_path "$path")
+      if [ "$kind" = "manifest" ]; then
+        in_manifest=1
+        current="$path"
+      else
+        in_manifest=0
+      fi
+      continue
+    fi
+    [ "$in_manifest" -eq 1 ] || continue
+    [[ "$line" == +++* ]] && continue
+    [[ "$line" == ---[[:space:]]* ]] && continue
+    [[ "$line" =~ ^@@ ]] && continue
+    # Only changed lines are judged; context lines are inert.
+    [[ "$line" =~ ^[+-] ]] || continue
+
+    if ! [[ "$line" =~ ^([+-])[[:space:]]*\"([^\"]+)\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"[[:space:]]*,?[[:space:]]*$ ]]; then
+      disqualify_manifest "$current: unrecognized changed line: ${line}"
+      continue
+    fi
+    prefix="${BASH_REMATCH[1]}"
+    name="${BASH_REMATCH[2]}"
+    spec="${BASH_REMATCH[3]}"
+
+    case "$LIFECYCLE_KEYS" in
+      *$'\n'"$name"$'\n'*)
+        disqualify_manifest "$current: lifecycle key changed: $name"
+        continue
+        ;;
+    esac
+
+    if ! is_valid_range "$spec"; then
+      disqualify_manifest "$current: value is not a valid npm range: \"$name\": \"$spec\""
+      continue
+    fi
+
+    case "$corroborate" in
+      *$'\n'"$name"$'\n'*) ;;
+      *)
+        disqualify_manifest "$current: \"$name\" changed with no matching lockfile entry"
+        continue
+        ;;
+    esac
+
+    # Record the side this name appeared on, scoped to the file. Duplicates on
+    # the same side mean the same key changed twice, which is malformed.
+    if [ "$prefix" = "-" ]; then
+      case "$minus_names" in
+        *$'\n'"$current|$name"$'\n'*)
+          disqualify_manifest "$current: duplicate removed key: $name"
+          continue
+          ;;
+      esac
+      minus_names="${minus_names}${current}|${name}"$'\n'
+    else
+      case "$plus_names" in
+        *$'\n'"$current|$name"$'\n'*)
+          disqualify_manifest "$current: duplicate added key: $name"
+          continue
+          ;;
+      esac
+      plus_names="${plus_names}${current}|${name}"$'\n'
+    fi
+  done <<< "$input"
+
+  # Pairing check (spec §6.2). Every changed dependency must appear on BOTH
+  # sides — a replacement. An unmatched `+` is a dependency ADDED and an
+  # unmatched `-` is one REMOVED; both are unusual shapes for a Dependabot
+  # version-update PR and get human review. A new package entering the tree
+  # through a dependency-safety PR is the typosquat vector, and a freshly
+  # published malicious package has no advisories yet, so it scans clean.
+  local entry
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    case "$plus_names" in
+      *$'\n'"$entry"$'\n'*) ;;
+      *) disqualify_manifest "${entry%%|*}: dependency removed without replacement: ${entry##*|}" ;;
+    esac
+  done <<< "$(printf '%s' "$minus_names")"
+
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    case "$minus_names" in
+      *$'\n'"$entry"$'\n'*) ;;
+      *) disqualify_manifest "${entry%%|*}: dependency added without replacement: ${entry##*|}" ;;
+    esac
+  done <<< "$(printf '%s' "$plus_names")"
+}
+
 # --- Pass 1: lockfile ---
 pass1_lock() {
   local line kind path
@@ -366,14 +548,20 @@ pass1_lock() {
 }
 
 pass1_lock
+pass2_manifests
+
+# A manifest cannot be corroborated without a parseable lockfile, so a
+# disqualified or absent lockfile poisons every manifest in the diff.
+if [ "$lock_verdict" != "clean" ]; then
+  manifest_verdict="disqualified"
+fi
+if [ "$manifest_verdict" != "clean" ]; then
+  lock_verdict="disqualified"
+fi
 
 case "$MODE" in
   deps)
-    # `sort -u` over the WHOLE line, never `sort -k1,1 -u`. The latter
-    # deduplicates on the key field only, collapsing foo@1.0.0 and foo@2.0.0
-    # into one row:
-    #   $ printf 'foo\t1.0.0\tnpm\nfoo\t2.0.0\tnpm\n' | sort -t$'\t' -k1,1 -u
-    #   foo	1.0.0	npm
+    # `sort -u` over the whole line. NEVER `sort -k1,1 -u` — see Task 5.
     if [ "$lock_verdict" = "clean" ] && [ ${#tier1_rows[@]} -gt 0 ]; then
       printf '%s\n' "${tier1_rows[@]}" | sort -u
     fi
@@ -384,8 +572,11 @@ case "$MODE" in
     fi
     ;;
   cleared-paths)
-    if [ "$lock_verdict" = "clean" ] && [ -n "$lock_path" ]; then
-      printf '%s\n' "$lock_path"
+    if [ "$lock_verdict" = "clean" ]; then
+      {
+        [ -n "$lock_path" ] && printf '%s\n' "$lock_path"
+        printf '%s' "$manifest_paths" | sed '/^$/d'
+      } | sort -u
     fi
     ;;
 esac

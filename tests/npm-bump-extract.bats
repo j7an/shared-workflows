@@ -159,3 +159,42 @@ assert_disqualified() {
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+@test "clean manifest plus lock clears both paths and emits the row" {
+  run_fixture deps tests/fixtures/npm-bump-extract/manifest-and-lock-clean.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '@commitlint/cli\t21.0.2\tnpm')" ]
+  run_fixture cleared-paths tests/fixtures/npm-bump-extract/manifest-and-lock-clean.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'package.json\npnpm-lock.yaml')" ]
+}
+
+@test "lifecycle script in manifest disqualifies everything" {
+  assert_disqualified tests/fixtures/npm-bump-extract/manifest-postinstall.diff
+}
+
+@test "manifest dep with no matching lock entry disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/manifest-uncorroborated.diff
+}
+
+@test "manifest without a lockfile disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/manifest-without-lock.diff
+}
+
+@test "packageManager-only change disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/manifest-package-manager.diff
+}
+
+@test "dependency added without replacement disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/manifest-added-dep.diff
+}
+
+@test "dependency removed without replacement disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/manifest-removed-dep.diff
+}
+
+@test "wildcard and union ranges are accepted, not rejected" {
+  run_fixture cleared-paths tests/fixtures/npm-bump-extract/manifest-exotic-ranges.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'package.json\npnpm-lock.yaml')" ]
+}
