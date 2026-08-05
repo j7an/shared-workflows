@@ -28,6 +28,12 @@ set -euo pipefail
 # Dependabot pnpm PR (253 entries).
 TIER2_MAX_ENTRIES=1000
 
+# Lockfile format versions this parser understands. The parser keys on the
+# declared format version and on structure, never on which pnpm produced the
+# file — a future divergence must be a clean red gate, not a silent
+# correctness bug.
+SUPPORTED_LOCKFILE_VERSIONS=$'\n9.0\n'
+
 MODE=""
 for arg in "$@"; do
   case "$arg" in
@@ -128,6 +134,7 @@ pass1_lock() {
   local current_disposition=""
   local seen_column0=0
   local section=""
+  local declared=""
   while IFS= read -r line; do
     line="${line%$'\r'}"
     if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
@@ -151,6 +158,14 @@ pass1_lock() {
     [ "$in_lock" -eq 1 ] || continue
     [[ "$line" == +++* ]] && continue
     [[ "$line" == ---[[:space:]]* ]] && continue
+
+    # A document separator means sections may repeat, which the completeness
+    # reasoning does not cover. Distinguished from the diff's own file header
+    # (`--- a/path`), which always carries a path after the marker.
+    if [[ "$line" =~ ^[+\ -]---$ ]]; then
+      disqualify_lock "multi-document lockfile is not supported"
+      continue
+    fi
 
     # Hunk header seeds the section. git's function-context heuristic reports
     # the nearest column-0 line, which for pnpm-lock.yaml is a section name.
@@ -188,6 +203,18 @@ pass1_lock() {
     if [[ "$line" =~ ^[+\ -]([A-Za-z][A-Za-z0-9]*:)[[:space:]]*$ ]] \
        || [[ "$line" =~ ^[+\ -]([A-Za-z][A-Za-z0-9]*:)[[:space:]] ]]; then
       set_section "${BASH_REMATCH[1]}"
+      # A format-version change is always visible in the diff, because a
+      # changed line appears in a hunk by definition. When absent, the format
+      # did not change. Safe to clobber BASH_REMATCH here: set_section above
+      # already consumed the section capture.
+      if [ "$current_disposition" = "version" ] \
+         && [[ "$line" =~ ^\+lockfileVersion:[[:space:]]*\'?([0-9.]+)\'?[[:space:]]*$ ]]; then
+        declared="${BASH_REMATCH[1]}"
+        case "$SUPPORTED_LOCKFILE_VERSIONS" in
+          *$'\n'"$declared"$'\n'*) ;;
+          *) disqualify_lock "unsupported lockfileVersion: $declared" ;;
+        esac
+      fi
       # A changed line that IS the section key still counts as a change under
       # that section (e.g. `-pnpmfileChecksum: sha256-AAAA`).
       if [[ "$line" =~ ^[+-] ]] && [ "$current_disposition" != "version" ]; then

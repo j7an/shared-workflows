@@ -106,3 +106,11 @@ assert_disqualified() {
 @test "newly created lockfile disqualifies (no section context)" {
   assert_disqualified tests/fixtures/npm-bump-extract/lock-new-file.diff
 }
+
+@test "unsupported lockfileVersion disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-version-bump.diff
+}
+
+@test "multi-document lockfile disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-multidoc.diff
+}

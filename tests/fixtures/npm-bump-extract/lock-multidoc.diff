@@ -1,0 +1,12 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -98,6 +98,6 @@ importers:
+       '@pnpm/exe.win32-x64': 12.0.0-beta.4
+ 
++---
++lockfileVersion: '9.0'
++
+ settings:
+   autoInstallPeers: true
