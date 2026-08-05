@@ -124,6 +124,51 @@ set_section() {
   current_section="$1"
   current_disposition=$(section_disposition "$1")
   seen_column0=1
+  tier2_key_prefix=""
+}
+
+# base_version <version-string> — strip pnpm's peer-dependency suffix.
+# "21.0.2(@types/node@22.19.9)" → "21.0.2"
+base_version() {
+  printf '%s' "${1%%(*}"
+}
+
+# note_corroborated <name> — record that this dependency's lock entry changed.
+note_corroborated() {
+  case "$corroborate" in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  corroborate="${corroborate}${1}"$'\n'
+}
+
+# emit_tier1 <name> <version>
+# Dedup key is name@version, NOT name. A pnpm workspace can resolve the same
+# package at different versions in different importers; keying on name alone
+# drops one of them and produces a scanned-claim over an unscanned version.
+emit_tier1() {
+  local key="$1@$2"
+  case "$seen_tier1" in
+    *$'\n'"$key"$'\n'*) return 0 ;;
+  esac
+  seen_tier1="${seen_tier1}${key}"$'\n'
+  tier1_rows+=("$1"$'\t'"$2"$'\t'"npm")
+}
+
+# flush_entry — called at each entry/section/file boundary. Emits a tier-1 row
+# when the base version changed, and records corroboration when either the
+# specifier or the base version changed.
+flush_entry() {
+  local name="$1" minus="$2" plus="$3" spec="$4"
+  [ -z "$name" ] && return 0
+  local mb pb
+  mb=$(base_version "$minus")
+  pb=$(base_version "$plus")
+  if [ -n "$plus" ] && [ "$mb" != "$pb" ]; then
+    emit_tier1 "$name" "$pb"
+    note_corroborated "$name"
+  elif [ "$spec" -eq 1 ]; then
+    note_corroborated "$name"
+  fi
 }
 
 # --- Pass 1: lockfile ---
@@ -135,6 +180,8 @@ pass1_lock() {
   local seen_column0=0
   local section=""
   local declared=""
+  local entry_name="" minus_ver="" plus_ver="" spec_changed=0
+  local tier2_key_prefix=""
   while IFS= read -r line; do
     line="${line%$'\r'}"
     if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
@@ -227,6 +274,53 @@ pass1_lock() {
       continue
     fi
 
+    if [ "$current_disposition" = "tier1" ]; then
+      # Entry key line: a bare quoted-or-plain key with no value.
+      if [[ "$line" =~ ^[+\ -][[:space:]]+\'?([^\':]+)\'?:[[:space:]]*$ ]]; then
+        flush_entry "$entry_name" "$minus_ver" "$plus_ver" "$spec_changed"
+        entry_name="${BASH_REMATCH[1]}"
+        minus_ver=""; plus_ver=""; spec_changed=0
+        continue
+      fi
+      if [[ "$line" =~ ^[+-][[:space:]]+specifier:[[:space:]]*(.*)$ ]]; then
+        spec_changed=1
+        continue
+      fi
+      if [[ "$line" =~ ^-[[:space:]]+version:[[:space:]]*(.*)$ ]]; then
+        minus_ver="${BASH_REMATCH[1]}"
+        continue
+      fi
+      if [[ "$line" =~ ^\+[[:space:]]+version:[[:space:]]*(.*)$ ]]; then
+        plus_ver="${BASH_REMATCH[1]}"
+        continue
+      fi
+      # Anything else that CHANGED under a tier-1 section is unaccounted for.
+      # Falling through here is the §6.1 fail-open: it would clear the file with
+      # an unexamined change. Context lines remain inert.
+      if [[ "$line" =~ ^[+-] ]]; then
+        disqualify_lock "unrecognized changed line under ${current_section}: ${line}"
+      fi
+      continue
+    fi
+
+    if [ "$current_disposition" = "tier2" ]; then
+      # Package-key line. Record only which side it appeared on; emission is
+      # Task 6's job.
+      if [[ "$line" =~ ^([+\ -])[[:space:]]+\'?([^\'[:space:]]+)\'?:[[:space:]]*$ ]]; then
+        tier2_key_prefix="${BASH_REMATCH[1]}"
+        continue
+      fi
+      # A changed metadata line is only accounted for when the enclosing
+      # package key changed on the SAME side. Under a CONTEXT key it means the
+      # version did not move but its tarball did. Fail closed.
+      if [[ "$line" =~ ^([+-]) ]]; then
+        if [ "${BASH_REMATCH[1]}" != "$tier2_key_prefix" ]; then
+          disqualify_lock "changed metadata for an unchanged package version under packages:: ${line}"
+        fi
+      fi
+      continue
+    fi
+
     # Any changed line under a disqualifying or unknown section fails the file.
     if [[ "$line" =~ ^[+-] ]]; then
       case "$current_disposition" in
@@ -237,8 +331,33 @@ pass1_lock() {
       esac
     fi
   done <<< "$input"
+  flush_entry "$entry_name" "$minus_ver" "$plus_ver" "$spec_changed"
   return 0
 }
 
 pass1_lock
+
+case "$MODE" in
+  deps)
+    # `sort -u` over the WHOLE line, never `sort -k1,1 -u`. The latter
+    # deduplicates on the key field only, collapsing foo@1.0.0 and foo@2.0.0
+    # into one row:
+    #   $ printf 'foo\t1.0.0\tnpm\nfoo\t2.0.0\tnpm\n' | sort -t$'\t' -k1,1 -u
+    #   foo	1.0.0	npm
+    if [ "$lock_verdict" = "clean" ] && [ ${#tier1_rows[@]} -gt 0 ]; then
+      printf '%s\n' "${tier1_rows[@]}" | sort -u
+    fi
+    ;;
+  lockfile-entries)
+    if [ "$lock_verdict" = "clean" ] && [ ${#tier2_rows[@]} -gt 0 ]; then
+      printf '%s\n' "${tier2_rows[@]}" | sort -u
+    fi
+    ;;
+  cleared-paths)
+    if [ "$lock_verdict" = "clean" ] && [ -n "$lock_path" ]; then
+      printf '%s\n' "$lock_path"
+    fi
+    ;;
+esac
+
 exit 0

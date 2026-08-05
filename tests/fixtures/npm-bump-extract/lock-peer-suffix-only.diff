@@ -1,0 +1,9 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -61,7 +61,7 @@ importers:
+       '@sentry/nextjs':
+         specifier: ^10.32.1
+-        version: 10.38.0(react@19.2.3)(webpack@5.104.1)
++        version: 10.38.0(react@19.2.3)(webpack@5.104.1(lightningcss@1.32.0))

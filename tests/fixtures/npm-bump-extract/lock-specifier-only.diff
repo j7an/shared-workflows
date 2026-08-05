@@ -1,0 +1,10 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -199,4 +199,4 @@ importers:
+     dependencies:
+       foo:
+-        specifier: ^1.0.0
++        specifier: ^1.0.1
+         version: 1.0.5

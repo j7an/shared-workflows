@@ -114,3 +114,36 @@ assert_disqualified() {
 @test "multi-document lockfile disqualifies" {
   assert_disqualified tests/fixtures/npm-bump-extract/lock-multidoc.diff
 }
+
+@test "importers bump emits one tier-1 row per changed base version" {
+  run_fixture deps tests/fixtures/npm-bump-extract/lock-simple-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '@commitlint/cli\t21.0.2\tnpm\n@commitlint/config-conventional\t21.0.2\tnpm')" ]
+}
+
+@test "peer-suffix-only change emits no tier-1 row" {
+  run_fixture deps tests/fixtures/npm-bump-extract/lock-peer-suffix-only.diff
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "catalogs bump emits a tier-1 row" {
+  run_fixture deps tests/fixtures/npm-bump-extract/lock-catalog-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '@babel/core\t7.29.7\tnpm')" ]
+}
+
+@test "specifier-only change emits no row and does not disqualify" {
+  run_fixture deps tests/fixtures/npm-bump-extract/lock-specifier-only.diff
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run_fixture cleared-paths tests/fixtures/npm-bump-extract/lock-specifier-only.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "pnpm-lock.yaml" ]
+}
+
+@test "same package at two versions in two importers yields two rows" {
+  run_fixture deps tests/fixtures/npm-bump-extract/lock-two-versions.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'lodash\t4.17.21\tnpm\nlodash\t5.0.1\tnpm')" ]
+}
