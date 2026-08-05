@@ -1,0 +1,14 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/pnpm-lock.yaml
+@@ -0,0 +1,8 @@
++lockfileVersion: '9.0'
++
++importers:
++
++  .:
++    dependencies:
++      lodash:
++        specifier: ^4.17.21

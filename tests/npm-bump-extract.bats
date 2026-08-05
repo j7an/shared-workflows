@@ -57,3 +57,51 @@ run_fixture() {
     [ -z "$output" ]
   done
 }
+
+# Helper: asserts a fixture is fully disqualified. All three modes must emit
+# zero rows on STDOUT. Checking only --mode=deps cannot distinguish a
+# disqualified file from a clean file with nothing to extract — only
+# cleared-paths differs.
+#
+# `--separate-stderr` is required, not cosmetic. Plain `run` merges stderr into
+# $output, and disqualify_lock writes its reason to stderr — so `[ -z "$output" ]`
+# under plain `run` can never pass for a fixture that genuinely disqualifies.
+# The diagnostic is required behaviour (it is how the workflow explains a red
+# gate), so the assertion must scope to stdout rather than the diagnostic being
+# suppressed. Verified on bats 1.14.0; --separate-stderr exists since 1.5.0.
+assert_disqualified() {
+  local fixture="$1"
+  for mode in deps lockfile-entries cleared-paths; do
+    run --separate-stderr bash scripts/npm-bump-extract.sh "--mode=$mode" < "$fixture"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+}
+
+@test "lockfile overrides: change disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-overrides.diff
+}
+
+@test "lockfile pnpmfileChecksum change disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-pnpmfile-checksum.diff
+}
+
+@test "unrecognized lockfile section disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-unknown-section.diff
+}
+
+@test "hunk crossing from catalogs into overrides disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-cross-section.diff
+}
+
+@test "integrity change for an unchanged version disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-integrity-only.diff
+}
+
+@test "settings change disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-settings-change.diff
+}
+
+@test "newly created lockfile disqualifies (no section context)" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-new-file.diff
+}
