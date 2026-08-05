@@ -49,3 +49,11 @@ run_fixture() {
   [ "$status" -eq 2 ]
   [[ "$output" == *"unknown argument"* ]]
 }
+
+@test "diff with no npm files emits nothing in every mode" {
+  for mode in deps lockfile-entries cleared-paths; do
+    run_fixture "$mode" tests/fixtures/npm-bump-extract/unrelated-file.diff
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+}

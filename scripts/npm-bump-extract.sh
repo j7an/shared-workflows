@@ -64,4 +64,63 @@ if ! grep -qE '^(\+\+\+|---|@@|diff --git)' <<< "$input"; then
   exit 2
 fi
 
+# --- Path classification ---
+# Only these two filenames are in scope. package-lock.json and yarn.lock are
+# deliberately NOT handled here; they stay unsupported and fail closed.
+classify_path() {
+  local path="$1" base="${path##*/}"
+  case "$base" in
+    pnpm-lock.yaml) printf 'lock' ;;
+    package.json)   printf 'manifest' ;;
+    *)              printf '' ;;
+  esac
+}
+
+# --- Globals ---
+lock_path=""
+lock_verdict="absent"          # absent | clean | disqualified
+manifest_paths=$'\n'           # newline-delimited, leading+trailing newline
+tier1_rows=()
+tier2_rows=()
+corroborate=$'\n'              # "\n<name>\n" for names whose lock entry changed
+seen_tier1=$'\n'
+seen_tier2=$'\n'
+
+# disqualify_lock <reason> — mark the lockfile unusable and explain why.
+disqualify_lock() {
+  lock_verdict="disqualified"
+  echo "npm-bump-extract.sh: ${lock_path:-pnpm-lock.yaml}: $1" >&2
+}
+
+# --- Pass 1: lockfile ---
+pass1_lock() {
+  local line kind path
+  local in_lock=0
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
+      path="${BASH_REMATCH[2]}"
+      kind=$(classify_path "$path")
+      if [ "$kind" = "lock" ]; then
+        in_lock=1
+        lock_path="$path"
+        [ "$lock_verdict" = "absent" ] && lock_verdict="clean"
+      else
+        in_lock=0
+        if [ "$kind" = "manifest" ]; then
+          case "$manifest_paths" in
+            *$'\n'"$path"$'\n'*) ;;
+            *) manifest_paths="${manifest_paths}${path}"$'\n' ;;
+          esac
+        fi
+      fi
+      continue
+    fi
+    [ "$in_lock" -eq 1 ] || continue
+    [[ "$line" == +++* ]] && continue
+    [[ "$line" == ---[[:space:]]* ]] && continue
+  done <<< "$input"
+}
+
+pass1_lock
 exit 0
