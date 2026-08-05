@@ -1,0 +1,8 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -8,3 +8,3 @@ overrides:
+   semver: ^7.5.2
+-  minimist: ^1.2.6
++  minimist: ^1.2.8

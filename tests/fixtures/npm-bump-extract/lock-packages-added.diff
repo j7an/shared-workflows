@@ -1,0 +1,15 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -449,8 +449,8 @@ packages:
+-  '@commitlint/cli@20.5.0':
+-    resolution: {integrity: sha512-AAAA==}
++  '@commitlint/cli@21.0.2':
++    resolution: {integrity: sha512-BBBB==}
++
++  terser@5.48.0:
++    resolution: {integrity: sha512-CCCC==}
+@@ -900,3 +900,3 @@ snapshots:
+-  '@commitlint/cli@20.5.0': {}
++  '@commitlint/cli@21.0.2': {}

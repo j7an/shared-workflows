@@ -1,0 +1,11 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -110,5 +110,5 @@ catalogs:
+   default:
+     '@babel/core':
+-      specifier: ^7.29.6
+-      version: 7.29.6
++      specifier: ^7.29.7
++      version: 7.29.7

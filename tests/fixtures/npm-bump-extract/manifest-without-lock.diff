@@ -1,0 +1,9 @@
+diff --git a/package.json b/package.json
+index 1111111..2222222 100644
+--- a/package.json
++++ b/package.json
+@@ -168,4 +168,4 @@
+   "devDependencies": {
+-    "@commitlint/cli": "^20.5.0",
++    "@commitlint/cli": "^21.0.2",
+     "typescript": "^5.9.3"

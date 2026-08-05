@@ -1,0 +1,40 @@
+diff --git a/apps/desktop/package.json b/apps/desktop/package.json
+index 1111111..2222222 100644
+--- a/apps/desktop/package.json
++++ b/apps/desktop/package.json
+@@ -32,3 +32,3 @@
+     "framer-motion": "^12.43.0",
+-    "lucide-react": "^1.27.0",
++    "lucide-react": "^1.28.0",
+     "monaco-editor": "^0.56.0",
+diff --git a/package.json b/package.json
+index 3333333..4444444 100644
+--- a/package.json
++++ b/package.json
+@@ -22,3 +22,3 @@
+   "devDependencies": {
+     "@vitest/coverage-v8": "^4",
+-    "turbo": "^2.10.7"
++    "turbo": "^2.10.8"
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 5555555..6666666 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -20,9 +20,9 @@ importers:
+     dependencies:
+       lucide-react:
+-        specifier: ^1.27.0
+-        version: 1.27.0(react@19.2.8)
++        specifier: ^1.28.0
++        version: 1.28.0(react@19.2.8)
+     devDependencies:
+       turbo:
+-        specifier: ^2.10.7
+-        version: 2.10.7
++        specifier: ^2.10.8
++        version: 2.10.8
+@@ -300,4 +300,4 @@ packages:
+-  lucide-react@1.27.0:
+-    resolution: {integrity: sha512-AAAA==}
++  lucide-react@1.28.0:
++    resolution: {integrity: sha512-BBBB==}

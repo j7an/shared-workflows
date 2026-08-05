@@ -1,0 +1,8 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -40,3 +40,3 @@ futureSection:
+   thing:
+-    value: 1
++    value: 2
