@@ -1,0 +1,4 @@
+Bumps [@scalar/api-reference-react](https://github.com/scalar/scalar) from 0.7.42 to 0.9.60.
+<details>
+<summary>Changelog</summary>
+</details>

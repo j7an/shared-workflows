@@ -1,0 +1,6 @@
+{
+  "versionKey": { "system": "NPM", "name": "deprecated-pkg", "version": "1.0.0" },
+  "publishedAt": "2019-07-19T02:28:46Z",
+  "isDeprecated": true,
+  "deprecatedReason": "no longer maintained"
+}

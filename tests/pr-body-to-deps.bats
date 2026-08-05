@@ -61,3 +61,20 @@
   [ "$status" -eq 2 ]
   [[ "$output" == *"ecosystem must be"* ]]
 }
+
+@test "npm ecosystem argument is accepted" {
+  run bash -c 'printf "" | bash scripts/pr-body-to-deps.sh npm'
+  [ "$status" -eq 0 ]
+}
+
+@test "npm scoped package extracted from a Dependabot body" {
+  run bash scripts/pr-body-to-deps.sh npm < tests/fixtures/pr-body-to-deps/npm-scoped.txt
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '@scalar/api-reference-react\t0.9.60\tnpm')" ]
+}
+
+@test "error message names all three accepted ecosystems" {
+  run bash -c 'printf "" | bash scripts/pr-body-to-deps.sh cargo'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"'pypi', 'actions', or 'npm'"* ]]
+}

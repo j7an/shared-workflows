@@ -2,7 +2,7 @@
 # pr-body-to-deps.sh — extract Dependabot dep bumps from a PR body, emit TSV.
 # Defense-in-depth fallback for when extract-deps.sh returns zero rows.
 #
-# Arg:    <ecosystem>  — 'pypi' or 'actions'; emitted verbatim in TSV col 3.
+# Arg:    <ecosystem>  — 'pypi', 'actions', or 'npm'; emitted verbatim in TSV col 3.
 # Input:  PR body text on stdin.
 # Output: <name>\t<version>\t<ecosystem>  sorted, deduplicated.
 # Exit:   0 on success (including zero rows), 2 if ecosystem arg invalid.
@@ -11,8 +11,8 @@ set -euo pipefail
 
 ecosystem="${1:-}"
 case "$ecosystem" in
-  pypi|actions) ;;
-  *) echo "pr-body-to-deps.sh: ecosystem must be 'pypi' or 'actions'" >&2; exit 2 ;;
+  pypi|actions|npm) ;;
+  *) echo "pr-body-to-deps.sh: ecosystem must be 'pypi', 'actions', or 'npm'" >&2; exit 2 ;;
 esac
 
 input=$(cat)
