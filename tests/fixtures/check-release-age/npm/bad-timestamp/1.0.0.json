@@ -1,0 +1,5 @@
+{
+  "versionKey": { "system": "NPM", "name": "bad-timestamp", "version": "1.0.0" },
+  "publishedAt": "not-a-timestamp",
+  "isDeprecated": false
+}

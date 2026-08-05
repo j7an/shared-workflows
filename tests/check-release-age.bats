@@ -39,3 +39,55 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ ^no-such-action/does-not-exist$'\t'1\.0\.0$'\t'actions$'\t'-$'\t'-$'\t'error$'\t'tier-1-404$ ]]
 }
+
+@test "npm happy path returns pass for aged release" {
+  export COOLDOWN_DAYS=7
+  run bash -c 'printf "lodash\t4.17.21\tnpm\n" | bash scripts/check-release-age.sh'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^lodash$'\t'4\.17\.21$'\t'npm$'\t'.+$'\t'[0-9]+$'\t'pass$'\t'$ ]]
+}
+
+@test "npm scoped package name resolves its fixture" {
+  export COOLDOWN_DAYS=7
+  run bash -c 'printf "@types/node\t22.19.9\tnpm\n" | bash scripts/check-release-age.sh'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^@types/node$'\t'22\.19\.9$'\t'npm$'\t'.+$'\t'[0-9]+$'\t'pass$'\t'$ ]]
+}
+
+@test "deprecated npm release fails regardless of age" {
+  export COOLDOWN_DAYS=7
+  run bash -c 'printf "deprecated-pkg\t1.0.0\tnpm\n" | bash scripts/check-release-age.sh'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^deprecated-pkg$'\t'1\.0\.0$'\t'npm$'\t'.+$'\t'[0-9]+$'\t'fail$'\t'deprecated$ ]]
+}
+
+@test "missing npm fixture produces npm-404 error verdict" {
+  export COOLDOWN_DAYS=7
+  run bash -c 'printf "no-such-pkg\t9.9.9\tnpm\n" | bash scripts/check-release-age.sh'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^no-such-pkg$'\t'9\.9\.9$'\t'npm$'\t'-$'\t'-$'\t'error$'\t'npm-404$ ]]
+}
+
+@test "npm release younger than COOLDOWN_DAYS fails" {
+  export COOLDOWN_DAYS=7
+  # @types/node fixture publishedAt 2026-02-05; NOW_EPOCH is 2026-04-12, so a
+  # very large cooldown forces the violation branch deterministically.
+  export COOLDOWN_DAYS=999
+  run bash -c 'printf "@types/node\t22.19.9\tnpm\n" | bash scripts/check-release-age.sh'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^@types/node$'\t'22\.19\.9$'\t'npm$'\t'.+$'\t'[0-9]+$'\t'fail$'\t'$ ]]
+}
+
+@test "npm response missing publishedAt produces transient-failure" {
+  export COOLDOWN_DAYS=7
+  run bash -c 'printf "no-published-at\t1.0.0\tnpm\n" | bash scripts/check-release-age.sh'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^no-published-at$'\t'1\.0\.0$'\t'npm$'\t'-$'\t'-$'\t'error$'\t'transient-failure$ ]]
+}
+
+@test "npm response with unparseable timestamp produces parse-failure" {
+  export COOLDOWN_DAYS=7
+  run bash -c 'printf "bad-timestamp\t1.0.0\tnpm\n" | bash scripts/check-release-age.sh'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^bad-timestamp$'\t'1\.0\.0$'\t'npm$'\t'-$'\t'-$'\t'error$'\t'parse-failure$ ]]
+}

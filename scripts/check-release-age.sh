@@ -5,6 +5,9 @@
 #   in:  <name>\t<version>\t<ecosystem>
 #   out: <name>\t<version>\t<ecosystem>\t<published_iso>\t<age_days>\t<verdict>\t<reason>
 #
+# Ecosystems: actions (GitHub releases API), pypi (PyPI JSON API),
+# npm (deps.dev stable v3).
+#
 # Verdicts: pass | fail | error
 # Exit: always 0; failures are per-row.
 #
@@ -73,6 +76,43 @@ fetch_pypi() {
   printf '%s\t%s\n' "$upload" "$yanked"
 }
 
+# urlencode_pkg <name> — percent-encode an npm package name for a URL path.
+# Scoped names contain '@' and '/', both of which must be encoded.
+urlencode_pkg() {
+  local name="$1"
+  name="${name//@/%40}"
+  name="${name//\//%2F}"
+  printf '%s' "$name"
+}
+
+# fetch_npm <pkg> <version> — print "<publishedAt>\t<isDeprecated>" on stdout,
+# return 1 on failure. Source is deps.dev stable v3: one ~1 KB response
+# carries both facts, where the npm registry needs a multi-MB packument for
+# the timestamp plus a second request for deprecation.
+fetch_npm() {
+  local pkg="$1" version="$2"
+  local published deprecated
+  if [ -n "${AGE_FIXTURE_DIR:-}" ]; then
+    local fx="$AGE_FIXTURE_DIR/npm/$pkg/$version.json"
+    [ -f "$fx" ] || return 1
+    published=$(jq -r '.publishedAt // empty' "$fx")
+    deprecated=$(jq -r '.isDeprecated // false' "$fx")
+    printf '%s\t%s\n' "$published" "$deprecated"
+    return 0
+  fi
+  local url resp
+  url="https://api.deps.dev/v3/systems/npm/packages/$(urlencode_pkg "$pkg")/versions/$version"
+  if ! resp=$(curl -sf --max-time 30 "$url" 2>/dev/null); then
+    sleep 2
+    if ! resp=$(curl -sf --max-time 30 "$url" 2>/dev/null); then
+      return 1
+    fi
+  fi
+  published=$(printf '%s' "$resp" | jq -r '.publishedAt // empty')
+  deprecated=$(printf '%s' "$resp" | jq -r '.isDeprecated // false')
+  printf '%s\t%s\n' "$published" "$deprecated"
+}
+
 # emit name version ecosystem published age verdict reason
 emit() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7"
@@ -130,6 +170,31 @@ while IFS=$'\t' read -r name version ecosystem || [ -n "${name:-}" ]; do
       age_days=$(( (NOW_EPOCH - pub_epoch) / 86400 ))
       if [ "$yanked" = "true" ]; then
         emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" "yanked"
+      elif [ "$age_days" -ge "$COOLDOWN_DAYS" ]; then
+        emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "pass" ""
+      else
+        emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" ""
+      fi
+      ;;
+
+    npm)
+      if ! result=$(fetch_npm "$name" "$version"); then
+        emit "$name" "$version" "$ecosystem" "-" "-" "error" "npm-404"
+        continue
+      fi
+      iso="${result%%$'\t'*}"
+      deprecated="${result##*$'\t'}"
+      if [ -z "$iso" ]; then
+        emit "$name" "$version" "$ecosystem" "-" "-" "error" "transient-failure"
+        continue
+      fi
+      if ! pub_epoch=$(iso_to_epoch "$iso"); then
+        emit "$name" "$version" "$ecosystem" "-" "-" "error" "parse-failure"
+        continue
+      fi
+      age_days=$(( (NOW_EPOCH - pub_epoch) / 86400 ))
+      if [ "$deprecated" = "true" ]; then
+        emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" "deprecated"
       elif [ "$age_days" -ge "$COOLDOWN_DAYS" ]; then
         emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "pass" ""
       else
