@@ -198,3 +198,35 @@ assert_disqualified() {
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'package.json\npnpm-lock.yaml')" ]
 }
+
+@test "grouped monorepo: rows from lock, all paths cleared" {
+  run_fixture deps tests/fixtures/npm-bump-extract/real-grouped-monorepo.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'lucide-react\t1.28.0\tnpm\nturbo\t2.10.8\tnpm')" ]
+
+  run_fixture cleared-paths tests/fixtures/npm-bump-extract/real-grouped-monorepo.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'apps/desktop/package.json\npackage.json\npnpm-lock.yaml')" ]
+}
+
+@test "grouped monorepo: bare-major range does not become a version" {
+  # "@vitest/coverage-v8": "^4" is a context line here. This asserts no row
+  # ever carries a bare major as its version.
+  run_fixture deps tests/fixtures/npm-bump-extract/real-grouped-monorepo.diff
+  [ "$status" -eq 0 ]
+  ! [[ "$output" =~ $'\t'4$'\t' ]]
+}
+
+@test "lockfile-only security update: zero tier-1 rows, tier-2 swept, path cleared" {
+  run_fixture deps tests/fixtures/npm-bump-extract/real-lockfile-only.diff
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  run_fixture lockfile-entries tests/fixtures/npm-bump-extract/real-lockfile-only.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'minimist\t1.2.8\tnpm')" ]
+
+  run_fixture cleared-paths tests/fixtures/npm-bump-extract/real-lockfile-only.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "pnpm-lock.yaml" ]
+}
