@@ -1,3 +1,4 @@
+bats_require_minimum_version 1.5.0
 #!/usr/bin/env bats
 
 # Helper: run the extractor in one mode against a here-string diff.
