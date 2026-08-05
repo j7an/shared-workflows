@@ -69,7 +69,6 @@ setup() {
 }
 
 @test "npm release younger than COOLDOWN_DAYS fails" {
-  export COOLDOWN_DAYS=7
   # @types/node fixture publishedAt 2026-02-05; NOW_EPOCH is 2026-04-12, so a
   # very large cooldown forces the violation branch deterministically.
   export COOLDOWN_DAYS=999
@@ -90,4 +89,39 @@ setup() {
   run bash -c 'printf "bad-timestamp\t1.0.0\tnpm\n" | bash scripts/check-release-age.sh'
   [ "$status" -eq 0 ]
   [[ "$output" =~ ^bad-timestamp$'\t'1\.0\.0$'\t'npm$'\t'-$'\t'-$'\t'error$'\t'parse-failure$ ]]
+}
+
+@test "urlencode_segment percent-encodes scope separators" {
+  run bash -c 'eval "$(sed -n "/^urlencode_segment()/,/^}/p" scripts/check-release-age.sh)"; urlencode_segment "@types/node"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "%40types%2Fnode" ]
+}
+
+@test "urlencode_segment neutralises path traversal in a version string" {
+  run bash -c 'eval "$(sed -n "/^urlencode_segment()/,/^}/p" scripts/check-release-age.sh)"; urlencode_segment "1.0.0/../../lodash/versions/4.17.21"'
+  [ "$status" -eq 0 ]
+  [[ "$output" != */* ]]
+  [ "$output" = "1.0.0%2F..%2F..%2Flodash%2Fversions%2F4.17.21" ]
+}
+
+@test "urlencode_segment leaves unreserved characters alone" {
+  run bash -c 'eval "$(sed -n "/^urlencode_segment()/,/^}/p" scripts/check-release-age.sh)"; urlencode_segment "lodash-4.17.21_x.y"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "lodash-4.17.21_x.y" ]
+}
+
+@test "npm release exactly at COOLDOWN_DAYS passes (boundary is inclusive)" {
+  # @types/node fixture publishedAt 2026-02-05T14:45:05Z against the pinned
+  # NOW_EPOCH gives age_days == 65 exactly, so this pins the -ge boundary.
+  export COOLDOWN_DAYS=65
+  run bash -c 'printf "@types/node\t22.19.9\tnpm\n" | bash scripts/check-release-age.sh'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^@types/node$'\t'22\.19\.9$'\t'npm$'\t'.+$'\t'65$'\t'pass$'\t'$ ]]
+}
+
+@test "npm release one day under COOLDOWN_DAYS fails" {
+  export COOLDOWN_DAYS=66
+  run bash -c 'printf "@types/node\t22.19.9\tnpm\n" | bash scripts/check-release-age.sh'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^@types/node$'\t'22\.19\.9$'\t'npm$'\t'.+$'\t'65$'\t'fail$'\t'$ ]]
 }

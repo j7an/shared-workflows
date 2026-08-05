@@ -76,13 +76,14 @@ fetch_pypi() {
   printf '%s\t%s\n' "$upload" "$yanked"
 }
 
-# urlencode_pkg <name> — percent-encode an npm package name for a URL path.
-# Scoped names contain '@' and '/', both of which must be encoded.
-urlencode_pkg() {
-  local name="$1"
-  name="${name//@/%40}"
-  name="${name//\//%2F}"
-  printf '%s' "$name"
+# urlencode_segment <value> — percent-encode one URL path segment.
+# jq's @uri leaves only the unreserved set (A-Za-z0-9-_.~) intact, so scope
+# separators ('@', '/'), traversal sequences, and query/fragment delimiters are
+# all neutralised. Applied to the version as well as the name: curl normalises
+# '..' segments client-side, so an unencoded '/' in a version string would let
+# one package's age be reported for another.
+urlencode_segment() {
+  jq -rn --arg s "$1" '$s|@uri'
 }
 
 # fetch_npm <pkg> <version> — print "<publishedAt>\t<isDeprecated>" on stdout,
@@ -101,7 +102,7 @@ fetch_npm() {
     return 0
   fi
   local url resp
-  url="https://api.deps.dev/v3/systems/npm/packages/$(urlencode_pkg "$pkg")/versions/$version"
+  url="https://api.deps.dev/v3/systems/npm/packages/$(urlencode_segment "$pkg")/versions/$(urlencode_segment "$version")"
   if ! resp=$(curl -sf --max-time 30 "$url" 2>/dev/null); then
     sleep 2
     if ! resp=$(curl -sf --max-time 30 "$url" 2>/dev/null); then
