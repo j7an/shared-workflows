@@ -171,6 +171,26 @@ flush_entry() {
   fi
 }
 
+# emit_tier2 <name> <version>
+# Keyed on name@version for the same reason as emit_tier1 (§6.4).
+emit_tier2() {
+  local key="$1@$2"
+  case "$seen_tier2" in
+    *$'\n'"$key"$'\n'*) return 0 ;;
+  esac
+  seen_tier2="${seen_tier2}${key}"$'\n'
+  tier2_rows+=("$1"$'\t'"$2"$'\t'"npm")
+}
+
+# split_package_key <'name@version'> — sets _pkg_name and _pkg_version.
+# Scoped names start with '@', so the split is on the LAST '@'.
+split_package_key() {
+  local key="$1"
+  _pkg_name="${key%@*}"
+  _pkg_version="${key##*@}"
+  [ -n "$_pkg_name" ] && [ -n "$_pkg_version" ]
+}
+
 # --- Pass 1: lockfile ---
 pass1_lock() {
   local line kind path
@@ -304,10 +324,17 @@ pass1_lock() {
     fi
 
     if [ "$current_disposition" = "tier2" ]; then
-      # Package-key line. Record only which side it appeared on; emission is
-      # Task 6's job.
+      # Package-key line. A legitimate version replacement changes the key AND
+      # its metadata on the same side, which is why the side is still recorded.
       if [[ "$line" =~ ^([+\ -])[[:space:]]+\'?([^\'[:space:]]+)\'?:[[:space:]]*$ ]]; then
         tier2_key_prefix="${BASH_REMATCH[1]}"
+        if [ "$tier2_key_prefix" = "+" ]; then
+          if split_package_key "${BASH_REMATCH[2]}"; then
+            emit_tier2 "$_pkg_name" "$_pkg_version"
+          else
+            disqualify_lock "unparseable package key under packages:: ${BASH_REMATCH[2]}"
+          fi
+        fi
         continue
       fi
       # A changed metadata line is only accounted for when the enclosing
@@ -332,6 +359,9 @@ pass1_lock() {
     fi
   done <<< "$input"
   flush_entry "$entry_name" "$minus_ver" "$plus_ver" "$spec_changed"
+  if [ ${#tier2_rows[@]} -gt "$TIER2_MAX_ENTRIES" ]; then
+    disqualify_lock "tier-2 entries (${#tier2_rows[@]}) exceed cap of ${TIER2_MAX_ENTRIES}"
+  fi
   return 0
 }
 

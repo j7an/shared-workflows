@@ -147,3 +147,15 @@ assert_disqualified() {
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'lodash\t4.17.21\tnpm\nlodash\t5.0.1\tnpm')" ]
 }
+
+@test "tier-2 collects newly added packages entries, skipping snapshots" {
+  run_fixture lockfile-entries tests/fixtures/npm-bump-extract/lock-packages-added.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '@commitlint/cli\t21.0.2\tnpm\nterser\t5.48.0\tnpm')" ]
+}
+
+@test "tier-2 does not leak into tier-1 output" {
+  run_fixture deps tests/fixtures/npm-bump-extract/lock-packages-added.diff
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
