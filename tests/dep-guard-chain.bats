@@ -419,3 +419,56 @@ run_sweep() {
   [[ "$output" == *"ERRC=0"* ]] || return 1
   [[ "$output" == *"SECTION<<>>"* ]] || return 1
 }
+
+# ---------------------------------------------------------------------------
+# Task 20 — age counts split age-only failures (empty $7 reason) from
+# supply-risk failures (yanked/deprecated, non-empty $7), so reporting can
+# stop describing every `fail` row as "younger than Nd".
+# ---------------------------------------------------------------------------
+
+# Emit one TSV row per argument. Tabs written as \t; %b expands them.
+age_tsv() {
+  local row
+  for row in "$@"; do printf '%b\n' "$row"; done
+}
+
+@test "age counts split age-only failures from supply-risk failures" {
+  AGE_TSV=$(age_tsv 'a\t1.0.0\tnpm\t2026-04-01T00:00:00Z\t2\tfail\t' \
+                    'b\t2.0.0\tnpm\t2019-01-01T00:00:00Z\t2500\tfail\tdeprecated' \
+                    'c\t3.0.0\tpypi\t2019-01-01T00:00:00Z\t2500\tfail\tyanked' \
+                    'd\t4.0.0\tnpm\t2020-01-01T00:00:00Z\t2000\tpass\t')
+  eval "$(extract_named_block "$WF" 'age counts')"
+  [ "$AGE_VIOLATION_COUNT" -eq 3 ]
+  [ "$AGE_ONLY_COUNT" -eq 1 ]
+  [ "$SUPPLY_RISK_COUNT" -eq 2 ]
+}
+
+@test "a deprecation-only failure yields no age-only violations" {
+  AGE_TSV=$(age_tsv 'b\t2.0.0\tnpm\t2019-01-01T00:00:00Z\t2500\tfail\tdeprecated')
+  eval "$(extract_named_block "$WF" 'age counts')"
+  [ "$AGE_VIOLATION_COUNT" -eq 1 ]
+  [ "$AGE_ONLY_COUNT" -eq 0 ]
+  [ "$SUPPLY_RISK_COUNT" -eq 1 ]
+}
+
+@test "no earliest-age-compliant footer when every failure is a deprecation" {
+  AGE_TSV=$(age_tsv 'b\t2.0.0\tnpm\t2019-01-01T00:00:00Z\t2500\tfail\tdeprecated')
+  MINIMUM_RELEASE_AGE_DAYS=5
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [ -z "$AGE_FOOTER" ]
+  [[ "$RELEASE_AGE_SECTION" == *'❌ blocked (deprecated)'* ]] || return 1
+  [[ "$RELEASE_AGE_SECTION" != *'age-compliant date'* ]] || return 1
+}
+
+@test "the footer still appears when a genuine age failure is present" {
+  AGE_TSV=$(age_tsv 'a\t1.0.0\tnpm\t2026-04-01T00:00:00Z\t2\tfail\t' \
+                    'b\t2.0.0\tnpm\t2019-01-01T00:00:00Z\t2500\tfail\tdeprecated')
+  MINIMUM_RELEASE_AGE_DAYS=5
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [[ "$AGE_FOOTER" == *'age-compliant date'* ]] || return 1
+  # Seeded from the age-only row (2026-04-01 + 5d), never from the 2019 deprecation.
+  [[ "$AGE_FOOTER" == *'2026-04-06'* ]] || return 1
+  [[ "$AGE_FOOTER" == *'1 package(s) below minimum'* ]] || return 1
+}

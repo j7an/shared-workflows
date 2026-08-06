@@ -2590,7 +2590,16 @@ jobs:
           # --- Compute verdict via safety_verdict (inline copy of scripts/safety-verdict.sh) ---
           # Split COOLDOWN_FAILURES into age_error_count vs age_violation_count by
           # re-reading AGE_TSV (verdicts: 'fail' = violation, 'error' = lookup error).
-          AGE_VIOLATION_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail"'  | wc -l | tr -d ' ')
+          # --- BEGIN age counts ---
+          # AGE_VIOLATION_COUNT keeps its meaning — every fail row — because it
+          # drives the gate and is consumed by safety-verdict.sh. The two counts
+          # below exist only so the reporting can tell the two kinds apart: an
+          # empty reason means "too young", a non-empty one means yanked or
+          # deprecated, which waiting will never resolve.
+          AGE_VIOLATION_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail"' | wc -l | tr -d ' ')
+          AGE_ONLY_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" && $7==""' | wc -l | tr -d ' ')
+          SUPPLY_RISK_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" && $7!=""' | wc -l | tr -d ' ')
+          # --- END age counts ---
           AGE_ERROR_COUNT=$(    echo "$AGE_TSV" | awk -F'\t' '$6=="error"' | wc -l | tr -d ' ')
 
           # SCAN_ERROR_COUNT is incremented at each GHSA/OSV failure point in the
@@ -2646,7 +2655,7 @@ jobs:
           LABEL_COLOR_security_review_needed="B60205"
           LABEL_DESC_security_review_needed="Dependency scan found advisories — manual review required"
           LABEL_COLOR_dependency_age_violation="FBCA04"
-          LABEL_DESC_dependency_age_violation="Target version younger than the configured minimum release age (release_age_policy)"
+          LABEL_DESC_dependency_age_violation="Target version blocked by the release-age gate: below the configured minimum age, or yanked/deprecated upstream (release_age_policy)"
           LABEL_COLOR_dependency_safety_error="6E7781"
           LABEL_DESC_dependency_safety_error="dependency-safety scan could not complete reliably — see scan comment"
 
@@ -2733,6 +2742,20 @@ jobs:
             RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
           fi
 
+          # age_status_phrase — one clause per kind of failure actually present,
+          # so a deprecation is never described as "younger than Nd".
+          age_status_phrase() {
+            local parts=""
+            if [ "$AGE_ONLY_COUNT" -gt 0 ]; then
+              parts="${AGE_ONLY_COUNT} package(s) younger than ${MINIMUM_RELEASE_AGE_DAYS}d minimum release age"
+            fi
+            if [ "$SUPPLY_RISK_COUNT" -gt 0 ]; then
+              if [ -n "$parts" ]; then parts="${parts}; "; fi
+              parts="${parts}${SUPPLY_RISK_COUNT} package(s) yanked or deprecated upstream"
+            fi
+            printf '%s' "$parts"
+          }
+
           # ---- Header + footer (from verdict priority — must match safety-verdict.sh order) ----
           # Priority: guard > error > blocking-age > advisories > advisory-age > clean.
           # Spec §6.1 — keep this order in sync with the script.
@@ -2748,8 +2771,12 @@ jobs:
             RESULTS_HEADER="Scan completed with errors — see workflow logs."
             RESULTS_FOOTER="> Scan errors prevented a clean verdict. Re-run or push to retry."
           elif [ "$HAS_AGE_VIOLATION" = "true" ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
-            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) younger than the ${MINIMUM_RELEASE_AGE_DAYS}-day minimum release age (blocking policy)."
-            RESULTS_FOOTER="> Re-run by rebasing or recreating the PR after the age-compliant date below."
+            RESULTS_HEADER="$(age_status_phrase) (blocking policy)."
+            if [ "$AGE_ONLY_COUNT" -gt 0 ]; then
+              RESULTS_FOOTER="> Re-run by rebasing or recreating the PR after the age-compliant date below."
+            else
+              RESULTS_FOOTER="> Yanked or deprecated releases do not become compliant by waiting — pin a different version."
+            fi
             if [ "$TOTAL" -gt 0 ]; then
               # Cross-reference: advisories are present too. Don't lose that signal under the age-violation header.
               RESULTS_FOOTER="${RESULTS_FOOTER}"$'\n'"> Also: ${TOTAL} advisory/ies affect target versions — see table above."
@@ -2759,7 +2786,7 @@ jobs:
             RESULTS_FOOTER="> Review the advisories above before deciding to merge."
           elif [ "$HAS_AGE_VIOLATION" = "true" ]; then
             # release_age_policy: advisory — reported, not blocking.
-            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) below the ${MINIMUM_RELEASE_AGE_DAYS}-day minimum release age (advisory policy — not blocking)."
+            RESULTS_HEADER="$(age_status_phrase) (advisory policy — not blocking)."
             RESULTS_FOOTER="> Release-age violation reported (advisory policy — not blocking). Auto-merge suppressed."
           else
             RESULTS_HEADER="No known exploits found affecting the target versions."
@@ -2788,6 +2815,7 @@ jobs:
 
           # --- Release Age section (Task 12 — fixes #25 UX) ---
           RELEASE_AGE_SECTION=""
+          # --- BEGIN release age section ---
           if [ -n "$AGE_TSV" ]; then
             AGE_TABLE_HDR="| Package | Version | Published | Age | Status |"
             AGE_TABLE_SEP="|---------|---------|-----------|-----|--------|"
@@ -2808,8 +2836,11 @@ jobs:
               fi
               AGE_ROWS="${AGE_ROWS}| \`${_name}\` | v${_ver} | ${_published_short} | ${_days}d | ${_status} |"$'\n'
 
-              # Track max fail epoch for "earliest unblock" footer
-              if [ "$_verdict" = "fail" ] && [ "$_iso" != "-" ]; then
+              # Track max fail epoch for "earliest unblock" footer. Age-only rows
+              # (empty reason) only — a yanked/deprecated row's publish date is
+              # not a date that waiting will ever resolve, so it must not seed
+              # the unblock-date computation below.
+              if [ "$_verdict" = "fail" ] && [ -z "$_reason" ] && [ "$_iso" != "-" ]; then
                 _pub_epoch=$(date -u -d "$_iso" +%s 2>/dev/null \
                   || date -u -d "${_iso}Z" +%s 2>/dev/null \
                   || date -u -jf '%Y-%m-%dT%H:%M:%SZ' "$_iso" +%s 2>/dev/null \
@@ -2822,18 +2853,19 @@ jobs:
             done <<< "$AGE_TSV"
 
             AGE_FOOTER=""
-            if [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
+            if [ "$AGE_ONLY_COUNT" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
               _unblock_epoch=$(( MAX_FAIL_EPOCH + MINIMUM_RELEASE_AGE_DAYS * 86400 ))
               _unblock_iso=$(date -u -d "@$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
                 || date -u -r "$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
                 || echo "unknown")
               AGE_FOOTER="$(printf '\n> %d package(s) below minimum. Earliest age-compliant date: %s.\n> Re-run by rebasing or recreating the PR after that date.' \
-                "$AGE_VIOLATION_COUNT" "$_unblock_iso")"
+                "$AGE_ONLY_COUNT" "$_unblock_iso")"
             fi
 
             RELEASE_AGE_SECTION="$(printf '\n### Release Age (minimum: %s days)\n\n%s\n%s\n%s%s' \
               "$MINIMUM_RELEASE_AGE_DAYS" "$AGE_TABLE_HDR" "$AGE_TABLE_SEP" "$AGE_ROWS" "$AGE_FOOTER")"
           fi
+          # --- END release age section ---
 
           # --- Extraction warning section (Task 12 — surfaces #27 silent drops) ---
           EXTRACTION_WARNING_SECTION=""

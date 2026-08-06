@@ -72,3 +72,15 @@ input_default() {
   run grep -q "v3alpha" .github/workflows/dependency-safety.yml
   [ "$status" -ne 0 ]
 }
+
+@test "PR-comment age headers are composed, not hardcoded to 'younger than'" {
+  run grep -c 'RESULTS_HEADER="$(age_status_phrase)' .github/workflows/dependency-safety.yml
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 2 ]
+}
+
+@test "no RESULTS_HEADER still claims every age failure is too young" {
+  # grep -c exits 1 on zero matches, so assert on output, not status.
+  run grep -c 'RESULTS_HEADER="${AGE_VIOLATION_COUNT}' .github/workflows/dependency-safety.yml
+  [ "$output" -eq 0 ]
+}
