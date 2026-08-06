@@ -2268,6 +2268,119 @@ jobs:
             fi
           done
 
+          while IFS=$'\t' read -r PKG _npm_ver; do
+            [ -z "$PKG" ] && continue
+            if [ -n "$_npm_ver" ]; then
+              DEPS="${DEPS}\`${PKG}\` (${_npm_ver}), "
+            else
+              DEPS="${DEPS}\`${PKG}\`, "
+            fi
+
+            GHSA_RESULT=$(gh api graphql -f query='
+              query($name: String!) {
+                securityVulnerabilities(
+                  ecosystem: NPM
+                  package: $name
+                  first: 10
+                ) {
+                  nodes {
+                    advisory {
+                      ghsaId
+                      severity
+                      summary
+                    }
+                    vulnerableVersionRange
+                    firstPatchedVersion {
+                      identifier
+                    }
+                  }
+                }
+              }
+            ' -f "name=${PKG}" 2>&1) || {
+              HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${PKG}\`) | - | - | GHSA |"$'\n'
+              GHSA_RESULT=""
+            }
+
+            if [ -n "$GHSA_RESULT" ] && echo "$GHSA_RESULT" | jq -e '.errors' > /dev/null 2>&1; then
+              HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
+              GHSA_ERR=$(echo "$GHSA_RESULT" | jq -r '.errors[0].message // "unknown error"')
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${PKG}\`: ${GHSA_ERR}) | - | - | GHSA |"$'\n'
+              GHSA_RESULT=""
+            fi
+
+            if [ -n "$GHSA_RESULT" ]; then
+              # Version-aware filtering is MANDATORY (spec §7.1), mirroring the
+              # pypi loop. Without it, every npm bump of a package carrying any
+              # historical CVE — which is most widely-used packages — lands
+              # security-review-needed and suppresses auto-merge. The gate would
+              # be useless through false positives rather than unsafe.
+              if [ -n "$_npm_ver" ]; then
+                while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
+                  [ -z "$_g_id" ] && continue
+                  if [ -n "$_g_patched" ] && [ "$_g_patched" != "null" ] \
+                     && printf '%s\n%s\n' "$_g_patched" "$_npm_ver" \
+                        | sort -V -C 2>/dev/null; then
+                    # firstPatchedVersion <= target: already fixed in this bump.
+                    FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                    FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
+                  else
+                    SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                    GHSA_TOTAL=$((GHSA_TOTAL + 1))
+                  fi
+                done <<< "$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[]? |
+                  [.advisory.ghsaId, .advisory.severity, .advisory.summary,
+                   (.firstPatchedVersion.identifier // "")] | @tsv
+                ' 2>/dev/null || true)"
+              else
+                # No target version: report everything. Safer default, matching
+                # the existing Actions and pypi behavior.
+                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[]? |
+                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
+                ' 2>/dev/null || true)
+                if [ -n "$GHSA_VULNS" ]; then
+                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
+                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
+                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                fi
+              fi
+            fi
+
+            if [ -n "$_npm_ver" ]; then
+              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "npm" --arg ver "$_npm_ver" \
+                '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
+            else
+              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "npm" \
+                '{"package":{"name":$name,"ecosystem":$eco}}')
+            fi
+            OSV_RESULT=$(curl -sf --max-time 30 \
+              -X POST "https://api.osv.dev/v1/query" \
+              -H "Content-Type: application/json" \
+              -d "$OSV_BODY" \
+              2>/dev/null) || {
+              HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
+              SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${PKG}\`) | - | - | OSV |"$'\n'
+              OSV_RESULT=""
+            }
+
+            if [ -n "$OSV_RESULT" ]; then
+              OSV_VULNS=$(echo "$OSV_RESULT" | jq -r '
+                .vulns[]? |
+                "| \(.id) | \(.database_specific.severity // "UNKNOWN") | \(.summary // .details[:80]) | OSV |"
+              ' 2>/dev/null || true)
+              if [ -n "$OSV_VULNS" ]; then
+                OSV_COUNT=$(echo "$OSV_VULNS" | wc -l | tr -d ' ')
+                OSV_TOTAL=$((OSV_TOTAL + OSV_COUNT))
+                SCAN_RESULTS="${SCAN_RESULTS}${OSV_VULNS}"$'\n'
+              fi
+            fi
+          done <<< "$NPM_ROWS"
+
           # --- OpenSSF Scorecard (GitHub Actions only) ---
           SCORECARD_TABLE=""
           if [[ "$ENABLE_SCORECARD" == "true" ]]; then
