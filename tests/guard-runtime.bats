@@ -53,6 +53,40 @@ extract_guard_block() {
   [ "$GUARD_TRIGGERED" = "false" ]
 }
 
+@test "safety: npm lockfile-only bump (all paths cleared) — guard does NOT fire" {
+  # End state of a pnpm lockfile-only security update: the npm helper proved the
+  # lockfile bump-only, so its path is subtracted from BOTH guard inputs and
+  # zero tier-1 rows is the CORRECT answer. If the composition ever stops
+  # subtracting from EFFECTIVE_TOUCHED, this becomes a false red on every
+  # lockfile-only Dependabot PR.
+  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  DEPS_TSV=""
+  TOUCHED_PATHS="pnpm-lock.yaml"
+  EFFECTIVE_TOUCHED=""
+  UNSUPPORTED_PATHS=""
+  eval "$block"
+  [ "$GUARD_TRIGGERED" = "false" ]
+}
+
+@test "safety: npm manifest the helper could not clear — guard fires" {
+  # A package.json carrying a disqualifier (e.g. a postinstall edit) fails
+  # closed in npm_bump_extract, so nothing is cleared and both paths stay in
+  # UNSUPPORTED_PATHS. Silent-green here would be issue #62 for npm.
+  #
+  # `|| return 1` is load-bearing: bash 3.2 does not apply `set -e` to a failing
+  # `[[ ]]`, so a bare mid-body `[[ ]]` never fails a test on macOS.
+  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  DEPS_TSV=""
+  TOUCHED_PATHS=$'package.json\npnpm-lock.yaml'
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
+  UNSUPPORTED_PATHS="$TOUCHED_PATHS"
+  eval "$block"
+  [ "$GUARD_TRIGGERED" = "true" ]
+  [[ "$EXTRACTION_WARNING" == *"does not support"* ]] || return 1
+  [[ "$EXTRACTION_WARNING" == *"package.json"* ]] || return 1
+  [[ "$EXTRACTION_WARNING" == *"pnpm-lock.yaml"* ]] || return 1
+}
+
 @test "safety: no touched paths (empty diff) — guard does NOT fire" {
   block=$(extract_guard_block .github/workflows/dependency-safety.yml)
   DEPS_TSV=""

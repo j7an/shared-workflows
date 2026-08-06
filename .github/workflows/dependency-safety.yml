@@ -2389,13 +2389,18 @@ jobs:
           # than report a partial result as complete.
           TIER2_SECTION=""
           TIER2_TSV=$(printf '%s' "$DIFF" | npm_bump_extract --mode=lockfile-entries 2>/dev/null || true)
-          TIER2_COUNT=$(printf '%s' "$TIER2_TSV" | sed '/^$/d' | wc -l | tr -d ' ')
+          # `printf '%s\n'`, not `printf '%s'`: command substitution strips the
+          # trailing newline, and `wc -l` counts newlines. Without the added
+          # terminator every count is short by one — a single-entry sweep
+          # measures 0 and is SKIPPED (a silent unscanned tree), and any larger
+          # sweep under-reports QB_SENT below and fails the cardinality check.
+          TIER2_COUNT=$(printf '%s\n' "$TIER2_TSV" | sed '/^$/d' | wc -l | tr -d ' ')
 
           if [ "$TIER2_COUNT" -gt 0 ]; then
             tier2_hits=""
             tier2_failed=false
             chunk_file=$(mktemp "${RUNNER_TEMP:-/tmp}/tier2-chunk.XXXXXX")
-            printf '%s' "$TIER2_TSV" | sed '/^$/d' > "$chunk_file"
+            printf '%s\n' "$TIER2_TSV" | sed '/^$/d' > "$chunk_file"
 
             split_dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/tier2-split.XXXXXX")
             split -l 100 "$chunk_file" "$split_dir/chunk-"
@@ -2411,14 +2416,24 @@ jobs:
                 {queries: ($rows | rtrimstr("\n") | split("\n")
                   | map(split("\t") | {package: {name: .[0], ecosystem: "npm"},
                                         version: .[1]}))}')
-              QB_RESULT=$(curl -sf --max-time 60 \
-                -X POST "https://api.osv.dev/v1/querybatch" \
-                -H "Content-Type: application/json" \
-                -d "$QB_BODY" \
-                2>/dev/null) || {
-                tier2_failed=true
-                continue
-              }
+              if [ -n "${OSV_BATCH_FIXTURE:-}" ]; then
+                # Offline seam, mirroring AGE_FIXTURE_DIR and
+                # OSV_DETAIL_FIXTURE_DIR. An unreadable fixture is a failure,
+                # exactly as a failed request would be.
+                QB_RESULT=$(cat "$OSV_BATCH_FIXTURE" 2>/dev/null) || {
+                  tier2_failed=true
+                  continue
+                }
+              else
+                QB_RESULT=$(curl -sf --max-time 60 \
+                  -X POST "https://api.osv.dev/v1/querybatch" \
+                  -H "Content-Type: application/json" \
+                  -d "$QB_BODY" \
+                  2>/dev/null) || {
+                  tier2_failed=true
+                  continue
+                }
+              fi
 
               # --- Response validation. Each check fails CLOSED. ---
               # Without these, `jq … 2>/dev/null || true` downstream converts a

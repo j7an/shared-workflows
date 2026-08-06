@@ -14,6 +14,20 @@ setup() {
   FIXTURES="tests/fixtures/dep-guard-chain"
 }
 
+# Extract a sentinel-delimited block from a workflow `run: |` body and strip the
+# 10-space YAML indent, leaving plain bash. Mirrors extract_guard_block in
+# tests/guard-runtime.bats.
+extract_named_block() {
+  local yaml="$1" name="$2"
+  awk -v n="$name" '
+    $0 ~ ("# --- BEGIN " n " ---") {flag=1; next}
+    $0 ~ ("# --- END " n " ---")   {exit}
+    flag {print}
+  ' "$yaml" | sed -E 's/^          //'
+}
+WF=.github/workflows/dependency-safety.yml
+NPMFX=tests/fixtures/npm-bump-extract
+
 # Helper: run the chain on a fixture file and export the three intermediate
 # values into the test's environment.
 run_chain() {
@@ -147,4 +161,261 @@ run_chain_with_pyproject() {
   [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]
   [ -z "$UNSUPPORTED_PATHS" ]
   [ -z "$EFFECTIVE_TOUCHED" ]
+}
+
+# ---------------------------------------------------------------------------
+# Runtime coverage for the composed npm pipeline.
+#
+# Everything above re-implements the composition in the test harness. The cases
+# below eval the REAL workflow bash, extracted from dependency-safety.yml
+# between its sentinels, so a composition defect (a dropped subtraction, a
+# missing conjunct, an unvalidated response) surfaces as a red test instead of
+# hiding behind a parallel implementation that happens to agree.
+#
+# Every `[[ ... ]]` below carries an explicit `|| return 1`. bash 3.2 — the
+# version this repo targets and the one macOS ships — does NOT apply `set -e`
+# to a failing `[[ ]]`, so a bare mid-body `[[ ]]` assertion is a silent no-op
+# locally and only turns red on CI's newer bash. `|| return 1` makes every
+# assertion binding under both.
+# ---------------------------------------------------------------------------
+
+# Drive the real `npm composition` block over a fixture diff.
+# $1 = fixture path, $2 = optional PR body.
+#
+# Seeds ONLY the block's free inputs: $DIFF, $PR_BODY, and shims for the six
+# helper functions the workflow step defines above the block. DEPS_TSV,
+# NPM_DEPS_TSV, CLEARED_NPM, CLEARED_ALL, BASE_UNSUPPORTED, UNSUPPORTED_PATHS,
+# EFFECTIVE_TOUCHED and ECO_HINT are all COMPUTED here — pre-seeding any of them
+# would be dead code the block immediately overwrites. `set -u` makes the driver
+# self-checking: a forgotten input aborts with `unbound variable` rather than
+# letting the case pass vacuously.
+run_npm_chain() {
+  local fixture="$1" pr_body="${2:-}"
+  local block; block=$(extract_named_block "$WF" "npm composition")
+  run bash -c "
+    set -uo pipefail
+    extract_deps()           { bash scripts/extract-deps.sh \"\$@\"; }
+    diff_touches_lockfile()  { bash scripts/diff-touches-lockfile.sh \"\$@\"; }
+    classify_touched_paths() { bash scripts/classify-touched-paths.sh \"\$@\"; }
+    pyproject_bump_extract() { bash scripts/pyproject-bump-extract.sh \"\$@\"; }
+    pr_body_to_deps()        { bash scripts/pr-body-to-deps.sh \"\$@\"; }
+    npm_bump_extract()       { bash scripts/npm-bump-extract.sh \"\$@\"; }
+    DIFF=\$(cat '$fixture')
+    PR_BODY='$pr_body'
+    $block
+    printf 'DEPS=[%s]\n'  \"\$DEPS_TSV\"
+    printf 'UNSUP=[%s]\n' \"\$UNSUPPORTED_PATHS\"
+    printf 'EFF=[%s]\n'   \"\$EFFECTIVE_TOUCHED\"
+    printf 'HINT=[%s]\n'  \"\${ECO_HINT:-}\"
+  "
+}
+# ECO_HINT is printed through ${ECO_HINT:-} on purpose: the workflow only
+# assigns it inside `if [ -z "$DEPS_TSV" ]`, so on a clean bump it is never set
+# and a bare "$ECO_HINT" would abort the case under `set -u`.
+
+@test "npm chain: clean bump produces tier-1 rows and clears its paths" {
+  run_npm_chain "$NPMFX/manifest-and-lock-clean.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"@commitlint/cli"* ]] || return 1
+  [[ "$output" == *"UNSUP=[]"* ]] || return 1
+}
+
+@test "npm chain: disqualified manifest triggers the guard" {
+  run_npm_chain "$NPMFX/manifest-postinstall.diff"
+  [ "$status" -eq 0 ]
+  # The helper failed closed, so nothing is cleared and both paths remain.
+  [[ "$output" == *"package.json"* ]] || return 1
+  [[ "$output" == *"pnpm-lock.yaml"* ]] || return 1
+}
+
+@test "npm chain: lockfile-only security update goes green" {
+  run_npm_chain "$NPMFX/real-lockfile-only.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DEPS=[]"* ]] || return 1
+  [[ "$output" == *"UNSUP=[]"* ]] || return 1
+}
+
+@test "npm chain: cleared paths are subtracted from BOTH guard inputs" {
+  run_npm_chain "$FIXTURES/npm-clean-plus-gemfile.diff"
+  [ "$status" -eq 0 ]
+  # Gemfile.lock survives in both sets; the two npm paths survive in neither.
+  [[ "$output" == *"UNSUP=[Gemfile.lock]"* ]] || return 1
+  [[ "$output" == *"EFF=[Gemfile.lock]"* ]] || return 1
+  [[ "$output" != *"package.json"* ]] || return 1
+}
+
+@test "npm chain: body fallback is suppressed when the helper cleared paths" {
+  # A PR body that WOULD yield rows if the fallback were reachable.
+  run_npm_chain "$NPMFX/real-lockfile-only.diff" \
+    "Bumps [lodash](https://github.com/lodash/lodash) from 4.17.20 to 4.17.21."
+  [ "$status" -eq 0 ]
+  # Zero rows plus a cleared lockfile is a PROVEN empty result, not missing
+  # evidence — promoting PR-body prose here would contradict lockfile authority.
+  [[ "$output" == *"HINT=[]"* ]] || return 1
+  [[ "$output" == *"DEPS=[]"* ]] || return 1
+}
+
+# --- tier-2 sweep ----------------------------------------------------------
+#
+# The `tier-2 sweep` block computes TIER2_TSV and TIER2_COUNT itself, from
+# $DIFF via npm_bump_extract, so those are OUTPUTS and are not seeded here
+# either. The block's free inputs are $DIFF, the npm_bump_extract shim, the two
+# offline fixture seams, and the four accumulators the surrounding step owns
+# (OSV_TOTAL, SCAN_ERROR_COUNT, HAS_ERROR, TIER2_SECTION).
+#
+# BOTH seams are always set so NO case can reach the network: OSV_BATCH_FIXTURE
+# covers the querybatch POST, OSV_DETAIL_FIXTURE_DIR covers the per-advisory
+# GET. Both mirror AGE_FIXTURE_DIR in check-release-age.sh.
+#
+# $1 = batch JSON, $2 = fixture diff (default: one tier-2 entry).
+run_sweep() {
+  local batch_json="$1"
+  local fixture="${2:-$NPMFX/real-lockfile-only.diff}"
+  local block; block=$(extract_named_block "$WF" "tier-2 sweep")
+  printf '%s' "$batch_json" > "$BATS_TEST_TMPDIR/batch.json"
+  mkdir -p "$BATS_TEST_TMPDIR/details"
+  printf '{"id":"GHSA-aaaa","summary":"test advisory","database_specific":{"severity":"HIGH"}}' \
+    > "$BATS_TEST_TMPDIR/details/GHSA-aaaa.json"
+  run bash -c "
+    set -uo pipefail
+    npm_bump_extract() { bash scripts/npm-bump-extract.sh \"\$@\"; }
+    DIFF=\$(cat '$fixture')
+    OSV_BATCH_FIXTURE='$BATS_TEST_TMPDIR/batch.json'
+    OSV_DETAIL_FIXTURE_DIR='$BATS_TEST_TMPDIR/details'
+    OSV_TOTAL=0
+    SCAN_ERROR_COUNT=0
+    HAS_ERROR=false
+    TIER2_SECTION=''
+    $block
+    printf 'ERRC=%s HAS_ERROR=%s OSV_TOTAL=%s TIER2_COUNT=%s\n' \\
+      \"\$SCAN_ERROR_COUNT\" \"\$HAS_ERROR\" \"\$OSV_TOTAL\" \"\$TIER2_COUNT\"
+    printf 'SECTION<<%s>>\n' \"\$TIER2_SECTION\"
+  "
+}
+
+@test "tier-2 sweep block extracts non-empty from the workflow" {
+  # Guards the driver itself: if the sentinels are renamed or removed, every
+  # sweep case below would eval an empty block and could pass vacuously.
+  local block; block=$(extract_named_block "$WF" "tier-2 sweep")
+  [ -n "$block" ]
+  [[ "$block" == *"querybatch"* ]] || return 1
+  local npm_block; npm_block=$(extract_named_block "$WF" "npm composition")
+  [ -n "$npm_block" ]
+  [[ "$npm_block" == *"CLEARED_NPM"* ]] || return 1
+}
+
+@test "tier-2 every extracted lockfile entry is queried" {
+  # The chunk the sweep sends must cover EVERY row the extractor produced. An
+  # undercount silently leaves package versions unscanned while the section
+  # still reports the sweep as complete.
+  run_sweep '{"results":[{},{}]}' "$NPMFX/lock-packages-added.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TIER2_COUNT=2"* ]] || return 1
+  [[ "$output" == *"ERRC=0"* ]] || return 1
+  [[ "$output" == *"2 new package version(s)"* ]] || return 1
+}
+
+@test "tier-2 advisory raises OSV_TOTAL and reaches the rendered section" {
+  run_sweep '{"results":[{"vulns":[{"id":"GHSA-aaaa","modified":"2026-01-01T00:00:00Z"}]}]}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OSV_TOTAL=1"* ]] || return 1
+  [[ "$output" == *"ERRC=0"* ]] || return 1
+  [[ "$output" == *"GHSA-aaaa"* ]] || return 1
+  # The advisory row must name the package the hit index maps back to.
+  [[ "$output" == *"minimist"* ]] || return 1
+  # OSV_TOTAL feeds TOTAL -> ADVISORY_COUNT, which is what suppresses auto-merge.
+  # That link is deliberately NOT asserted here: the verdict call sits outside
+  # the `tier-2 sweep` sentinel, and tests/safety-verdict.bats already owns
+  # "advisory finding only -> auto_merge_ok=false".
+}
+
+@test "tier-2 clean batch reports zero advisories without error" {
+  run_sweep '{"results":[{}]}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OSV_TOTAL=0"* ]] || return 1
+  [[ "$output" == *"ERRC=0"* ]] || return 1
+  [[ "$output" == *"0 advisories"* ]] || return 1
+}
+
+@test "tier-2 batch request failure raises SCAN_ERROR_COUNT" {
+  # Point the seam at a path that does not exist — the read fails like a curl
+  # failure would.
+  local block; block=$(extract_named_block "$WF" "tier-2 sweep")
+  run bash -c "
+    set -uo pipefail
+    npm_bump_extract() { bash scripts/npm-bump-extract.sh \"\$@\"; }
+    DIFF=\$(cat '$NPMFX/real-lockfile-only.diff')
+    OSV_BATCH_FIXTURE='$BATS_TEST_TMPDIR/does-not-exist.json'
+    OSV_DETAIL_FIXTURE_DIR='$BATS_TEST_TMPDIR/details'
+    OSV_TOTAL=0; SCAN_ERROR_COUNT=0; HAS_ERROR=false; TIER2_SECTION=''
+    $block
+    printf 'ERRC=%s HAS_ERROR=%s\n' \"\$SCAN_ERROR_COUNT\" \"\$HAS_ERROR\"
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERRC=1"* ]] || return 1
+  [[ "$output" == *"HAS_ERROR=true"* ]] || return 1
+}
+
+@test "tier-2 malformed batch JSON is NOT reported as zero advisories" {
+  run_sweep 'this is not json'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERRC=1"* ]] || return 1
+  [[ "$output" == *"HAS_ERROR=true"* ]] || return 1
+  [[ "$output" != *"0 advisories"* ]] || return 1
+}
+
+@test "tier-2 cardinality mismatch raises SCAN_ERROR_COUNT" {
+  # Two packages queried, one result returned.
+  run_sweep '{"results":[{}]}' "$NPMFX/lock-packages-added.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TIER2_COUNT=2"* ]] || return 1
+  [[ "$output" == *"ERRC=1"* ]] || return 1
+  [[ "$output" == *"HAS_ERROR=true"* ]] || return 1
+  [[ "$output" != *"0 advisories"* ]] || return 1
+}
+
+@test "tier-2 next_page_token raises SCAN_ERROR_COUNT" {
+  run_sweep '{"results":[{"next_page_token":"abc123"}]}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERRC=1"* ]] || return 1
+  [[ "$output" == *"HAS_ERROR=true"* ]] || return 1
+}
+
+@test "tier-2 malformed result member is NOT reported as zero advisories" {
+  # A non-array `vulns` must fail closed rather than degrade to "no hits".
+  run_sweep '{"results":[{"vulns":"not-an-array"}]}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERRC=1"* ]] || return 1
+  [[ "$output" == *"HAS_ERROR=true"* ]] || return 1
+  [[ "$output" != *"0 advisories"* ]] || return 1
+}
+
+@test "tier-2 malformed advisory detail is NOT published as an empty row" {
+  local block; block=$(extract_named_block "$WF" "tier-2 sweep")
+  printf '%s' '{"results":[{"vulns":[{"id":"bad-detail"}]}]}' > "$BATS_TEST_TMPDIR/batch.json"
+  mkdir -p "$BATS_TEST_TMPDIR/d2"
+  printf 'not json' > "$BATS_TEST_TMPDIR/d2/bad-detail.json"
+  run bash -c "
+    set -uo pipefail
+    npm_bump_extract() { bash scripts/npm-bump-extract.sh \"\$@\"; }
+    DIFF=\$(cat '$NPMFX/real-lockfile-only.diff')
+    OSV_BATCH_FIXTURE='$BATS_TEST_TMPDIR/batch.json'
+    OSV_DETAIL_FIXTURE_DIR='$BATS_TEST_TMPDIR/d2'
+    OSV_TOTAL=0; SCAN_ERROR_COUNT=0; HAS_ERROR=false; TIER2_SECTION=''
+    $block
+    printf 'ERRC=%s OSV_TOTAL=%s\n' \"\$SCAN_ERROR_COUNT\" \"\$OSV_TOTAL\"
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERRC=1"* ]] || return 1
+  [[ "$output" == *"OSV_TOTAL=0"* ]] || return 1
+}
+
+@test "tier-2 sweep is skipped when the diff introduces no lockfile entries" {
+  # A manifest-only bump has no newly introduced lockfile versions, so the
+  # sweep must not run, must not error, and must render no section.
+  run_sweep '{"results":[{}]}' "$NPMFX/manifest-without-lock.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TIER2_COUNT=0"* ]] || return 1
+  [[ "$output" == *"ERRC=0"* ]] || return 1
+  [[ "$output" == *"SECTION<<>>"* ]] || return 1
 }
