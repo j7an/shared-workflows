@@ -447,6 +447,20 @@ run_sweep() {
   [[ "$output" != *"0 advisories"* ]] || return 1
 }
 
+@test "tier-2 empty-string advisory id is NOT reported as zero advisories" {
+  # `map(.id)` on [{"id":""}] yields [""], whose length is 1 (> 0), so a
+  # naive "any non-empty ids array" check passes; `ids` then becomes the
+  # empty string and `for vid in $ids` iterates zero times, silently
+  # dropping a real advisory. Validation check 4 (previously mislabeled 5)
+  # exists specifically to catch this: every vuln's `.id` must be a
+  # non-empty string, not merely present.
+  run_sweep '{"results":[{"vulns":[{"id":""}]}]}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERRC=1"* ]] || return 1
+  [[ "$output" == *"HAS_ERROR=true"* ]] || return 1
+  [[ "$output" != *"0 advisories"* ]] || return 1
+}
+
 @test "tier-2 malformed advisory detail is NOT published as an empty row" {
   local block; block=$(extract_named_block "$WF" "tier-2 sweep")
   printf '%s' '{"results":[{"vulns":[{"id":"bad-detail"}]}]}' > "$BATS_TEST_TMPDIR/batch.json"

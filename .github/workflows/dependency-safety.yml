@@ -2465,9 +2465,9 @@ jobs:
                 continue
               fi
 
-              # 5. Every result member must be an object; any `vulns` present
+              # 4. Every result member must be an object; any `vulns` present
               # must be an array; every vulnerability must carry a non-empty
-              # string id. Checks 1-4 validate the ENVELOPE only — without this
+              # string id. Checks 1-3 validate the ENVELOPE only — without this
               # one, a malformed MEMBER still degrades to "0 advisories" through
               # the `.results[]?` / `// []` / `|| true` combination that used to
               # guard the extraction below. That is a green gate over an
