@@ -197,7 +197,7 @@ Dependabot behavior, not a gate behavior.
 
 Grouped Dependabot PRs (multiple packages in one PR) are supported — each package is scanned independently and results are merged into one comment.
 
-Target versions are resolved per ecosystem. For GitHub Actions and Python they come from inline `# vX.Y.Z` comments, falling back to the Dependabot PR body (`Bumps [pkg] from A to B`) when absent. For npm/pnpm they come from the lockfile's resolved versions and never from the PR body — see the npm/pnpm scanning model below.
+Target versions are resolved per ecosystem. For GitHub Actions and Python they come from inline `# vX.Y.Z` comments, falling back to the Dependabot PR body (`Bumps [pkg] from A to B`) when absent. For npm/pnpm they come from the lockfile's resolved versions; the PR body is used only as a last resort when the lockfile parser proves nothing, a state that already fails the gate — see the npm/pnpm scanning model below.
 
 ## How It Works
 
@@ -213,8 +213,8 @@ dependency-safety.yml fires on pull_request
     ├── Status → "pending" ("Scanning dependencies for safety...")
     ├── Parses diff to extract package names + target versions
     │     ├── github-actions / pip: inline versions, falling back to PR body text
-    │     └── npm/pnpm: lockfile-resolved versions only — PR-body fallback is
-    │         suppressed, because the lockfile is authoritative (§7)
+    │     └── npm/pnpm: lockfile-resolved versions; PR-body fallback only when
+    │         the parser proves nothing
     ├── npm/pnpm only — Tier 2 sweep of newly introduced lockfile entries
     │     ├── Batched OSV queries, up to 100 packages per request
     │     └── Advisories suppress auto-merge; release age is NOT checked for
