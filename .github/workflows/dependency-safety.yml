@@ -1881,29 +1881,35 @@ jobs:
 
           # --- Extract dependencies via standalone script (Task 8) ---
           # Layer 1: extract deps from supported file shapes.
+          # --- BEGIN npm composition ---
           EXTRACTED=$(echo "$DIFF" | extract_deps)
           PYPROJECT_DEPS=$(printf '%s' "$DIFF" | pyproject_bump_extract --mode=deps 2>/dev/null || true)
-          DEPS_TSV=$(printf '%s\n%s\n' "$EXTRACTED" "$PYPROJECT_DEPS" | sed '/^$/d' | sort -u)
+          NPM_DEPS_TSV=$(printf '%s' "$DIFF" | npm_bump_extract --mode=deps 2>/dev/null || true)
+          DEPS_TSV=$(printf '%s\n%s\n%s\n' "$EXTRACTED" "$PYPROJECT_DEPS" "$NPM_DEPS_TSV" | sed '/^$/d' | sort -u)
 
           # --- Compute touched paths and unsupported subset ONCE, up front. ---
           # Layer 2: identify unsupported dependency-relevant paths.
-          # CLEARED_PYPROJECT is computed in the same hoist so Layer 2 and Layer 3
-          # both see a consistent view of which paths the diff-aware helper proved
-          # are bump-only (fix for issue #66 — uv/poetry Dependabot PRs).
+          # CLEARED_ALL is computed in the same hoist so Layer 2 and Layer 3
+          # both see a consistent view of which paths the diff-aware helpers proved
+          # are bump-only (fix for issue #66 — uv/poetry Dependabot PRs; extended to
+          # npm/pnpm below).
           TOUCHED_PATHS=$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)
           BASE_UNSUPPORTED=$(printf '%s\n' "$TOUCHED_PATHS" | classify_touched_paths 2>/dev/null || true)
           CLEARED_PYPROJECT=$(printf '%s' "$DIFF" | pyproject_bump_extract --mode=cleared-paths 2>/dev/null || true)
+          CLEARED_NPM=$(printf '%s' "$DIFF" | npm_bump_extract --mode=cleared-paths 2>/dev/null || true)
+          CLEARED_ALL=$(printf '%s\n%s\n' "$CLEARED_PYPROJECT" "$CLEARED_NPM" | sed '/^$/d' | sort -u)
 
           # Subtract cleared paths from BOTH the unsupported set and the touched
-          # set used by Layer 3's zero-row guard. A pyproject.toml cleared with
-          # zero extracted deps (e.g., comment-only churn) represents proof that
-          # the scan was complete — there is nothing to scan. Without this
-          # subtraction, a comment-only pyproject PR would trip the zero-row guard.
+          # set used by Layer 3's zero-row guard. A pyproject.toml or package.json/
+          # pnpm-lock.yaml cleared with zero extracted deps (e.g., comment-only or
+          # lockfile-only churn) represents proof that the scan was complete —
+          # there is nothing to scan. Without this subtraction, a comment-only
+          # pyproject PR or a lockfile-only npm PR would trip the zero-row guard.
           UNSUPPORTED_PATHS="$BASE_UNSUPPORTED"
           EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
-          if [ -n "$(printf '%s\n' "$CLEARED_PYPROJECT" | sed '/^$/d')" ]; then
-            cleared_file=$(mktemp "${RUNNER_TEMP:-/tmp}/cleared-pyproject-paths.XXXXXX")
-            printf '%s\n' "$CLEARED_PYPROJECT" | sed '/^$/d' | sort -u > "$cleared_file"
+          if [ -n "$(printf '%s\n' "$CLEARED_ALL" | sed '/^$/d')" ]; then
+            cleared_file=$(mktemp "${RUNNER_TEMP:-/tmp}/cleared-paths.XXXXXX")
+            printf '%s\n' "$CLEARED_ALL" | sed '/^$/d' | sort -u > "$cleared_file"
             UNSUPPORTED_PATHS=$(printf '%s\n' "$BASE_UNSUPPORTED" | sed '/^$/d' | grep -vFxf "$cleared_file" || true)
             EFFECTIVE_TOUCHED=$(printf '%s\n' "$TOUCHED_PATHS" | sed '/^$/d' | grep -vFxf "$cleared_file" || true)
             rm -f "$cleared_file"
@@ -1912,12 +1918,23 @@ jobs:
           # --- Layer 2: PR-body fallback (defense in depth for issue #52) ---
           # pyproject.toml and Pipfile remain pypi-routable for PR-body fallback.
           # Layer 3 still fires on Pipfile and on any pyproject.toml whose hunks
-          # pyproject_bump_extract did not clear; cleared pyproject.toml paths
-          # are subtracted from UNSUPPORTED_PATHS in the composition block above.
+          # pyproject_bump_extract did not clear; cleared pyproject.toml and npm
+          # paths are subtracted from UNSUPPORTED_PATHS in the composition block
+          # above.
           if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
             ECO_HINT=""
             if echo "$TOUCHED_PATHS" | grep -qE '((^|/)(uv|poetry)\.lock$|requirements[^/]*\.txt$|pyproject\.toml$|Pipfile$)'; then
               ECO_HINT="pypi"
+            elif echo "$TOUCHED_PATHS" | grep -qE '(^|/)(package\.json|pnpm-lock\.yaml)$' \
+                 && [ -z "$(printf '%s' "$CLEARED_NPM" | sed '/^$/d')" ]; then
+              # npm body fallback is available ONLY when the helper proved
+              # nothing — which is already a guard-red state. When CLEARED_NPM
+              # is non-empty the helper succeeded, and zero tier-1 rows is the
+              # CORRECT answer for a lockfile-only security update. Promoting
+              # PR-body prose there would scan what the body claims instead of
+              # what the diff shows, inverting the trust model, and would feed
+              # unresolvable version strings into release-age lookups.
+              ECO_HINT="npm"
             elif echo "$TOUCHED_PATHS" | grep -qE '\.github/workflows/.*\.ya?ml$'; then
               ECO_HINT="actions"
             fi
@@ -1927,6 +1944,7 @@ jobs:
                 echo "Recovered $(echo "$DEPS_TSV" | wc -l | tr -d ' ') dep(s) via PR-body fallback (${ECO_HINT})"
             fi
           fi
+          # --- END npm composition ---
 
           # --- Layer 3: Fail-loud guard (fixes for issues #52 and #62) ---
           # Two composed conditions:
@@ -1949,6 +1967,7 @@ jobs:
           # so the existing advisory-scan loops below can consume them unchanged.
           ACTIONS=""
           PY_DEPS=""
+          NPM_ROWS=""
           while IFS=$'\t' read -r _name _ver _eco; do
             [ -z "$_name" ] && continue
             case "$_eco" in
@@ -1960,10 +1979,14 @@ jobs:
                 PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_name")"
                 PY_VERSIONS["$_name"]="$_ver"
                 ;;
+              npm)
+                NPM_ROWS="$(printf '%s\n%s\t%s' "$NPM_ROWS" "$_name" "$_ver")"
+                ;;
             esac
           done <<< "$DEPS_TSV"
           ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
           PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
+          NPM_ROWS=$(printf '%s' "$NPM_ROWS" | sed '/^$/d' | sort -u)
 
           # PR-body version fallback for deps without inline version (preserved from v2.0.1)
           for ACTION in $ACTIONS; do
