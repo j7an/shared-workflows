@@ -84,3 +84,35 @@ input_default() {
   run grep -c 'RESULTS_HEADER="${AGE_VIOLATION_COUNT}' .github/workflows/dependency-safety.yml
   [ "$output" -eq 0 ]
 }
+
+# extract_comment_body_printf — isolate the primary COMMENT_BODY assembly (the
+# multi-section PR comment), not the unrelated fallback COMMENT_BODY further
+# down in the same step. Anchored on the literal format string so it survives
+# unrelated line-number drift elsewhere in the file.
+extract_comment_body_printf() {
+  awk '
+    /COMMENT_BODY="\$\(printf .%s%s\\n\\n%s\\n\\n%s\\n\\n%s\\n\\n%s\\n\\n%s%s%s%s%s./{flag=1}
+    flag{print}
+    flag && /\)"$/{exit}
+  ' "$YAML"
+}
+
+@test "PR comment body wires TIER2_SECTION into the printf argument list" {
+  # Task 20 review fix: TIER2_SECTION was removable from this printf's
+  # argument list without any test going red — sweep findings would silently
+  # vanish from the comment (OSV_TOTAL still drives the verdict, so the gate
+  # stays correctly red, but reporting is dark). Assert both that the arg is
+  # present, and that the arg count matches the %s count in the format string
+  # — a naive presence-only grep would not catch a dropped %s that shifts
+  # every argument after it into the wrong slot.
+  local block; block=$(extract_comment_body_printf)
+  [ -n "$block" ]
+  echo "$block" | grep -qF '"$TIER2_SECTION"'
+
+  local fmt_line n_pct n_args
+  fmt_line=$(echo "$block" | head -1)
+  n_pct=$(printf '%s' "$fmt_line" | grep -o '%s' | wc -l | tr -d ' ')
+  n_args=$(echo "$block" | tail -n +2 | grep -c '^ *"')
+  [ "$n_pct" -gt 0 ]
+  [ "$n_pct" -eq "$n_args" ]
+}
