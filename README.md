@@ -185,8 +185,10 @@ Two claims are proven per PR:
 
 Anything the parser cannot account for — an unrecognized `package.json` key, a
 lifecycle script, a lockfile `overrides:` or `pnpmfileChecksum:` change, an
-unsupported `lockfileVersion`, or a manifest change with no lockfile
-counterpart — fails closed with a diagnostic.
+unsupported `lockfileVersion`, a manifest change with no lockfile
+counterpart, or a diff that introduces more than 1000 new transitive lockfile
+package versions (the tier-2 sweep's per-PR cap) — fails closed with a
+diagnostic.
 
 **Limitations.** Scorecard is not reported for npm packages: the registry's
 repository URL is self-declared by the publisher and monorepo packages collapse
@@ -197,7 +199,7 @@ Dependabot behavior, not a gate behavior.
 
 Grouped Dependabot PRs (multiple packages in one PR) are supported — each package is scanned independently and results are merged into one comment.
 
-Target versions are resolved per ecosystem. For GitHub Actions and Python they come from inline `# vX.Y.Z` comments, falling back to the Dependabot PR body (`Bumps [pkg] from A to B`) when absent. For npm/pnpm they come from the lockfile's resolved versions; the PR body is used only as a last resort when the lockfile parser proves nothing, a state that already fails the gate — see the npm/pnpm scanning model below.
+Target versions are resolved per ecosystem. For GitHub Actions and Python they come from inline `# vX.Y.Z` comments, falling back to the Dependabot PR body (`Bumps [pkg] from A to B`) when absent. For npm/pnpm they come from the lockfile's resolved versions; the PR body is used only as a last resort when the lockfile parser proves nothing, a state that already fails the gate — see the npm/pnpm scanning model above.
 
 ## How It Works
 
