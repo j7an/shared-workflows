@@ -15,7 +15,7 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 
 ## Prerequisites
 
-- **Dependabot** configured for your repo (GitHub Actions and/or pip/uv ecosystems)
+- **Dependabot** configured for your repo (GitHub Actions, pip/uv, and/or npm ecosystems)
 - **Native cool-down** configured in `.github/dependabot.yml` (see Quick Start)
 - **No Renovate** — this workflow only scans `dependabot[bot]` PRs; other actors are passed through with a success status (except external fork PRs, whose read-only token can't post the status — see [Fork PRs and the required gate](#fork-prs-and-the-required-gate))
 
@@ -45,6 +45,17 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 5
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+    cooldown:
+      default-days: 5
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
 ```
 
 See [Dependabot cool-down docs](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown--) for per-severity and per-ecosystem overrides.
@@ -145,12 +156,50 @@ recursion guard.
 
 ## Supported Ecosystems
 
-| Ecosystem | Diff markers parsed | Security sources | Scorecard |
-|-----------|--------------------|-----------------|-----------|
-| GitHub Actions | `uses: owner/repo@vX.Y.Z` lines | GHSA (ecosystem `ACTIONS`), OSV (`GitHub Actions`) | Yes |
-| Python (pip / uv) | `pkg==X.Y.Z`, `pkg>=X.Y.Z`, etc. | GHSA (ecosystem `PIP`), OSV (`PyPI`) | No |
+| Manifest / lockfile | Dependency rows | Transitive sweep | Release age | Scorecard |
+|---|---|---|---|---|
+| `.github/workflows/*.yml` (`uses:` lines) | GHSA `ACTIONS`, OSV `GitHub Actions` | — | GitHub Releases API | Yes |
+| `requirements*.txt`, `uv.lock`, `poetry.lock`, `pyproject.toml` | GHSA `PIP`, OSV `PyPI` | — | PyPI JSON API | No |
+| `package.json` + `pnpm-lock.yaml` | GHSA `NPM`, OSV `npm` | OSV batch over new lockfile entries | deps.dev v3 | No |
+| `package-lock.json` | **Not supported — fails closed** | — | — | — |
+| `yarn.lock` | **Not supported — fails closed** | — | — | — |
 
-Grouped Dependabot PRs (multiple packages in one PR) are supported — each package is scanned independently and results are merged into one comment. Target versions come from inline `# vX.Y.Z` comments; when those are missing, the workflow falls back to parsing the Dependabot PR body (`Bumps [pkg] from A to B`).
+Dependabot calls the ecosystem `npm` regardless of which package manager a repo
+uses, so the table is keyed by lockfile. A repo using npm or Yarn directly will
+get an `error` gate with a diagnostic naming the unsupported file — not a
+silent pass.
+
+### npm/pnpm scanning model
+
+Two claims are proven per PR:
+
+1. **Declared dependencies** — every `package.json` change is corroborated
+   against `pnpm-lock.yaml`'s `importers:`/`catalogs:` sections, and the
+   resolved version from the lockfile (never the manifest range) is scanned
+   through GHSA, OSV, and release-age.
+2. **Transitive versions** — every `name@version` newly added under the
+   lockfile's `packages:` section is checked against OSV in batched queries of
+   up to 100 packages each.
+   These do not participate in release-age policy, because a transitive package
+   nobody chose being days old is not a signal about the update.
+
+Anything the parser cannot account for — an unrecognized `package.json` key, a
+lifecycle script, a lockfile `overrides:` or `pnpmfileChecksum:` change, an
+unsupported `lockfileVersion`, a manifest change with no lockfile
+counterpart, or a diff that introduces more than 1000 new transitive lockfile
+package versions (the tier-2 sweep's per-PR cap) — fails closed with a
+diagnostic.
+
+**Limitations.** Scorecard is not reported for npm packages: the registry's
+repository URL is self-declared by the publisher and monorepo packages collapse
+to a single repo, so a score would be misattributed. A `packageManager` change
+is not yet a recognized shape and fails closed. Repositories on a pnpm major
+outside Dependabot's documented support may receive no PRs at all; that is a
+Dependabot behavior, not a gate behavior.
+
+Grouped Dependabot PRs (multiple packages in one PR) are supported — each package is scanned independently and results are merged into one comment.
+
+Target versions are resolved per ecosystem. For GitHub Actions and Python they come from inline `# vX.Y.Z` comments, falling back to the Dependabot PR body (`Bumps [pkg] from A to B`) when absent. For npm/pnpm they come from the lockfile's resolved versions; the PR body is used only as a last resort when the lockfile parser proves nothing, a state that already fails the gate — see the npm/pnpm scanning model above.
 
 ## How It Works
 
@@ -165,8 +214,13 @@ dependency-safety.yml fires on pull_request
     ├── Non-dependabot PR? → status "success" (no-op; external forks can't post — see "Fork PRs and the required gate")
     ├── Status → "pending" ("Scanning dependencies for safety...")
     ├── Parses diff to extract package names + target versions
-    │     ├── Falls back to PR body text when inline versions are absent
-    │     └── Supports github-actions, pip, and uv ecosystems
+    │     ├── github-actions / pip: inline versions, falling back to PR body text
+    │     └── npm/pnpm: lockfile-resolved versions; PR-body fallback only when
+    │         the parser proves nothing
+    ├── npm/pnpm only — Tier 2 sweep of newly introduced lockfile entries
+    │     ├── Batched OSV queries, up to 100 packages per request
+    │     └── Advisories suppress auto-merge; release age is NOT checked for
+    │         Tier 2 (transitive versions are not declared by the PR author)
     ├── Verifies release age (only when release_age_policy is advisory or blocking; blocking fails the gate, advisory labels + suppresses auto-merge)
     ├── For each package:
     │     ├── GHSA GraphQL query (by ecosystem)

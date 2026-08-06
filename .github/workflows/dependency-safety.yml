@@ -829,6 +829,594 @@ jobs:
           )
           # --- END inline:scripts/pyproject-bump-extract.sh ---
 
+          # --- BEGIN inline:scripts/npm-bump-extract.sh ---
+          npm_bump_extract() (
+          # npm-bump-extract.sh — diff-aware extractor for package.json + pnpm-lock.yaml.
+          #
+          # Owns all npm-ecosystem diff semantics for the dependency-safety workflow.
+          # Emits tier-1 declared dependency rows (mode=deps), tier-2 newly introduced
+          # lockfile versions (mode=lockfile-entries), or the paths it proved parseable
+          # (mode=cleared-paths). Files with any unrecognized changed line are
+          # disqualified and left unsupported so the fail-loud guard fires.
+          #
+          # Input:  unified diff on stdin
+          # Flag:   --mode=deps | --mode=lockfile-entries | --mode=cleared-paths (exactly one)
+          # Output (deps):             TSV <name>\t<version>\tnpm, sorted by name, deduped
+          # Output (lockfile-entries): TSV <name>\t<version>\tnpm, sorted by name, deduped
+          # Output (cleared-paths):    newline-delimited paths, sorted, deduped
+          # Exit:   0 on success (possibly zero rows)
+          #         2 on malformed input, missing --mode, repeated --mode, unknown argument
+          #
+          # Bash 3.2 compatible: no `declare -A`, no `mapfile`/`readarray`. Dedup uses a
+          # newline-delimited string sentinel, matching scripts/extract-deps.sh.
+          #
+          # See docs/superpowers/specs/2026-08-04-npm-pnpm-dependency-safety-design.md.
+
+          set -euo pipefail
+
+          # Maximum tier-2 entries per PR. Exceeding it disqualifies the lockfile rather
+          # than truncating the sweep — a truncated scan reported as complete is the one
+          # outcome this helper must never produce. 1000 is ~4x the largest observed real
+          # Dependabot pnpm PR (253 entries).
+          TIER2_MAX_ENTRIES=1000
+
+          # Lockfile format versions this parser understands. The parser keys on the
+          # declared format version and on structure, never on which pnpm produced the
+          # file — a future divergence must be a clean red gate, not a silent
+          # correctness bug.
+          SUPPORTED_LOCKFILE_VERSIONS=$'\n9.0\n'
+
+          MODE=""
+          for arg in "$@"; do
+            case "$arg" in
+              --mode=deps|--mode=lockfile-entries|--mode=cleared-paths)
+                if [ -n "$MODE" ]; then
+                  echo "npm-bump-extract.sh: --mode specified more than once" >&2
+                  exit 2
+                fi
+                MODE="${arg#--mode=}"
+                ;;
+              *)
+                echo "npm-bump-extract.sh: unknown argument: $arg" >&2
+                exit 2
+                ;;
+            esac
+          done
+
+          if [ -z "$MODE" ]; then
+            echo "npm-bump-extract.sh: --mode=deps, --mode=lockfile-entries, or --mode=cleared-paths required" >&2
+            exit 2
+          fi
+
+          input=$(cat)
+
+          # Empty input → exit 0 with no output (matches extract-deps.sh).
+          if [ -z "$input" ]; then
+            exit 0
+          fi
+
+          # Malformed input detection: here-string (not pipeline) to avoid SIGPIPE under
+          # pipefail on large valid diffs (issue #50 pattern).
+          if ! grep -qE '^(\+\+\+|---|@@|diff --git)' <<< "$input"; then
+            echo "npm-bump-extract.sh: input is not a unified diff" >&2
+            exit 2
+          fi
+
+          # --- Path classification ---
+          # Only these two filenames are in scope. package-lock.json and yarn.lock are
+          # deliberately NOT handled here; they stay unsupported and fail closed.
+          classify_path() {
+            local path="$1" base="${path##*/}"
+            case "$base" in
+              pnpm-lock.yaml) printf 'lock' ;;
+              package.json)   printf 'manifest' ;;
+              *)              printf '' ;;
+            esac
+          }
+
+          # --- Globals ---
+          lock_path=""
+          lock_verdict="absent"          # absent | clean | disqualified
+          manifest_paths=$'\n'           # newline-delimited, leading+trailing newline
+          tier1_rows=()
+          tier2_rows=()
+          corroborate=$'\n'              # "\n<name>\n" for names whose lock entry changed
+          seen_tier1=$'\n'
+          seen_tier2=$'\n'
+
+          # disqualify_lock <reason> — mark the lockfile unusable and explain why.
+          disqualify_lock() {
+            lock_verdict="disqualified"
+            echo "npm-bump-extract.sh: ${lock_path:-pnpm-lock.yaml}: $1" >&2
+          }
+
+          # Disposition of each pnpm-lock.yaml top-level section (spec §6.1).
+          # The complete column-0 key set was taken from a real pnpm 12.0.0-beta.4
+          # lockfile. Anything absent from this list disqualifies, so a
+          # dependency-bearing section added by a future pnpm release produces a red
+          # gate rather than a silent gap in the completeness claim.
+          section_disposition() {
+            case "$1" in
+              importers:|catalogs:)                     printf 'tier1' ;;
+              packages:)                                printf 'tier2' ;;
+              snapshots:)                               printf 'inert' ;;
+              lockfileVersion:)                         printf 'version' ;;
+              settings:)                                printf 'disqualify' ;;
+              overrides:|patchedDependencies:)          printf 'disqualify' ;;
+              pnpmfileChecksum:)                        printf 'disqualify' ;;
+              packageExtensionsChecksum:)               printf 'disqualify' ;;
+              *)                                        printf 'unknown' ;;
+            esac
+          }
+
+          # set_section <section-with-colon> — apply a section and its disposition.
+          # A disqualifying section only trips the verdict when a line under it actually
+          # changed; merely passing through it in context is harmless.
+          set_section() {
+            current_section="$1"
+            current_disposition=$(section_disposition "$1")
+            seen_column0=1
+            tier2_key_prefix=""
+          }
+
+          # base_version <version-string> — strip pnpm's peer-dependency suffix.
+          # "21.0.2(@types/node@22.19.9)" → "21.0.2"
+          base_version() {
+            printf '%s' "${1%%(*}"
+          }
+
+          # note_corroborated <name> — record that this dependency's lock entry changed.
+          note_corroborated() {
+            case "$corroborate" in
+              *$'\n'"$1"$'\n'*) return 0 ;;
+            esac
+            corroborate="${corroborate}${1}"$'\n'
+          }
+
+          # emit_tier1 <name> <version>
+          # Dedup key is name@version, NOT name. A pnpm workspace can resolve the same
+          # package at different versions in different importers; keying on name alone
+          # drops one of them and produces a scanned-claim over an unscanned version.
+          emit_tier1() {
+            local key="$1@$2"
+            case "$seen_tier1" in
+              *$'\n'"$key"$'\n'*) return 0 ;;
+            esac
+            seen_tier1="${seen_tier1}${key}"$'\n'
+            tier1_rows+=("$1"$'\t'"$2"$'\t'"npm")
+          }
+
+          # flush_entry — called at each entry/section/file boundary. Emits a tier-1 row
+          # when the base version changed, and records corroboration when either the
+          # specifier or the base version changed.
+          flush_entry() {
+            local name="$1" minus="$2" plus="$3" spec="$4"
+            [ -z "$name" ] && return 0
+            local mb pb
+            mb=$(base_version "$minus")
+            pb=$(base_version "$plus")
+            if [ -n "$plus" ] && [ "$mb" != "$pb" ]; then
+              emit_tier1 "$name" "$pb"
+              note_corroborated "$name"
+            elif [ "$spec" -eq 1 ]; then
+              note_corroborated "$name"
+            fi
+          }
+
+          # emit_tier2 <name> <version>
+          # Keyed on name@version for the same reason as emit_tier1 (§6.4).
+          emit_tier2() {
+            local key="$1@$2"
+            case "$seen_tier2" in
+              *$'\n'"$key"$'\n'*) return 0 ;;
+            esac
+            seen_tier2="${seen_tier2}${key}"$'\n'
+            tier2_rows+=("$1"$'\t'"$2"$'\t'"npm")
+          }
+
+          # split_package_key <'name@version'> — sets _pkg_name and _pkg_version.
+          # Scoped names start with '@', so the split is on the LAST '@'.
+          split_package_key() {
+            local key="$1"
+            _pkg_name="${key%@*}"
+            _pkg_version="${key##*@}"
+            [ -n "$_pkg_name" ] && [ -n "$_pkg_version" ]
+          }
+
+          # Lifecycle-script keys. Corroboration already excludes these structurally —
+          # a lifecycle key can never appear in an importers-derived dependency set —
+          # but the denylist makes the security property visible in the code rather
+          # than implied.
+          #
+          # Lifecycle script names ONLY. `version` and `dependencies` were removed: there
+          # is a real npm package named `version`, and denylisting it would reject a
+          # legitimate bump. A denylist must not overlap the namespace it sits beside.
+          LIFECYCLE_KEYS=$'\npreinstall\ninstall\npostinstall\npreprepare\nprepare\npostprepare\nprepublish\nprepublishOnly\npublish\npostpublish\nprepack\npostpack\npreuninstall\nuninstall\npostuninstall\npreversion\npostversion\n'
+
+          # is_valid_range <specifier> — npm version-range grammar. A shell command is
+          # not a range, which is what keeps `"postinstall": "curl … | sh"` out.
+          #
+          # The grammar must accept everything npm permits, or it becomes a
+          # false-positive generator that red-gates real manifests on unrelated bumps.
+          # Verified against live registry data: eslint declares `"jiti": "*"`, and vite
+          # declares `"esbuild": "^0.27.0 || ^0.28.0"` and
+          # `"@types/node": "^20.19.0 || >=22.12.0"`.
+          is_valid_range() {
+            local spec="$1" part rest
+            # Protocol forms are whole-string.
+            case "$spec" in
+              workspace:*|catalog:*|npm:*) return 0 ;;
+            esac
+            # `||` unions: every alternative must itself be a valid range.
+            case "$spec" in
+              *\|\|*)
+                rest="$spec"
+                while [ -n "$rest" ]; do
+                  part="${rest%%\|\|*}"
+                  is_valid_simple_range "$part" || return 1
+                  [ "$part" = "$rest" ] && break
+                  rest="${rest#*\|\|}"
+                done
+                return 0
+                ;;
+            esac
+            is_valid_simple_range "$spec"
+          }
+
+          # is_valid_simple_range <specifier> — one alternative of a range union.
+          # Accepts space-joined intersections (">=1.0.0 <2.0.0") and hyphen ranges
+          # ("1.2.3 - 2.3.4") by validating each whitespace-separated token.
+          #
+          # GLOBBING MUST BE OFF around the word-split loop. With globbing on, an
+          # unquoted `$spec` of `*` is expanded against the working directory, so the
+          # bare `*` range (eslint declares `"jiti": "*"`) is accepted or rejected
+          # depending on whether the cwd happens to contain files. That makes the
+          # result environment-dependent — the test suite would pass locally and fail
+          # in CI, or vice versa. Verified: without `set -f`, `*` is rejected from a
+          # populated directory and accepted from an empty one.
+          is_valid_simple_range() {
+            local spec="$1" tok rc=0 restore_glob=0
+            # Trim.
+            spec="${spec#"${spec%%[![:space:]]*}"}"
+            spec="${spec%"${spec##*[![:space:]]}"}"
+            [ -z "$spec" ] && return 1
+            case "$-" in *f*) ;; *) restore_glob=1; set -f ;; esac
+            for tok in $spec; do
+              case "$tok" in
+                -) continue ;;                 # hyphen-range separator
+                \*|x|X) continue ;;            # bare wildcard
+              esac
+              # Comparator/caret/tilde prefix, then a (possibly partial, possibly
+              # wildcarded) version with optional prerelease/build metadata.
+              if ! [[ "$tok" =~ ^(\^|~\>?|\>=|\<=|\>|\<|=|v)?[0-9]+(\.([0-9]+|[xX\*]))*([-+][0-9A-Za-z.-]+)?$ ]]; then
+                rc=1
+                break
+              fi
+            done
+            # Restore on every exit path — a bare `return 1` inside the loop would leave
+            # globbing disabled for the rest of the script.
+            [ "$restore_glob" -eq 1 ] && set +f
+            return "$rc"
+          }
+
+          manifest_verdict="clean"
+          minus_names=$'\n'
+          plus_names=$'\n'
+
+          disqualify_manifest() {
+            manifest_verdict="disqualified"
+            echo "npm-bump-extract.sh: $1" >&2
+          }
+
+          # --- Pass 2: manifests ---
+          pass2_manifests() {
+            local line path kind name spec prefix
+            local in_manifest=0 current=""
+            while IFS= read -r line; do
+              line="${line%$'\r'}"
+              if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
+                path="${BASH_REMATCH[2]}"
+                kind=$(classify_path "$path")
+                if [ "$kind" = "manifest" ]; then
+                  in_manifest=1
+                  current="$path"
+                else
+                  in_manifest=0
+                fi
+                continue
+              fi
+              [ "$in_manifest" -eq 1 ] || continue
+              [[ "$line" == +++* ]] && continue
+              [[ "$line" == ---[[:space:]]* ]] && continue
+              [[ "$line" =~ ^@@ ]] && continue
+              # Only changed lines are judged; context lines are inert.
+              [[ "$line" =~ ^[+-] ]] || continue
+
+              if ! [[ "$line" =~ ^([+-])[[:space:]]*\"([^\"]+)\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"[[:space:]]*,?[[:space:]]*$ ]]; then
+                disqualify_manifest "$current: unrecognized changed line: ${line}"
+                continue
+              fi
+              prefix="${BASH_REMATCH[1]}"
+              name="${BASH_REMATCH[2]}"
+              spec="${BASH_REMATCH[3]}"
+
+              case "$LIFECYCLE_KEYS" in
+                *$'\n'"$name"$'\n'*)
+                  disqualify_manifest "$current: lifecycle key changed: $name"
+                  continue
+                  ;;
+              esac
+
+              if ! is_valid_range "$spec"; then
+                disqualify_manifest "$current: value is not a valid npm range: \"$name\": \"$spec\""
+                continue
+              fi
+
+              case "$corroborate" in
+                *$'\n'"$name"$'\n'*) ;;
+                *)
+                  disqualify_manifest "$current: \"$name\" changed with no matching lockfile entry"
+                  continue
+                  ;;
+              esac
+
+              # Record the side this name appeared on, scoped to the file. Duplicates on
+              # the same side mean the same key changed twice, which is malformed.
+              if [ "$prefix" = "-" ]; then
+                case "$minus_names" in
+                  *$'\n'"$current|$name"$'\n'*)
+                    disqualify_manifest "$current: duplicate removed key: $name"
+                    continue
+                    ;;
+                esac
+                minus_names="${minus_names}${current}|${name}"$'\n'
+              else
+                case "$plus_names" in
+                  *$'\n'"$current|$name"$'\n'*)
+                    disqualify_manifest "$current: duplicate added key: $name"
+                    continue
+                    ;;
+                esac
+                plus_names="${plus_names}${current}|${name}"$'\n'
+              fi
+            done <<< "$input"
+
+            # Pairing check (spec §6.2). Every changed dependency must appear on BOTH
+            # sides — a replacement. An unmatched `+` is a dependency ADDED and an
+            # unmatched `-` is one REMOVED; both are unusual shapes for a Dependabot
+            # version-update PR and get human review. A new package entering the tree
+            # through a dependency-safety PR is the typosquat vector, and a freshly
+            # published malicious package has no advisories yet, so it scans clean.
+            local entry
+            while IFS= read -r entry; do
+              [ -z "$entry" ] && continue
+              case "$plus_names" in
+                *$'\n'"$entry"$'\n'*) ;;
+                *) disqualify_manifest "${entry%%|*}: dependency removed without replacement: ${entry##*|}" ;;
+              esac
+            done <<< "$(printf '%s' "$minus_names")"
+
+            while IFS= read -r entry; do
+              [ -z "$entry" ] && continue
+              case "$minus_names" in
+                *$'\n'"$entry"$'\n'*) ;;
+                *) disqualify_manifest "${entry%%|*}: dependency added without replacement: ${entry##*|}" ;;
+              esac
+            done <<< "$(printf '%s' "$plus_names")"
+          }
+
+          # --- Pass 1: lockfile ---
+          pass1_lock() {
+            local line kind path
+            local in_lock=0
+            local current_section=""
+            local current_disposition=""
+            local seen_column0=0
+            local section=""
+            local declared=""
+            local entry_name="" minus_ver="" plus_ver="" spec_changed=0
+            local tier2_key_prefix=""
+            while IFS= read -r line; do
+              line="${line%$'\r'}"
+              if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
+                path="${BASH_REMATCH[2]}"
+                kind=$(classify_path "$path")
+                if [ "$kind" = "lock" ]; then
+                  in_lock=1
+                  lock_path="$path"
+                  [ "$lock_verdict" = "absent" ] && lock_verdict="clean"
+                else
+                  in_lock=0
+                  if [ "$kind" = "manifest" ]; then
+                    case "$manifest_paths" in
+                      *$'\n'"$path"$'\n'*) ;;
+                      *) manifest_paths="${manifest_paths}${path}"$'\n' ;;
+                    esac
+                  fi
+                fi
+                continue
+              fi
+              [ "$in_lock" -eq 1 ] || continue
+              [[ "$line" == +++* ]] && continue
+              [[ "$line" == ---[[:space:]]* ]] && continue
+
+              # A document separator means sections may repeat, which the completeness
+              # reasoning does not cover. Distinguished from the diff's own file header
+              # (`--- a/path`), which always carries a path after the marker.
+              if [[ "$line" =~ ^[+\ -]---$ ]]; then
+                disqualify_lock "multi-document lockfile is not supported"
+                continue
+              fi
+
+              # Hunk header seeds the section. git's function-context heuristic reports
+              # the nearest column-0 line, which for pnpm-lock.yaml is a section name.
+              # Verified across 1004 hunk headers in three real Dependabot PRs.
+              if [[ "$line" =~ ^@@ ]]; then
+                # Take the section from the text AFTER the closing "@@" only.
+                # `${line##*@@ }` is WRONG here: on a whole-file-add header
+                # `@@ -0,0 +1,8 @@` the closing "@@" has no trailing space, so the glob
+                # matches the LEADING "@@ " instead and yields "-0,0" — a non-empty
+                # string that satisfies `[ -n "$section" ]` and silently skips the
+                # no-section-context disqualification below. A brand-new lockfile would
+                # then be reported as parseable and cleared. Verified on bash 3.2.57.
+                # `[^@]*` is safe because a hunk range contains only digits, commas,
+                # spaces and +/-, so it cannot swallow an "@" in a section name
+                # (e.g. `@@ -1,2 +1,2 @@ lodash@4.17.21:` still yields the full key).
+                section=""
+                if [[ "$line" =~ ^@@[^@]*@@[[:space:]]*(.*)$ ]]; then
+                  section="${BASH_REMATCH[1]}"
+                  section="${section%%[[:space:]]*}"
+                fi
+                if [ -n "$section" ]; then
+                  set_section "$section"
+                elif [ "$seen_column0" -eq 0 ]; then
+                  # No trailing context and no column-0 key seen yet: this is a newly
+                  # created lockfile arriving as one @@ -0,0 +1,N @@ hunk. Nothing
+                  # anchors the section state, so nothing can be proven.
+                  disqualify_lock "hunk header carries no section context"
+                fi
+                continue
+              fi
+
+              # A column-0 key inside the hunk body updates the section. Without this a
+              # hunk that crosses a section boundary would keep parsing under the
+              # previous section's rules — the catalogs:/overrides: adjacency case.
+              if [[ "$line" =~ ^[+\ -]([A-Za-z][A-Za-z0-9]*:)[[:space:]]*$ ]] \
+                 || [[ "$line" =~ ^[+\ -]([A-Za-z][A-Za-z0-9]*:)[[:space:]] ]]; then
+                set_section "${BASH_REMATCH[1]}"
+                # A format-version change is always visible in the diff, because a
+                # changed line appears in a hunk by definition. When absent, the format
+                # did not change. Safe to clobber BASH_REMATCH here: set_section above
+                # already consumed the section capture.
+                if [ "$current_disposition" = "version" ] \
+                   && [[ "$line" =~ ^\+lockfileVersion:[[:space:]]*\'?([0-9.]+)\'?[[:space:]]*$ ]]; then
+                  declared="${BASH_REMATCH[1]}"
+                  case "$SUPPORTED_LOCKFILE_VERSIONS" in
+                    *$'\n'"$declared"$'\n'*) ;;
+                    *) disqualify_lock "unsupported lockfileVersion: $declared" ;;
+                  esac
+                fi
+                # A changed line that IS the section key still counts as a change under
+                # that section (e.g. `-pnpmfileChecksum: sha256-AAAA`).
+                if [[ "$line" =~ ^[+-] ]] && [ "$current_disposition" != "version" ]; then
+                  case "$current_disposition" in
+                    disqualify|unknown)
+                      disqualify_lock "change under unsupported lockfile section: $current_section"
+                      ;;
+                  esac
+                fi
+                continue
+              fi
+
+              if [ "$current_disposition" = "tier1" ]; then
+                # Entry key line: a bare quoted-or-plain key with no value.
+                if [[ "$line" =~ ^[+\ -][[:space:]]+\'?([^\':]+)\'?:[[:space:]]*$ ]]; then
+                  flush_entry "$entry_name" "$minus_ver" "$plus_ver" "$spec_changed"
+                  entry_name="${BASH_REMATCH[1]}"
+                  minus_ver=""; plus_ver=""; spec_changed=0
+                  continue
+                fi
+                if [[ "$line" =~ ^[+-][[:space:]]+specifier:[[:space:]]*(.*)$ ]]; then
+                  spec_changed=1
+                  continue
+                fi
+                if [[ "$line" =~ ^-[[:space:]]+version:[[:space:]]*(.*)$ ]]; then
+                  minus_ver="${BASH_REMATCH[1]}"
+                  continue
+                fi
+                if [[ "$line" =~ ^\+[[:space:]]+version:[[:space:]]*(.*)$ ]]; then
+                  plus_ver="${BASH_REMATCH[1]}"
+                  continue
+                fi
+                # Anything else that CHANGED under a tier-1 section is unaccounted for.
+                # Falling through here is the §6.1 fail-open: it would clear the file with
+                # an unexamined change. Context lines remain inert.
+                if [[ "$line" =~ ^[+-] ]]; then
+                  disqualify_lock "unrecognized changed line under ${current_section}: ${line}"
+                fi
+                continue
+              fi
+
+              if [ "$current_disposition" = "tier2" ]; then
+                # Package-key line. A legitimate version replacement changes the key AND
+                # its metadata on the same side, which is why the side is still recorded.
+                if [[ "$line" =~ ^([+\ -])[[:space:]]+\'?([^\'[:space:]]+)\'?:[[:space:]]*$ ]]; then
+                  tier2_key_prefix="${BASH_REMATCH[1]}"
+                  if [ "$tier2_key_prefix" = "+" ]; then
+                    if split_package_key "${BASH_REMATCH[2]}"; then
+                      emit_tier2 "$_pkg_name" "$_pkg_version"
+                    else
+                      disqualify_lock "unparseable package key under packages:: ${BASH_REMATCH[2]}"
+                    fi
+                  fi
+                  continue
+                fi
+                # A changed metadata line is only accounted for when the enclosing
+                # package key changed on the SAME side. Under a CONTEXT key it means the
+                # version did not move but its tarball did. Fail closed.
+                if [[ "$line" =~ ^([+-]) ]]; then
+                  if [ "${BASH_REMATCH[1]}" != "$tier2_key_prefix" ]; then
+                    disqualify_lock "changed metadata for an unchanged package version under packages:: ${line}"
+                  fi
+                fi
+                continue
+              fi
+
+              # Any changed line under a disqualifying or unknown section fails the file.
+              if [[ "$line" =~ ^[+-] ]]; then
+                case "$current_disposition" in
+                  disqualify|unknown)
+                    disqualify_lock "change under unsupported lockfile section: ${current_section:-<none>}"
+                    continue
+                    ;;
+                esac
+              fi
+            done <<< "$input"
+            flush_entry "$entry_name" "$minus_ver" "$plus_ver" "$spec_changed"
+            if [ ${#tier2_rows[@]} -gt "$TIER2_MAX_ENTRIES" ]; then
+              disqualify_lock "tier-2 entries (${#tier2_rows[@]}) exceed cap of ${TIER2_MAX_ENTRIES}"
+            fi
+            return 0
+          }
+
+          pass1_lock
+          pass2_manifests
+
+          # A manifest cannot be corroborated without a parseable lockfile, so a
+          # disqualified or absent lockfile poisons every manifest in the diff.
+          if [ "$lock_verdict" != "clean" ]; then
+            manifest_verdict="disqualified"
+          fi
+          if [ "$manifest_verdict" != "clean" ]; then
+            lock_verdict="disqualified"
+          fi
+
+          case "$MODE" in
+            deps)
+              # `sort -u` over the whole line. NEVER `sort -k1,1 -u` — see Task 5.
+              if [ "$lock_verdict" = "clean" ] && [ ${#tier1_rows[@]} -gt 0 ]; then
+                printf '%s\n' "${tier1_rows[@]}" | sort -u
+              fi
+              ;;
+            lockfile-entries)
+              if [ "$lock_verdict" = "clean" ] && [ ${#tier2_rows[@]} -gt 0 ]; then
+                printf '%s\n' "${tier2_rows[@]}" | sort -u
+              fi
+              ;;
+            cleared-paths)
+              if [ "$lock_verdict" = "clean" ]; then
+                {
+                  [ -n "$lock_path" ] && printf '%s\n' "$lock_path"
+                  printf '%s' "$manifest_paths" | sed '/^$/d'
+                } | sort -u
+              fi
+              ;;
+          esac
+
+          exit 0
+          )
+          # --- END inline:scripts/npm-bump-extract.sh ---
+
           # --- BEGIN inline:scripts/pr-body-to-deps.sh ---
           pr_body_to_deps() (
           # pr-body-to-deps.sh — extract Dependabot dep bumps from a PR body, emit TSV.
@@ -1293,29 +1881,35 @@ jobs:
 
           # --- Extract dependencies via standalone script (Task 8) ---
           # Layer 1: extract deps from supported file shapes.
+          # --- BEGIN npm composition ---
           EXTRACTED=$(echo "$DIFF" | extract_deps)
           PYPROJECT_DEPS=$(printf '%s' "$DIFF" | pyproject_bump_extract --mode=deps 2>/dev/null || true)
-          DEPS_TSV=$(printf '%s\n%s\n' "$EXTRACTED" "$PYPROJECT_DEPS" | sed '/^$/d' | sort -u)
+          NPM_DEPS_TSV=$(printf '%s' "$DIFF" | npm_bump_extract --mode=deps 2>/dev/null || true)
+          DEPS_TSV=$(printf '%s\n%s\n%s\n' "$EXTRACTED" "$PYPROJECT_DEPS" "$NPM_DEPS_TSV" | sed '/^$/d' | sort -u)
 
           # --- Compute touched paths and unsupported subset ONCE, up front. ---
           # Layer 2: identify unsupported dependency-relevant paths.
-          # CLEARED_PYPROJECT is computed in the same hoist so Layer 2 and Layer 3
-          # both see a consistent view of which paths the diff-aware helper proved
-          # are bump-only (fix for issue #66 — uv/poetry Dependabot PRs).
+          # CLEARED_ALL is computed in the same hoist so Layer 2 and Layer 3
+          # both see a consistent view of which paths the diff-aware helpers proved
+          # are bump-only (fix for issue #66 — uv/poetry Dependabot PRs; extended to
+          # npm/pnpm below).
           TOUCHED_PATHS=$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)
           BASE_UNSUPPORTED=$(printf '%s\n' "$TOUCHED_PATHS" | classify_touched_paths 2>/dev/null || true)
           CLEARED_PYPROJECT=$(printf '%s' "$DIFF" | pyproject_bump_extract --mode=cleared-paths 2>/dev/null || true)
+          CLEARED_NPM=$(printf '%s' "$DIFF" | npm_bump_extract --mode=cleared-paths 2>/dev/null || true)
+          CLEARED_ALL=$(printf '%s\n%s\n' "$CLEARED_PYPROJECT" "$CLEARED_NPM" | sed '/^$/d' | sort -u)
 
           # Subtract cleared paths from BOTH the unsupported set and the touched
-          # set used by Layer 3's zero-row guard. A pyproject.toml cleared with
-          # zero extracted deps (e.g., comment-only churn) represents proof that
-          # the scan was complete — there is nothing to scan. Without this
-          # subtraction, a comment-only pyproject PR would trip the zero-row guard.
+          # set used by Layer 3's zero-row guard. A pyproject.toml or package.json/
+          # pnpm-lock.yaml cleared with zero extracted deps (e.g., comment-only or
+          # lockfile-only churn) represents proof that the scan was complete —
+          # there is nothing to scan. Without this subtraction, a comment-only
+          # pyproject PR or a lockfile-only npm PR would trip the zero-row guard.
           UNSUPPORTED_PATHS="$BASE_UNSUPPORTED"
           EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
-          if [ -n "$(printf '%s\n' "$CLEARED_PYPROJECT" | sed '/^$/d')" ]; then
-            cleared_file=$(mktemp "${RUNNER_TEMP:-/tmp}/cleared-pyproject-paths.XXXXXX")
-            printf '%s\n' "$CLEARED_PYPROJECT" | sed '/^$/d' | sort -u > "$cleared_file"
+          if [ -n "$(printf '%s\n' "$CLEARED_ALL" | sed '/^$/d')" ]; then
+            cleared_file=$(mktemp "${RUNNER_TEMP:-/tmp}/cleared-paths.XXXXXX")
+            printf '%s\n' "$CLEARED_ALL" | sed '/^$/d' | sort -u > "$cleared_file"
             UNSUPPORTED_PATHS=$(printf '%s\n' "$BASE_UNSUPPORTED" | sed '/^$/d' | grep -vFxf "$cleared_file" || true)
             EFFECTIVE_TOUCHED=$(printf '%s\n' "$TOUCHED_PATHS" | sed '/^$/d' | grep -vFxf "$cleared_file" || true)
             rm -f "$cleared_file"
@@ -1324,12 +1918,23 @@ jobs:
           # --- Layer 2: PR-body fallback (defense in depth for issue #52) ---
           # pyproject.toml and Pipfile remain pypi-routable for PR-body fallback.
           # Layer 3 still fires on Pipfile and on any pyproject.toml whose hunks
-          # pyproject_bump_extract did not clear; cleared pyproject.toml paths
-          # are subtracted from UNSUPPORTED_PATHS in the composition block above.
+          # pyproject_bump_extract did not clear; cleared pyproject.toml and npm
+          # paths are subtracted from UNSUPPORTED_PATHS in the composition block
+          # above.
           if [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ]; then
             ECO_HINT=""
             if echo "$TOUCHED_PATHS" | grep -qE '((^|/)(uv|poetry)\.lock$|requirements[^/]*\.txt$|pyproject\.toml$|Pipfile$)'; then
               ECO_HINT="pypi"
+            elif echo "$TOUCHED_PATHS" | grep -qE '(^|/)(package\.json|pnpm-lock\.yaml)$' \
+                 && [ -z "$(printf '%s' "$CLEARED_NPM" | sed '/^$/d')" ]; then
+              # npm body fallback is available ONLY when the helper proved
+              # nothing — which is already a guard-red state. When CLEARED_NPM
+              # is non-empty the helper succeeded, and zero tier-1 rows is the
+              # CORRECT answer for a lockfile-only security update. Promoting
+              # PR-body prose there would scan what the body claims instead of
+              # what the diff shows, inverting the trust model, and would feed
+              # unresolvable version strings into release-age lookups.
+              ECO_HINT="npm"
             elif echo "$TOUCHED_PATHS" | grep -qE '\.github/workflows/.*\.ya?ml$'; then
               ECO_HINT="actions"
             fi
@@ -1339,6 +1944,7 @@ jobs:
                 echo "Recovered $(echo "$DEPS_TSV" | wc -l | tr -d ' ') dep(s) via PR-body fallback (${ECO_HINT})"
             fi
           fi
+          # --- END npm composition ---
 
           # --- Layer 3: Fail-loud guard (fixes for issues #52 and #62) ---
           # Two composed conditions:
@@ -1357,10 +1963,12 @@ jobs:
             EXTRACTION_WARNING="⚠️ Parser could not extract dependencies from this diff (touched: ${TOUCHED_LIST}). Manual review required before merge."
           fi
 
+          # --- BEGIN dep routing ---
           # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
           # so the existing advisory-scan loops below can consume them unchanged.
           ACTIONS=""
           PY_DEPS=""
+          NPM_ROWS=""
           while IFS=$'\t' read -r _name _ver _eco; do
             [ -z "$_name" ] && continue
             case "$_eco" in
@@ -1372,10 +1980,15 @@ jobs:
                 PY_DEPS="$(printf '%s\n%s' "$PY_DEPS" "$_name")"
                 PY_VERSIONS["$_name"]="$_ver"
                 ;;
+              npm)
+                NPM_ROWS="$(printf '%s\n%s\t%s' "$NPM_ROWS" "$_name" "$_ver")"
+                ;;
             esac
           done <<< "$DEPS_TSV"
           ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
           PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
+          NPM_ROWS=$(printf '%s' "$NPM_ROWS" | sed '/^$/d' | sort -u)
+          # --- END dep routing ---
 
           # PR-body version fallback for deps without inline version (preserved from v2.0.1)
           for ACTION in $ACTIONS; do
@@ -1657,6 +2270,288 @@ jobs:
             fi
           done
 
+          while IFS=$'\t' read -r PKG _npm_ver; do
+            [ -z "$PKG" ] && continue
+            if [ -n "$_npm_ver" ]; then
+              DEPS="${DEPS}\`${PKG}\` (${_npm_ver}), "
+            else
+              DEPS="${DEPS}\`${PKG}\`, "
+            fi
+
+            GHSA_RESULT=$(gh api graphql -f query='
+              query($name: String!) {
+                securityVulnerabilities(
+                  ecosystem: NPM
+                  package: $name
+                  first: 10
+                ) {
+                  nodes {
+                    advisory {
+                      ghsaId
+                      severity
+                      summary
+                    }
+                    vulnerableVersionRange
+                    firstPatchedVersion {
+                      identifier
+                    }
+                  }
+                }
+              }
+            ' -f "name=${PKG}" 2>&1) || {
+              HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${PKG}\`) | - | - | GHSA |"$'\n'
+              GHSA_RESULT=""
+            }
+
+            if [ -n "$GHSA_RESULT" ] && echo "$GHSA_RESULT" | jq -e '.errors' > /dev/null 2>&1; then
+              HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
+              GHSA_ERR=$(echo "$GHSA_RESULT" | jq -r '.errors[0].message // "unknown error"')
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${PKG}\`: ${GHSA_ERR}) | - | - | GHSA |"$'\n'
+              GHSA_RESULT=""
+            fi
+
+            if [ -n "$GHSA_RESULT" ]; then
+              # Version-aware filtering is MANDATORY (spec §7.1), mirroring the
+              # pypi loop. Without it, every npm bump of a package carrying any
+              # historical CVE — which is most widely-used packages — lands
+              # security-review-needed and suppresses auto-merge. The gate would
+              # be useless through false positives rather than unsafe.
+              if [ -n "$_npm_ver" ]; then
+                while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
+                  [ -z "$_g_id" ] && continue
+                  if [ -n "$_g_patched" ] && [ "$_g_patched" != "null" ] \
+                     && printf '%s\n%s\n' "$_g_patched" "$_npm_ver" \
+                        | sort -V -C 2>/dev/null; then
+                    # firstPatchedVersion <= target: already fixed in this bump.
+                    FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
+                    FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
+                  else
+                    SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                    GHSA_TOTAL=$((GHSA_TOTAL + 1))
+                  fi
+                done <<< "$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[]? |
+                  [.advisory.ghsaId, .advisory.severity, .advisory.summary,
+                   (.firstPatchedVersion.identifier // "")] | @tsv
+                ' 2>/dev/null || true)"
+              else
+                # No target version: report everything. Safer default, matching
+                # the existing Actions and pypi behavior.
+                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
+                  .data.securityVulnerabilities.nodes[]? |
+                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
+                ' 2>/dev/null || true)
+                if [ -n "$GHSA_VULNS" ]; then
+                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
+                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
+                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                fi
+              fi
+            fi
+
+            if [ -n "$_npm_ver" ]; then
+              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "npm" --arg ver "$_npm_ver" \
+                '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
+            else
+              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "npm" \
+                '{"package":{"name":$name,"ecosystem":$eco}}')
+            fi
+            OSV_RESULT=$(curl -sf --max-time 30 \
+              -X POST "https://api.osv.dev/v1/query" \
+              -H "Content-Type: application/json" \
+              -d "$OSV_BODY" \
+              2>/dev/null) || {
+              HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
+              SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${PKG}\`) | - | - | OSV |"$'\n'
+              OSV_RESULT=""
+            }
+
+            if [ -n "$OSV_RESULT" ]; then
+              OSV_VULNS=$(echo "$OSV_RESULT" | jq -r '
+                .vulns[]? |
+                "| \(.id) | \(.database_specific.severity // "UNKNOWN") | \(.summary // .details[:80]) | OSV |"
+              ' 2>/dev/null || true)
+              if [ -n "$OSV_VULNS" ]; then
+                OSV_COUNT=$(echo "$OSV_VULNS" | wc -l | tr -d ' ')
+                OSV_TOTAL=$((OSV_TOTAL + OSV_COUNT))
+                SCAN_RESULTS="${SCAN_RESULTS}${OSV_VULNS}"$'\n'
+              fi
+            fi
+          done <<< "$NPM_ROWS"
+
+          # --- BEGIN tier-2 sweep ---
+          # --- Tier 2: batched OSV sweep over newly introduced lockfile versions ---
+          # Completeness claim: every package version this diff introduces into
+          # the tree was checked. Chunked at 100 per request; a continuation
+          # signal means the sweep was incomplete and must fail closed rather
+          # than report a partial result as complete.
+          TIER2_SECTION=""
+          TIER2_TSV=$(printf '%s' "$DIFF" | npm_bump_extract --mode=lockfile-entries 2>/dev/null || true)
+          # `printf '%s\n'`, not `printf '%s'`: command substitution strips the
+          # trailing newline, and `wc -l` counts newlines. Without the added
+          # terminator every count is short by one — a single-entry sweep
+          # measures 0 and is SKIPPED (a silent unscanned tree), and any larger
+          # sweep under-reports QB_SENT below and fails the cardinality check.
+          TIER2_COUNT=$(printf '%s\n' "$TIER2_TSV" | sed '/^$/d' | wc -l | tr -d ' ')
+
+          if [ "$TIER2_COUNT" -gt 0 ]; then
+            tier2_hits=""
+            tier2_failed=false
+            chunk_file=$(mktemp "${RUNNER_TEMP:-/tmp}/tier2-chunk.XXXXXX")
+            printf '%s\n' "$TIER2_TSV" | sed '/^$/d' > "$chunk_file"
+
+            split_dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/tier2-split.XXXXXX")
+            split -l 100 "$chunk_file" "$split_dir/chunk-"
+
+            for chunk in "$split_dir"/chunk-*; do
+              [ -f "$chunk" ] || continue
+              # jq builder (not awk/printf %s): chunk rows are attacker-supplied
+              # package names/versions from a PR-supplied lockfile, and jq's
+              # --rawfile + string interpolation guarantees proper JSON escaping
+              # of embedded quotes/backslashes rather than relying on OSV's
+              # server-side rejection of a malformed body.
+              QB_BODY=$(jq -Rn --rawfile rows "$chunk" '
+                {queries: ($rows | rtrimstr("\n") | split("\n")
+                  | map(split("\t") | {package: {name: .[0], ecosystem: "npm"},
+                                        version: .[1]}))}')
+              if [ -n "${OSV_BATCH_FIXTURE:-}" ]; then
+                # Offline seam, mirroring AGE_FIXTURE_DIR and
+                # OSV_DETAIL_FIXTURE_DIR. An unreadable fixture is a failure,
+                # exactly as a failed request would be.
+                QB_RESULT=$(cat "$OSV_BATCH_FIXTURE" 2>/dev/null) || {
+                  tier2_failed=true
+                  continue
+                }
+              else
+                QB_RESULT=$(curl -sf --max-time 60 \
+                  -X POST "https://api.osv.dev/v1/querybatch" \
+                  -H "Content-Type: application/json" \
+                  -d "$QB_BODY" \
+                  2>/dev/null) || {
+                  tier2_failed=true
+                  continue
+                }
+              fi
+
+              # --- Response validation. Each check fails CLOSED. ---
+              # Without these, `jq … 2>/dev/null || true` downstream converts a
+              # malformed or short response into "no advisories found" — a
+              # silent green over an unscanned chunk.
+
+              # 1. Parseable JSON with a results array.
+              if ! echo "$QB_RESULT" | jq -e 'has("results") and (.results | type == "array")' > /dev/null 2>&1; then
+                tier2_failed=true
+                continue
+              fi
+
+              # 2. Cardinality. Hit indices map back to packages by position,
+              # so a short array both under-covers and MISATTRIBUTES.
+              QB_SENT=$(wc -l < "$chunk" | tr -d ' ')
+              QB_GOT=$(echo "$QB_RESULT" | jq -r '.results | length')
+              if [ "$QB_GOT" != "$QB_SENT" ]; then
+                tier2_failed=true
+                continue
+              fi
+
+              # 3. Pagination. Confirmed per-result field name `next_page_token`
+              # (https://google.github.io/osv.dev/post-v1-querybatch/). A token
+              # means that query's results were truncated.
+              if echo "$QB_RESULT" | jq -e '.results[]? | select(has("next_page_token"))' > /dev/null 2>&1; then
+                tier2_failed=true
+                continue
+              fi
+
+              # 4. Every result member must be an object; any `vulns` present
+              # must be an array; every vulnerability must carry a non-empty
+              # string id. Checks 1-3 validate the ENVELOPE only — without this
+              # one, a malformed MEMBER still degrades to "0 advisories" through
+              # the `.results[]?` / `// []` / `|| true` combination that used to
+              # guard the extraction below. That is a green gate over an
+              # unscanned chunk: the exact outcome this validation block exists
+              # to prevent.
+              if ! echo "$QB_RESULT" | jq -e '
+                .results | all(
+                  type == "object"
+                  and (if has("vulns") then (.vulns | type == "array") else true end)
+                  and ((.vulns // []) | all(
+                    type == "object"
+                    and (.id | type == "string")
+                    and (.id | length > 0)
+                  ))
+                )
+              ' > /dev/null 2>&1; then
+                tier2_failed=true
+                continue
+              fi
+
+              # Map each hit index back to its package via the chunk file.
+              # No `?`, no `2>/dev/null`, no `|| true` — the response is proven
+              # well-formed above, so a jq failure here is a real fault and must
+              # fail closed rather than read as "no hits".
+              HIT_IDS=$(echo "$QB_RESULT" | jq -r '
+                [.results[] | (.vulns // []) | map(.id)] | to_entries[] |
+                select(.value | length > 0) | "\(.key)\t\(.value | join(","))"
+              ') || {
+                tier2_failed=true
+                continue
+              }
+
+              while IFS=$'\t' read -r idx ids; do
+                [ -z "$idx" ] && continue
+                pkg_line=$(sed -n "$((idx + 1))p" "$chunk")
+                pkg_name=$(printf '%s' "$pkg_line" | cut -f1)
+                pkg_ver=$(printf '%s' "$pkg_line" | cut -f2)
+                OLD_IFS="$IFS"; IFS=','
+                for vid in $ids; do
+                  IFS="$OLD_IFS"
+                  if [ -n "${OSV_DETAIL_FIXTURE_DIR:-}" ]; then
+                    # Offline seam, mirroring AGE_FIXTURE_DIR. A missing fixture
+                    # is a failure, never an empty advisory.
+                    VD=$(cat "${OSV_DETAIL_FIXTURE_DIR}/${vid}.json" 2>/dev/null) || {
+                      tier2_failed=true
+                      continue
+                    }
+                  else
+                    VD=$(curl -sf --max-time 30 "https://api.osv.dev/v1/vulns/${vid}" 2>/dev/null) || {
+                      tier2_failed=true
+                      continue
+                    }
+                  fi
+                  # The detail response is a separate request and carries its own
+                  # failure modes. An unvalidated malformed body would yield an
+                  # empty severity and summary, publishing a row that looks like a
+                  # scanned advisory carrying no information.
+                  if ! echo "$VD" | jq -e 'type == "object" and (.id | type == "string")' > /dev/null 2>&1; then
+                    tier2_failed=true
+                    continue
+                  fi
+                  vsev=$(echo "$VD" | jq -r '.database_specific.severity // "UNKNOWN"') || vsev="UNKNOWN"
+                  vsum=$(echo "$VD" | jq -r 'if (.summary | type) == "string" then .summary elif (.details | type) == "string" then (.details[:80]) else "" end') || vsum=""
+                  tier2_hits="${tier2_hits}| \`${pkg_name}@${pkg_ver}\` | ${vid} | ${vsev} | ${vsum} |"$'\n'
+                  OSV_TOTAL=$((OSV_TOTAL + 1))
+                done
+                IFS="$OLD_IFS"
+              done <<< "$HIT_IDS"
+            done
+
+            rm -rf "$split_dir" "$chunk_file"
+
+            if [ "$tier2_failed" = "true" ]; then
+              HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
+              TIER2_SECTION=$(printf '\n### Transitive lockfile sweep\n\n⚠️ Sweep incomplete for %s newly introduced package version(s). Manual review required.\n' "$TIER2_COUNT")
+            elif [ -n "$tier2_hits" ]; then
+              TIER2_SECTION=$(printf '\n### Transitive lockfile sweep\n\n%s new package version(s) entered the tree; advisories found:\n\n| Package | ID | Severity | Summary |\n|---|---|---|---|\n%s' "$TIER2_COUNT" "$tier2_hits")
+            else
+              TIER2_SECTION=$(printf '\n### Transitive lockfile sweep\n\n%s new package version(s) entered the tree, 0 advisories.\n' "$TIER2_COUNT")
+            fi
+          fi
+          # --- END tier-2 sweep ---
+
           # --- OpenSSF Scorecard (GitHub Actions only) ---
           SCORECARD_TABLE=""
           if [[ "$ENABLE_SCORECARD" == "true" ]]; then
@@ -1687,9 +2582,21 @@ jobs:
           # Strip trailing comma-space from DEPS
           DEPS=$(echo "$DEPS" | sed 's/, $//')
 
+          # --- BEGIN deps placeholder ---
+          # A lockfile-only pnpm bump (indirect/transitive updates only) is a
+          # legitimate zero-tier-1-rows case: DEPS stays empty even though the
+          # tier-2 sweep below may have swept real transitive versions. Saying
+          # only "no dependencies extracted" there reads as nothing was
+          # scanned, when N package versions actually were — point at the
+          # tier-2 section instead of implying an unscanned gate.
           if [ -z "$DEPS" ]; then
-            DEPS="(no dependencies extracted from diff)"
+            if [ "$TIER2_COUNT" -gt 0 ]; then
+              DEPS="(no declared dependency changes — ${TIER2_COUNT} transitive lockfile version(s) swept, see below)"
+            else
+              DEPS="(no dependencies extracted from diff)"
+            fi
           fi
+          # --- END deps placeholder ---
 
           # --- Build comment body ---
           TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
@@ -1697,7 +2604,16 @@ jobs:
           # --- Compute verdict via safety_verdict (inline copy of scripts/safety-verdict.sh) ---
           # Split COOLDOWN_FAILURES into age_error_count vs age_violation_count by
           # re-reading AGE_TSV (verdicts: 'fail' = violation, 'error' = lookup error).
-          AGE_VIOLATION_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail"'  | wc -l | tr -d ' ')
+          # --- BEGIN age counts ---
+          # AGE_VIOLATION_COUNT keeps its meaning — every fail row — because it
+          # drives the gate and is consumed by safety-verdict.sh. The two counts
+          # below exist only so the reporting can tell the two kinds apart: an
+          # empty reason means "too young", a non-empty one means yanked or
+          # deprecated, which waiting will never resolve.
+          AGE_VIOLATION_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail"' | wc -l | tr -d ' ')
+          AGE_ONLY_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" && $7==""' | wc -l | tr -d ' ')
+          SUPPLY_RISK_COUNT=$(echo "$AGE_TSV" | awk -F'\t' '$6=="fail" && $7!=""' | wc -l | tr -d ' ')
+          # --- END age counts ---
           AGE_ERROR_COUNT=$(    echo "$AGE_TSV" | awk -F'\t' '$6=="error"' | wc -l | tr -d ' ')
 
           # SCAN_ERROR_COUNT is incremented at each GHSA/OSV failure point in the
@@ -1753,7 +2669,7 @@ jobs:
           LABEL_COLOR_security_review_needed="B60205"
           LABEL_DESC_security_review_needed="Dependency scan found advisories — manual review required"
           LABEL_COLOR_dependency_age_violation="FBCA04"
-          LABEL_DESC_dependency_age_violation="Target version younger than the configured minimum release age (release_age_policy)"
+          LABEL_DESC_dependency_age_violation="Target version blocked by the release-age gate: below the configured minimum age, or yanked/deprecated upstream (release_age_policy)"
           LABEL_COLOR_dependency_safety_error="6E7781"
           LABEL_DESC_dependency_safety_error="dependency-safety scan could not complete reliably — see scan comment"
 
@@ -1840,6 +2756,20 @@ jobs:
             RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
           fi
 
+          # age_status_phrase — one clause per kind of failure actually present,
+          # so a deprecation is never described as "younger than Nd".
+          age_status_phrase() {
+            local parts=""
+            if [ "$AGE_ONLY_COUNT" -gt 0 ]; then
+              parts="${AGE_ONLY_COUNT} package(s) younger than ${MINIMUM_RELEASE_AGE_DAYS}d minimum release age"
+            fi
+            if [ "$SUPPLY_RISK_COUNT" -gt 0 ]; then
+              if [ -n "$parts" ]; then parts="${parts}; "; fi
+              parts="${parts}${SUPPLY_RISK_COUNT} package(s) yanked or deprecated upstream"
+            fi
+            printf '%s' "$parts"
+          }
+
           # ---- Header + footer (from verdict priority — must match safety-verdict.sh order) ----
           # Priority: guard > error > blocking-age > advisories > advisory-age > clean.
           # Spec §6.1 — keep this order in sync with the script.
@@ -1855,8 +2785,12 @@ jobs:
             RESULTS_HEADER="Scan completed with errors — see workflow logs."
             RESULTS_FOOTER="> Scan errors prevented a clean verdict. Re-run or push to retry."
           elif [ "$HAS_AGE_VIOLATION" = "true" ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
-            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) younger than the ${MINIMUM_RELEASE_AGE_DAYS}-day minimum release age (blocking policy)."
-            RESULTS_FOOTER="> Re-run by rebasing or recreating the PR after the age-compliant date below."
+            RESULTS_HEADER="$(age_status_phrase) (blocking policy)."
+            if [ "$AGE_ONLY_COUNT" -gt 0 ]; then
+              RESULTS_FOOTER="> Re-run by rebasing or recreating the PR after the age-compliant date below."
+            else
+              RESULTS_FOOTER="> Yanked or deprecated releases do not become compliant by waiting — pin a different version."
+            fi
             if [ "$TOTAL" -gt 0 ]; then
               # Cross-reference: advisories are present too. Don't lose that signal under the age-violation header.
               RESULTS_FOOTER="${RESULTS_FOOTER}"$'\n'"> Also: ${TOTAL} advisory/ies affect target versions — see table above."
@@ -1866,7 +2800,7 @@ jobs:
             RESULTS_FOOTER="> Review the advisories above before deciding to merge."
           elif [ "$HAS_AGE_VIOLATION" = "true" ]; then
             # release_age_policy: advisory — reported, not blocking.
-            RESULTS_HEADER="${AGE_VIOLATION_COUNT} package(s) below the ${MINIMUM_RELEASE_AGE_DAYS}-day minimum release age (advisory policy — not blocking)."
+            RESULTS_HEADER="$(age_status_phrase) (advisory policy — not blocking)."
             RESULTS_FOOTER="> Release-age violation reported (advisory policy — not blocking). Auto-merge suppressed."
           else
             RESULTS_HEADER="No known exploits found affecting the target versions."
@@ -1895,6 +2829,7 @@ jobs:
 
           # --- Release Age section (Task 12 — fixes #25 UX) ---
           RELEASE_AGE_SECTION=""
+          # --- BEGIN release age section ---
           if [ -n "$AGE_TSV" ]; then
             AGE_TABLE_HDR="| Package | Version | Published | Age | Status |"
             AGE_TABLE_SEP="|---------|---------|-----------|-----|--------|"
@@ -1915,8 +2850,11 @@ jobs:
               fi
               AGE_ROWS="${AGE_ROWS}| \`${_name}\` | v${_ver} | ${_published_short} | ${_days}d | ${_status} |"$'\n'
 
-              # Track max fail epoch for "earliest unblock" footer
-              if [ "$_verdict" = "fail" ] && [ "$_iso" != "-" ]; then
+              # Track max fail epoch for "earliest unblock" footer. Age-only rows
+              # (empty reason) only — a yanked/deprecated row's publish date is
+              # not a date that waiting will ever resolve, so it must not seed
+              # the unblock-date computation below.
+              if [ "$_verdict" = "fail" ] && [ -z "$_reason" ] && [ "$_iso" != "-" ]; then
                 _pub_epoch=$(date -u -d "$_iso" +%s 2>/dev/null \
                   || date -u -d "${_iso}Z" +%s 2>/dev/null \
                   || date -u -jf '%Y-%m-%dT%H:%M:%SZ' "$_iso" +%s 2>/dev/null \
@@ -1929,18 +2867,19 @@ jobs:
             done <<< "$AGE_TSV"
 
             AGE_FOOTER=""
-            if [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
+            if [ "$AGE_ONLY_COUNT" -gt 0 ] && [ "$MAX_FAIL_EPOCH" -gt 0 ]; then
               _unblock_epoch=$(( MAX_FAIL_EPOCH + MINIMUM_RELEASE_AGE_DAYS * 86400 ))
               _unblock_iso=$(date -u -d "@$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
                 || date -u -r "$_unblock_epoch" '+%Y-%m-%d' 2>/dev/null \
                 || echo "unknown")
               AGE_FOOTER="$(printf '\n> %d package(s) below minimum. Earliest age-compliant date: %s.\n> Re-run by rebasing or recreating the PR after that date.' \
-                "$AGE_VIOLATION_COUNT" "$_unblock_iso")"
+                "$AGE_ONLY_COUNT" "$_unblock_iso")"
             fi
 
             RELEASE_AGE_SECTION="$(printf '\n### Release Age (minimum: %s days)\n\n%s\n%s\n%s%s' \
               "$MINIMUM_RELEASE_AGE_DAYS" "$AGE_TABLE_HDR" "$AGE_TABLE_SEP" "$AGE_ROWS" "$AGE_FOOTER")"
           fi
+          # --- END release age section ---
 
           # --- Extraction warning section (Task 12 — surfaces #27 silent drops) ---
           EXTRACTION_WARNING_SECTION=""
@@ -1948,7 +2887,7 @@ jobs:
             EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
           fi
 
-          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s' \
+          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s' \
             "## Dependency Safety Scan" \
             "$EXTRACTION_WARNING_SECTION" \
             "**Packages scanned:** ${DEPS}" \
@@ -1958,6 +2897,7 @@ jobs:
             "$RESULTS_FOOTER" \
             "$HISTORICAL_SECTION" \
             "$RELEASE_AGE_SECTION" \
+            "$TIER2_SECTION" \
             "$SCORECARD_SECTION")"
 
           # --- Comment management: update-or-create with change detection ---
