@@ -491,6 +491,42 @@ run_sweep() {
   [[ "$output" == *"SECTION<<>>"* ]] || return 1
 }
 
+# --- deps placeholder -------------------------------------------------------
+#
+# The `deps placeholder` block decides what "**Packages scanned:**" says when
+# DEPS is empty. Its free inputs are $DEPS and $TIER2_COUNT — both assigned by
+# surrounding code this block does not own, so both are seeded here.
+run_deps_placeholder() {
+  local deps="$1" tier2_count="$2"
+  local block; block=$(extract_named_block "$WF" "deps placeholder")
+  run bash -c "
+    set -uo pipefail
+    DEPS='$deps'
+    TIER2_COUNT='$tier2_count'
+    $block
+    printf 'DEPS<<<%s>>>\n' \"\$DEPS\"
+  "
+}
+
+@test "deps placeholder: zero tier-2 entries keeps the original no-deps message" {
+  run_deps_placeholder "" "0"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DEPS<<<(no dependencies extracted from diff)>>>"* ]] || return 1
+}
+
+@test "deps placeholder: swept transitive versions point at the tier-2 section instead" {
+  run_deps_placeholder "" "3"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DEPS<<<(no declared dependency changes — 3 transitive lockfile version(s) swept, see below)>>>"* ]] || return 1
+  [[ "$output" != *"(no dependencies extracted from diff)"* ]] || return 1
+}
+
+@test "deps placeholder: non-empty DEPS is left untouched regardless of TIER2_COUNT" {
+  run_deps_placeholder '`lodash` (4.17.21)' "5"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'DEPS<<<`lodash` (4.17.21)>>>'* ]] || return 1
+}
+
 # ---------------------------------------------------------------------------
 # Task 20 — age counts split age-only failures (empty $7 reason) from
 # supply-risk failures (yanked/deprecated, non-empty $7), so reporting can

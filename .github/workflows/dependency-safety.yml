@@ -2582,9 +2582,21 @@ jobs:
           # Strip trailing comma-space from DEPS
           DEPS=$(echo "$DEPS" | sed 's/, $//')
 
+          # --- BEGIN deps placeholder ---
+          # A lockfile-only pnpm bump (indirect/transitive updates only) is a
+          # legitimate zero-tier-1-rows case: DEPS stays empty even though the
+          # tier-2 sweep below may have swept real transitive versions. Saying
+          # only "no dependencies extracted" there reads as nothing was
+          # scanned, when N package versions actually were — point at the
+          # tier-2 section instead of implying an unscanned gate.
           if [ -z "$DEPS" ]; then
-            DEPS="(no dependencies extracted from diff)"
+            if [ "$TIER2_COUNT" -gt 0 ]; then
+              DEPS="(no declared dependency changes — ${TIER2_COUNT} transitive lockfile version(s) swept, see below)"
+            else
+              DEPS="(no dependencies extracted from diff)"
+            fi
           fi
+          # --- END deps placeholder ---
 
           # --- Build comment body ---
           TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
