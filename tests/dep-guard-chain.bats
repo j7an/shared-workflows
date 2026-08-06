@@ -255,6 +255,63 @@ run_npm_chain() {
   [[ "$output" == *"DEPS=[]"* ]] || return 1
 }
 
+# --- dep routing -------------------------------------------------------------
+#
+# The `dep routing` block partitions $DEPS_TSV into ACTIONS/PY_DEPS/NPM_ROWS by
+# the third (ecosystem) column. NPM_ROWS is the sole producer consumed by the
+# tier-1 npm scan loop below (`while IFS=$'\t' read -r PKG _npm_ver`), so this
+# also pins the two-field "name<TAB>version" row shape that consumer depends
+# on. ACTIONS/PY_DEPS/NPM_ROWS are all assigned fresh at the top of the block,
+# so DEPS_TSV is the only free input to seed.
+#
+# ACTION_VERSIONS/PY_VERSIONS are declared `-A` by the real step (line ~1875,
+# above this block) before it runs — that's a real precondition, not something
+# this block establishes itself, so the driver declares it too. `declare -A`
+# needs bash >= 4; this repo's dev tests run on macOS system bash (3.2), which
+# has no associative arrays at all. The actions/pypi row NAMEs below are
+# deliberately single alphanumeric words (no `/`, `-`, `.`) so that on bash 3.2
+# — where `declare -A` fails and the assignment silently falls back to a
+# plain indexed array — the unset-bareword-as-0 arithmetic subscript bash 3.2
+# uses is at least internally consistent between write and any (unused) read,
+# and never hits the "division by 0" parse error a realistic `owner/repo`
+# action name would trigger. Real CI (ubuntu-latest) has bash 5, where
+# `declare -A` succeeds and the arrays are genuinely associative. Either way,
+# NPM_ROWS itself is a plain string variable untouched by this limitation.
+run_dep_routing() {
+  local tsv_file="$1"
+  local block; block=$(extract_named_block "$WF" "dep routing")
+  run bash -c "
+    set -o pipefail
+    declare -A ACTION_VERSIONS PY_VERSIONS 2>/dev/null || true
+    DEPS_TSV=\$(cat '$tsv_file')
+    $block
+    printf 'NPM_LINES=%s\n' \"\$(printf '%s\n' \"\$NPM_ROWS\" | sed '/^\$/d' | wc -l | tr -d ' ')\"
+    printf 'NPM_ROWS<<<%s>>>\n' \"\$NPM_ROWS\"
+  "
+}
+
+@test "dep routing: NPM_ROWS contains exactly the npm rows as name<TAB>version" {
+  local tsv="$BATS_TEST_TMPDIR/deps.tsv"
+  printf 'sampleaction\tv1\tactions\nsamplepkg\t2.0.0\tpypi\nleftpad\t1.0.0\tnpm\nlodash\t4.17.21\tnpm\n' > "$tsv"
+  run_dep_routing "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  # Exactly 2 lines: no actions/pypi bleed-through, no duplication.
+  [[ "$output" == *"NPM_LINES=2"* ]] || return 1
+  [[ "$output" == *$'leftpad\t1.0.0'* ]] || return 1
+  [[ "$output" == *$'lodash\t4.17.21'* ]] || return 1
+  [[ "$output" != *"sampleaction"* ]] || return 1
+  [[ "$output" != *"samplepkg"* ]] || return 1
+}
+
+@test "dep routing: no npm rows in DEPS_TSV leaves NPM_ROWS empty" {
+  local tsv="$BATS_TEST_TMPDIR/deps-no-npm.tsv"
+  printf 'sampleaction\tv1\tactions\nsamplepkg\t2.0.0\tpypi\n' > "$tsv"
+  run_dep_routing "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"NPM_LINES=0"* ]] || return 1
+  [[ "$output" == *"NPM_ROWS<<<>>>"* ]] || return 1
+}
+
 # --- tier-2 sweep ----------------------------------------------------------
 #
 # The `tier-2 sweep` block computes TIER2_TSV and TIER2_COUNT itself, from

@@ -1963,6 +1963,7 @@ jobs:
             EXTRACTION_WARNING="⚠️ Parser could not extract dependencies from this diff (touched: ${TOUCHED_LIST}). Manual review required before merge."
           fi
 
+          # --- BEGIN dep routing ---
           # Populate ACTIONS, PY_DEPS, ACTION_VERSIONS, PY_VERSIONS from DEPS_TSV
           # so the existing advisory-scan loops below can consume them unchanged.
           ACTIONS=""
@@ -1987,6 +1988,7 @@ jobs:
           ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
           PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
           NPM_ROWS=$(printf '%s' "$NPM_ROWS" | sed '/^$/d' | sort -u)
+          # --- END dep routing ---
 
           # PR-body version fallback for deps without inline version (preserved from v2.0.1)
           for ACTION in $ACTIONS; do
