@@ -2381,6 +2381,152 @@ jobs:
             fi
           done <<< "$NPM_ROWS"
 
+          # --- BEGIN tier-2 sweep ---
+          # --- Tier 2: batched OSV sweep over newly introduced lockfile versions ---
+          # Completeness claim: every package version this diff introduces into
+          # the tree was checked. Chunked at 100 per request; a continuation
+          # signal means the sweep was incomplete and must fail closed rather
+          # than report a partial result as complete.
+          TIER2_SECTION=""
+          TIER2_TSV=$(printf '%s' "$DIFF" | npm_bump_extract --mode=lockfile-entries 2>/dev/null || true)
+          TIER2_COUNT=$(printf '%s' "$TIER2_TSV" | sed '/^$/d' | wc -l | tr -d ' ')
+
+          if [ "$TIER2_COUNT" -gt 0 ]; then
+            tier2_hits=""
+            tier2_failed=false
+            chunk_file=$(mktemp "${RUNNER_TEMP:-/tmp}/tier2-chunk.XXXXXX")
+            printf '%s' "$TIER2_TSV" | sed '/^$/d' > "$chunk_file"
+
+            split_dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/tier2-split.XXXXXX")
+            split -l 100 "$chunk_file" "$split_dir/chunk-"
+
+            for chunk in "$split_dir"/chunk-*; do
+              [ -f "$chunk" ] || continue
+              QB_BODY=$(awk -F'\t' 'BEGIN{printf "{\"queries\":["} {if(NR>1)printf ","; printf "{\"package\":{\"name\":\"%s\",\"ecosystem\":\"npm\"},\"version\":\"%s\"}", $1, $2} END{printf "]}"}' "$chunk")
+              QB_RESULT=$(curl -sf --max-time 60 \
+                -X POST "https://api.osv.dev/v1/querybatch" \
+                -H "Content-Type: application/json" \
+                -d "$QB_BODY" \
+                2>/dev/null) || {
+                tier2_failed=true
+                continue
+              }
+
+              # --- Response validation. Each check fails CLOSED. ---
+              # Without these, `jq … 2>/dev/null || true` downstream converts a
+              # malformed or short response into "no advisories found" — a
+              # silent green over an unscanned chunk.
+
+              # 1. Parseable JSON with a results array.
+              if ! echo "$QB_RESULT" | jq -e 'has("results") and (.results | type == "array")' > /dev/null 2>&1; then
+                tier2_failed=true
+                continue
+              fi
+
+              # 2. Cardinality. Hit indices map back to packages by position,
+              # so a short array both under-covers and MISATTRIBUTES.
+              QB_SENT=$(wc -l < "$chunk" | tr -d ' ')
+              QB_GOT=$(echo "$QB_RESULT" | jq -r '.results | length')
+              if [ "$QB_GOT" != "$QB_SENT" ]; then
+                tier2_failed=true
+                continue
+              fi
+
+              # 3. Pagination. Confirmed per-result field name `next_page_token`
+              # (https://google.github.io/osv.dev/post-v1-querybatch/). A token
+              # means that query's results were truncated.
+              if echo "$QB_RESULT" | jq -e '.results[]? | select(has("next_page_token"))' > /dev/null 2>&1; then
+                tier2_failed=true
+                continue
+              fi
+
+              # 5. Every result member must be an object; any `vulns` present
+              # must be an array; every vulnerability must carry a non-empty
+              # string id. Checks 1-4 validate the ENVELOPE only — without this
+              # one, a malformed MEMBER still degrades to "0 advisories" through
+              # the `.results[]?` / `// []` / `|| true` combination that used to
+              # guard the extraction below. That is a green gate over an
+              # unscanned chunk: the exact outcome this validation block exists
+              # to prevent.
+              if ! echo "$QB_RESULT" | jq -e '
+                .results | all(
+                  type == "object"
+                  and (if has("vulns") then (.vulns | type == "array") else true end)
+                  and ((.vulns // []) | all(
+                    type == "object"
+                    and (.id | type == "string")
+                    and (.id | length > 0)
+                  ))
+                )
+              ' > /dev/null 2>&1; then
+                tier2_failed=true
+                continue
+              fi
+
+              # Map each hit index back to its package via the chunk file.
+              # No `?`, no `2>/dev/null`, no `|| true` — the response is proven
+              # well-formed above, so a jq failure here is a real fault and must
+              # fail closed rather than read as "no hits".
+              HIT_IDS=$(echo "$QB_RESULT" | jq -r '
+                [.results[] | (.vulns // []) | map(.id)] | to_entries[] |
+                select(.value | length > 0) | "\(.key)\t\(.value | join(","))"
+              ') || {
+                tier2_failed=true
+                continue
+              }
+
+              while IFS=$'\t' read -r idx ids; do
+                [ -z "$idx" ] && continue
+                pkg_line=$(sed -n "$((idx + 1))p" "$chunk")
+                pkg_name=$(printf '%s' "$pkg_line" | cut -f1)
+                pkg_ver=$(printf '%s' "$pkg_line" | cut -f2)
+                OLD_IFS="$IFS"; IFS=','
+                for vid in $ids; do
+                  IFS="$OLD_IFS"
+                  if [ -n "${OSV_DETAIL_FIXTURE_DIR:-}" ]; then
+                    # Offline seam, mirroring AGE_FIXTURE_DIR. A missing fixture
+                    # is a failure, never an empty advisory.
+                    VD=$(cat "${OSV_DETAIL_FIXTURE_DIR}/${vid}.json" 2>/dev/null) || {
+                      tier2_failed=true
+                      continue
+                    }
+                  else
+                    VD=$(curl -sf --max-time 30 "https://api.osv.dev/v1/vulns/${vid}" 2>/dev/null) || {
+                      tier2_failed=true
+                      continue
+                    }
+                  fi
+                  # The detail response is a separate request and carries its own
+                  # failure modes. An unvalidated malformed body would yield an
+                  # empty severity and summary, publishing a row that looks like a
+                  # scanned advisory carrying no information.
+                  if ! echo "$VD" | jq -e 'type == "object" and (.id | type == "string")' > /dev/null 2>&1; then
+                    tier2_failed=true
+                    continue
+                  fi
+                  vsev=$(echo "$VD" | jq -r '.database_specific.severity // "UNKNOWN"') || vsev="UNKNOWN"
+                  vsum=$(echo "$VD" | jq -r 'if (.summary | type) == "string" then .summary elif (.details | type) == "string" then (.details[:80]) else "" end') || vsum=""
+                  tier2_hits="${tier2_hits}| \`${pkg_name}@${pkg_ver}\` | ${vid} | ${vsev} | ${vsum} |"$'\n'
+                  OSV_TOTAL=$((OSV_TOTAL + 1))
+                done
+                IFS="$OLD_IFS"
+              done <<< "$HIT_IDS"
+            done
+
+            rm -rf "$split_dir" "$chunk_file"
+
+            if [ "$tier2_failed" = "true" ]; then
+              HAS_ERROR="true"
+              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
+              TIER2_SECTION=$(printf '\n### Transitive lockfile sweep\n\n⚠️ Sweep incomplete for %s newly introduced package version(s). Manual review required.\n' "$TIER2_COUNT")
+            elif [ -n "$tier2_hits" ]; then
+              TIER2_SECTION=$(printf '\n### Transitive lockfile sweep\n\n%s new package version(s) entered the tree; advisories found:\n\n| Package | ID | Severity | Summary |\n|---|---|---|---|\n%s' "$TIER2_COUNT" "$tier2_hits")
+            else
+              TIER2_SECTION=$(printf '\n### Transitive lockfile sweep\n\n%s new package version(s) entered the tree, 0 advisories.\n' "$TIER2_COUNT")
+            fi
+          fi
+          # --- END tier-2 sweep ---
+
           # --- OpenSSF Scorecard (GitHub Actions only) ---
           SCORECARD_TABLE=""
           if [[ "$ENABLE_SCORECARD" == "true" ]]; then
@@ -2672,7 +2818,7 @@ jobs:
             EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
           fi
 
-          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s' \
+          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s' \
             "## Dependency Safety Scan" \
             "$EXTRACTION_WARNING_SECTION" \
             "**Packages scanned:** ${DEPS}" \
@@ -2682,6 +2828,7 @@ jobs:
             "$RESULTS_FOOTER" \
             "$HISTORICAL_SECTION" \
             "$RELEASE_AGE_SECTION" \
+            "$TIER2_SECTION" \
             "$SCORECARD_SECTION")"
 
           # --- Comment management: update-or-create with change detection ---
