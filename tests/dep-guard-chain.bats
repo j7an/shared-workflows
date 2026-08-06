@@ -468,7 +468,27 @@ age_tsv() {
   eval "$(extract_named_block "$WF" 'age counts')"
   eval "$(extract_named_block "$WF" 'release age section')"
   [[ "$AGE_FOOTER" == *'age-compliant date'* ]] || return 1
-  # Seeded from the age-only row (2026-04-01 + 5d), never from the 2019 deprecation.
+  # This 2026-04-06 date is also what MAX_FAIL_EPOCH's plain max() would produce
+  # with no exclusion at all, since the deprecation row (2019) is already the
+  # earlier date here. It does NOT discriminate the -z "$_reason" exclusion —
+  # see "the unblock date is never pulled from a later-dated deprecation row"
+  # below for the test that actually proves the exclusion is load-bearing.
   [[ "$AGE_FOOTER" == *'2026-04-06'* ]] || return 1
   [[ "$AGE_FOOTER" == *'1 package(s) below minimum'* ]] || return 1
+}
+
+@test "the unblock date is never pulled from a later-dated deprecation row" {
+  # Discriminating arrangement: the deprecated row is dated AFTER the age-only
+  # row. A max()-only computation (no -z "$_reason" exclusion) would seed
+  # MAX_FAIL_EPOCH from the 2026-09-01 deprecation row and report 2026-09-06;
+  # the exclusion must keep it seeded from the 2026-04-01 age-only row instead,
+  # reporting 2026-04-06. Proven to discriminate in the report's revert/restore
+  # round-trip (Task 20 review fix).
+  AGE_TSV=$(age_tsv 'a\t1.0.0\tnpm\t2026-04-01T00:00:00Z\t2\tfail\t' \
+                    'b\t2.0.0\tnpm\t2026-09-01T00:00:00Z\t2\tfail\tdeprecated')
+  MINIMUM_RELEASE_AGE_DAYS=5
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [[ "$AGE_FOOTER" == *'2026-04-06'* ]] || return 1
+  [[ "$AGE_FOOTER" != *'2026-09-06'* ]] || return 1
 }
