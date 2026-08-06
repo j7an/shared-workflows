@@ -2402,7 +2402,15 @@ jobs:
 
             for chunk in "$split_dir"/chunk-*; do
               [ -f "$chunk" ] || continue
-              QB_BODY=$(awk -F'\t' 'BEGIN{printf "{\"queries\":["} {if(NR>1)printf ","; printf "{\"package\":{\"name\":\"%s\",\"ecosystem\":\"npm\"},\"version\":\"%s\"}", $1, $2} END{printf "]}"}' "$chunk")
+              # jq builder (not awk/printf %s): chunk rows are attacker-supplied
+              # package names/versions from a PR-supplied lockfile, and jq's
+              # --rawfile + string interpolation guarantees proper JSON escaping
+              # of embedded quotes/backslashes rather than relying on OSV's
+              # server-side rejection of a malformed body.
+              QB_BODY=$(jq -Rn --rawfile rows "$chunk" '
+                {queries: ($rows | rtrimstr("\n") | split("\n")
+                  | map(split("\t") | {package: {name: .[0], ecosystem: "npm"},
+                                        version: .[1]}))}')
               QB_RESULT=$(curl -sf --max-time 60 \
                 -X POST "https://api.osv.dev/v1/querybatch" \
                 -H "Content-Type: application/json" \
