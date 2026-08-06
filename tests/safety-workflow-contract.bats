@@ -42,3 +42,33 @@ input_default() {
 @test "dependency-safety.yml: RELEASE_AGE_POLICY env is wired from inputs" {
   grep -qF 'RELEASE_AGE_POLICY: ${{ inputs.release_age_policy }}' "$YAML"
 }
+
+@test "dependency-safety embeds npm-bump-extract" {
+  run grep -c "BEGIN inline:scripts/npm-bump-extract.sh" .github/workflows/dependency-safety.yml
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}
+
+@test "dependency-safety invokes all three npm-bump-extract modes" {
+  for mode in deps lockfile-entries cleared-paths; do
+    run grep -q "npm_bump_extract --mode=$mode" .github/workflows/dependency-safety.yml
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "npm tier-1 loop queries the NPM GHSA ecosystem" {
+  run grep -q "ecosystem: NPM" .github/workflows/dependency-safety.yml
+  [ "$status" -eq 0 ]
+}
+
+@test "tier-2 sweep uses the OSV batch endpoint" {
+  run grep -q "api.osv.dev/v1/querybatch" .github/workflows/dependency-safety.yml
+  [ "$status" -eq 0 ]
+}
+
+@test "npm release age uses deps.dev stable v3, not v3alpha" {
+  run grep -q "api.deps.dev/v3/systems/npm" .github/workflows/dependency-safety.yml
+  [ "$status" -eq 0 ]
+  run grep -q "v3alpha" .github/workflows/dependency-safety.yml
+  [ "$status" -ne 0 ]
+}
