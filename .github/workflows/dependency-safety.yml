@@ -2324,7 +2324,7 @@ jobs:
                      && printf '%s\n%s\n' "$_g_patched" "$_npm_ver" \
                         | sort -V -C 2>/dev/null; then
                     # firstPatchedVersion <= target: already fixed in this bump.
-                    FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
+                    FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
                     FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
                   else
                     SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
