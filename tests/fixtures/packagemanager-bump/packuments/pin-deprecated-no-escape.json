@@ -1,0 +1,7 @@
+{
+  "name": "pnpm",
+  "versions": {
+    "9.15.0": { "version": "9.15.0", "deprecated": "This version is broken. Upgrade to pnpm 10." }
+  },
+  "time": { "9.15.0": "2025-01-01T00:00:00.000Z" }
+}

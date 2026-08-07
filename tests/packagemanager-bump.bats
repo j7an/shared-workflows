@@ -255,3 +255,30 @@ sel() { # $1 = packument fixture, $2 = current version, $3 = min-age-days
   [ "$status" -eq 2 ]
   [[ "$output" == *"unparseable timestamp"* ]] || return 1
 }
+
+@test "select: deprecated pin bypasses cooldown and takes the un-soaked version" {
+  sel pin-deprecated.json 9.15.0 5
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '9.15.2\tbypass')" ]
+}
+
+@test "select: a healthy pin does NOT reach the un-soaked version" {
+  # Same fixture, same clock, same threshold, and an un-soaked candidate
+  # (9.15.2) is present in BOTH runs — the only difference is that this pin
+  # is not deprecated. That is what makes this a real contrast.
+  sel pin-deprecated.json 9.15.1 5
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cooldown"* ]] || return 1
+}
+
+@test "select: deprecated pin with no escape exits 3" {
+  sel pin-deprecated-no-escape.json 9.15.0 5
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"deprecated"* ]] || return 1
+}
+
+@test "select: exit 3 quotes the registry deprecation message verbatim" {
+  sel pin-deprecated-no-escape.json 9.15.0 5
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"Upgrade to pnpm 10."* ]] || return 1
+}

@@ -80,6 +80,16 @@ case "$MODE" in
       [ .versions | keys[] | select(test("^" + $maj + "\\.[0-9]+\\.[0-9]+$")) ] | length')
     [ "$in_major" -gt 0 ] || die "no published stable pnpm releases in major $major"
 
+    # has("deprecated") — NOT `.deprecated // empty`. A version deprecated with
+    # an empty string is still deprecated, and `// empty` would read it as healthy.
+    if printf '%s' "$INPUT" | jq -e --arg v "$CURRENT" \
+         '.versions[$v] | has("deprecated")' >/dev/null 2>&1; then
+      soak="0"; label="bypass"
+      pin_dep=$(printf '%s' "$INPUT" | jq -r --arg v "$CURRENT" '.versions[$v].deprecated')
+    else
+      soak="1"; label="normal"; pin_dep=""
+    fi
+
     # Candidates: stable, in-major, not deprecated, strictly newer.
     cands=$(printf '%s' "$INPUT" | jq -r \
       --arg maj "$major" --arg cur "$CURRENT" '
@@ -94,6 +104,9 @@ case "$MODE" in
       | sort_by(semver)[]') || die "packument selection failed"
 
     if [ -z "$cands" ]; then
+      if [ -n "$pin_dep" ]; then
+        die "deprecated-no-escape: pinned version $CURRENT is deprecated and no eligible replacement exists in major $major: $pin_dep" 3
+      fi
       # Distinguish the reasons rather than reporting one undifferentiated no-op.
       # major-available is checked BEFORE prerelease-only: if the pinned major
       # is end-of-life, no stable release will ever land in it, so reporting
@@ -120,7 +133,6 @@ case "$MODE" in
 
     # Every candidate MUST have a timestamp. Silently dropping one would let a
     # malformed packument look like a clean cooldown, which is fail-open.
-    soak="1"
     cutoff=$(( NOW - MIN_AGE_DAYS * 86400 ))
     selected=""
     while IFS= read -r v; do
@@ -136,10 +148,13 @@ case "$MODE" in
     done <<< "$cands"
 
     if [ -z "$selected" ]; then
+      if [ -n "$pin_dep" ]; then
+        die "deprecated-no-escape: pinned version $CURRENT is deprecated and no eligible replacement exists in major $major: $pin_dep" 3
+      fi
       echo "cooldown" >&2
       exit 0
     fi
-    printf '%s\tnormal\n' "$selected"
+    printf '%s\t%s\n' "$selected" "$label"
     exit 0
     ;;
   rewrite) die "not implemented" ;;
