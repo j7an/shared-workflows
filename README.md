@@ -233,8 +233,11 @@ themselves (not an extracted file) — this matches Corepack's own contract,
 confirmed by round-tripping `corepack use pnpm@<version>` and comparing
 Corepack's suffix, `openssl dgst` over the tarball, and the registry's
 `dist.integrity` decoded to hex. The workflow preserves whichever hash
-algorithm the existing pin already declares; a suffix added where none
-existed before defaults to `sha512`.
+algorithm the existing pin already declares — it never chooses one. When the
+current pin carries no integrity suffix, the new pin is written the same way:
+plain `pnpm@x.y.z` with no suffix. Integrity verification only runs when a
+suffix is already present to preserve; it is not added on a pin's first
+update.
 
 ## Inputs
 

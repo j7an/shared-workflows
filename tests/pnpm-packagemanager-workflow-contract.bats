@@ -36,7 +36,11 @@ WF=".github/workflows/pnpm-packagemanager-update.yml"
   # Tasks 10 and 12 read steps.update.outputs.*; without `id: update` each of
   # those resolves to empty, the skip guard never fires, and the PR step runs
   # on a no-op. Same defect class as the `id: cpr` omission.
-  run grep -c 'id: update' "$WF"
+  # Anchored at end-of-line: an unanchored 'id: update' also matches a
+  # prefix-sharing rename like `id: update2`, which would leave
+  # `steps.update.outputs.*` resolving to empty at runtime without reddening
+  # this test.
+  run grep -c 'id: update$' "$WF"
   [ "$output" -eq 1 ]
 }
 
@@ -59,7 +63,10 @@ WF=".github/workflows/pnpm-packagemanager-update.yml"
 }
 
 @test "the create-pull-request step carries the id the status step reads" {
-  run grep -c 'id: cpr' "$WF"
+  # Anchored at end-of-line for the same reason as the `id: update` test
+  # above: an unanchored 'id: cpr' also matches a prefix-sharing rename like
+  # `id: cprX`.
+  run grep -c 'id: cpr$' "$WF"
   [ "$output" -eq 1 ]
   run grep -c 'steps.cpr.outputs.pull-request-head-sha' "$WF"
   [ "$output" -ge 1 ]
