@@ -346,3 +346,32 @@ jobs:
             echo "::error::registry fetch failed; refusing to proceed (a network error is not 'already current')"
             exit 1
           fi
+
+          SEL_STATUS=0
+          SEL=$(packagemanager_bump --mode=select \
+                  --current="$CUR_VER" \
+                  --now="$(date -u +%s)" \
+                  --min-age-days="$INPUT_MIN_AGE_DAYS" \
+                  < "$PACKUMENT") || SEL_STATUS=$?
+
+          case "$SEL_STATUS" in
+            0) ;;
+            3)
+              echo "::error::pinned pnpm ${CUR_VER} is deprecated and no eligible replacement exists in major ${CUR_MAJ}. A major upgrade is likely required and is deliberately left to a human."
+              exit 1
+              ;;
+            *)
+              echo "::error::version selection failed"
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$SEL" ]; then
+            echo "Nothing to do: pnpm ${CUR_VER} is current, or no newer release has passed the ${INPUT_MIN_AGE_DAYS}-day minimum age."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TARGET=$(printf '%s' "$SEL" | cut -f1)
+          SELECT_MODE=$(printf '%s' "$SEL" | cut -f2)
+          echo "Target: pnpm@${TARGET} (${SELECT_MODE})"
