@@ -150,6 +150,11 @@ case "$MODE" in
     done <<< "$cands"
 
     if [ -z "$selected" ]; then
+      # Structurally unreachable today: pin_dep non-empty implies soak="0",
+      # which forces `selected` on every loop iteration whenever $cands is
+      # non-empty, and the empty-$cands case was already intercepted above.
+      # Kept as forward-defense against a future change to the loop's
+      # selection logic; do not delete as a copy-paste artifact.
       if [ -n "$pin_dep" ]; then
         die "deprecated-no-escape: pinned version $CURRENT is deprecated and no eligible replacement exists in major $major: $pin_dep" 3
       fi

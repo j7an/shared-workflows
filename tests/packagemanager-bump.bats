@@ -157,6 +157,17 @@ sel() { # $1 = packument fixture, $2 = current version, $3 = min-age-days
   [[ "$output" == *"cooldown"* ]] || return 1
 }
 
+@test "select: a version published exactly at the cutoff counts as soaked" {
+  # soak-boundary.json's only candidate, 9.15.1, is published at exactly
+  # 2025-03-22T00:00:00Z. With CLOCK (2025-04-01T00:00:00Z) and
+  # min-age-days=10, cutoff is exactly that same instant. The spec requires
+  # "at or before" the cutoff, so pub <= cutoff must select it (`-le`); a
+  # `-lt` mutant would exclude it and report cooldown instead.
+  sel soak-boundary.json 9.15.0 10
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '9.15.1\tnormal')" ]
+}
+
 @test "select: cooldown and major-available are distinguishable" {
   # The whole point of reason codes: two different zero-selection outcomes
   # that a bare "nothing selected" assertion would conflate.
@@ -271,6 +282,18 @@ sel() { # $1 = packument fixture, $2 = current version, $3 = min-age-days
   [[ "$output" == *"cooldown"* ]] || return 1
 }
 
+@test "select: a pin deprecated with an empty string still bypasses cooldown" {
+  # has("deprecated") is true even when the value is "" — an empty-string
+  # deprecation is still a deprecation. `.deprecated // empty` would read ""
+  # as healthy instead (see the code comment above the check), which would
+  # route this through the normal-cooldown branch and select 9.15.1, not
+  # 9.15.2. Same fixture shape as pin-deprecated.json so the only variable
+  # under test is the empty-string deprecation value itself.
+  sel pin-deprecated-empty-string.json 9.15.0 5
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '9.15.2\tbypass')" ]
+}
+
 @test "select: deprecated pin with no escape exits 3" {
   sel pin-deprecated-no-escape.json 9.15.0 5
   [ "$status" -eq 3 ]
@@ -289,6 +312,18 @@ rw() { # $1 = manifest fixture, $2 = target version
 }
 
 @test "rewrite: changes exactly one line" {
+  # This test alone does not bind the no-reformat requirement: swapping the
+  # awk implementation for a naive `jq '.packageManager = ...'` call happens
+  # to reproduce plain.json's own 2-space jq-canonical formatting byte for
+  # byte, so this diff would still show exactly one changed line (verified
+  # empirically). The requirement IS covered elsewhere — under the same
+  # swap these four go red: "preserves tab indentation everywhere else"
+  # (jq flattens tabs.json's tabs to spaces), "minified manifest keeps its
+  # exact byte length" (jq expands minified.json's whitespace), "a manifest
+  # with no final newline does not gain one" (jq always emits a trailing
+  # newline), and "CRLF line endings survive byte-for-byte" (jq emits LF).
+  # Left as informational rather than strengthened, since duplicating those
+  # fixtures here would just re-test the same guarantee.
   rw "$MFX/plain.json" 9.15.9
   run diff "$MFX/plain.json" "$BATS_TEST_TMPDIR/out.json"
   # `run` reassigns $output to diff's output. Exactly one changed line yields
@@ -411,4 +446,50 @@ rw() { # $1 = manifest fixture, $2 = target version
   # occurrence in the script, so this can't be a substring collision with the
   # not-pnpm, not-exact, or ambiguous-manifest messages.
   [[ "$output" == *"could not locate"* ]] || return 1
+}
+
+# --- End-to-end integration and shell hygiene (Task 6) ---
+
+@test "integration: current -> select -> rewrite round-trips" {
+  run bash "$SCRIPT" --mode=current < "$MFX/plain.json"
+  [ "$status" -eq 0 ]
+  cur=$(printf '%s' "$output" | cut -f2)
+  [ "$cur" = "9.15.0" ]
+
+  run bash "$SCRIPT" --mode=select --current="$cur" --now="$CLOCK" --min-age-days=5 \
+    < "$PFX/basic.json"
+  [ "$status" -eq 0 ]
+  next=$(printf '%s' "$output" | cut -f1)
+  [ "$next" = "9.15.9" ]
+
+  run bash "$SCRIPT" --mode=rewrite --version="$next" < "$MFX/plain.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"pnpm@9.15.9"'* ]] || return 1
+}
+
+@test "script is executable and has a bash shebang" {
+  [ -x "$SCRIPT" ]
+  head -1 "$SCRIPT" | grep -q '^#!/usr/bin/env bash'
+}
+
+@test "script uses no bash-4-only constructs" {
+  run grep -nE 'declare -A|mapfile|readarray|\$\{[A-Za-z_]+,,\}' "$SCRIPT"
+  [ "$status" -ne 0 ]
+}
+
+@test "script makes no network calls" {
+  run grep -nE '\b(curl|wget|nc)\b' "$SCRIPT"
+  [ "$status" -ne 0 ]
+}
+
+@test "script reads no files" {
+  # Pure stdin -> stdout. `cat` with no operand reads stdin and is expected.
+  # The file-redirect alternative requires a non-'<' character immediately
+  # before the '<': as written without it, this false-positived on the
+  # script's own `done <<< "$cands"` here-string (a variable fed to a loop,
+  # not a file read) — the middle '<' of `<<<` still satisfies a bare
+  # `<[[:space:]]*"?\$`. Verified this still catches a real `< "$FILE"` or
+  # `< $FILE` redirect.
+  run grep -nE '[^<]<[[:space:]]*"?\$|\bcat[[:space:]]+[^|;)]' "$SCRIPT"
+  [ "$status" -ne 0 ]
 }
