@@ -18,6 +18,8 @@
 # Exit: 0 success (including the zero-result case)
 #       2 malformed input, missing/repeated --mode, unknown argument
 #       3 (select only) pinned version deprecated, no eligible replacement
+#       4 (rewrite only) ambiguous-manifest: the target value appears under
+#         more than one packageManager key; refusing textual replacement
 set -uo pipefail
 
 die() { echo "packagemanager-bump.sh: $1" >&2; exit "${2:-2}"; }
@@ -157,5 +159,49 @@ case "$MODE" in
     printf '%s\t%s\n' "$selected" "$label"
     exit 0
     ;;
-  rewrite) die "not implemented" ;;
+  rewrite)
+    [ -n "$VERSION" ] || die "--mode=rewrite requires --version"
+    [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+[A-Za-z0-9._-]+)?$ ]] \
+      || die "--version is not x.y.z or x.y.z+suffix: $VERSION"
+
+    # Validate the same way --mode=current does, so rewrite refuses everything
+    # current refuses: absent field, non-pnpm, range, nested-only.
+    raw=$(printf '%s' "$INPUT" | jq -er '.packageManager // empty' 2>/dev/null) \
+      || die "package.json is not valid JSON, or has no top-level packageManager"
+    case "$raw" in pnpm@*) ;; *) die "packageManager is not pnpm: $raw" ;; esac
+    [[ "${raw#pnpm@}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+.*)?$ ]] \
+      || die "packageManager version is not an exact x.y.z: $raw"
+
+    # Structure-aware, byte-preserving replacement. See the notes below —
+    # every line of this is load-bearing and was validated empirically.
+    printf '%sX' "$INPUT" | awk -v old="$raw" -v new="pnpm@$VERSION" '
+      BEGIN { RS = "\0" }
+      {
+        s = substr($0, 1, length($0) - 1)   # drop the sentinel X
+        key = "\"packageManager\""
+        target = "\"" old "\""
+        pos = 1; count = 0; hit = 0
+        while ((i = index(substr(s, pos), key)) > 0) {
+          abs = pos + i - 1
+          j = abs + length(key)
+          while (substr(s, j, 1) ~ /[ \t\r\n]/) j++
+          if (substr(s, j, 1) == ":") {
+            j++
+            while (substr(s, j, 1) ~ /[ \t\r\n]/) j++
+            if (substr(s, j, length(target)) == target) {
+              count++
+              if (count == 1) hit = j
+            }
+          }
+          pos = abs + length(key)
+        }
+        if (count == 0) exit 3
+        if (count > 1) exit 4
+        printf "%s", substr(s, 1, hit - 1) "\"" new "\"" substr(s, hit + length(target))
+      }'
+    rc=$?
+    [ "$rc" -eq 3 ] && die "could not locate the packageManager value in the document"
+    [ "$rc" -eq 4 ] && die "ambiguous-manifest: the value $raw appears under more than one packageManager key; refusing textual replacement" 4
+    [ "$rc" -eq 0 ] || die "rewrite failed"
+    ;;
 esac

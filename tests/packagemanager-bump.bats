@@ -282,3 +282,118 @@ sel() { # $1 = packument fixture, $2 = current version, $3 = min-age-days
   [ "$status" -eq 3 ]
   [[ "$output" == *"Upgrade to pnpm 10."* ]] || return 1
 }
+
+# Redirects stdout to a file; $output would strip the trailing newline.
+rw() { # $1 = manifest fixture, $2 = target version
+  bash "$SCRIPT" --mode=rewrite --version="$2" < "$1" > "$BATS_TEST_TMPDIR/out.json"
+}
+
+@test "rewrite: changes exactly one line" {
+  rw "$MFX/plain.json" 9.15.9
+  run diff "$MFX/plain.json" "$BATS_TEST_TMPDIR/out.json"
+  # `run` reassigns $output to diff's output. Exactly one changed line yields
+  # exactly one `<` and one `>`. Do not assert on diff's status: it exits 1
+  # whenever the files differ, which is the expected outcome here.
+  [ "$(printf '%s\n' "$output" | grep -c '^[<>]')" -eq 2 ]
+}
+
+@test "rewrite: sets the requested version" {
+  run bash "$SCRIPT" --mode=rewrite --version=9.15.9 < "$MFX/plain.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"packageManager": "pnpm@9.15.9"'* ]] || return 1
+}
+
+@test "rewrite: preserves tab indentation everywhere else" {
+  run bash "$SCRIPT" --mode=rewrite --version=9.15.9 < "$MFX/tabs.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\t"name": "example"'* ]] || return 1
+}
+
+@test "rewrite: minified manifest keeps its exact byte length" {
+  rw "$MFX/minified.json" 9.15.9
+  # Same-length version swap; a gained trailing newline would show as +1.
+  [ "$(wc -c < "$BATS_TEST_TMPDIR/out.json")" -eq "$(wc -c < "$MFX/minified.json")" ]
+  grep -qF '"packageManager":"pnpm@9.15.9"' "$BATS_TEST_TMPDIR/out.json"
+  grep -qF '"private":true' "$BATS_TEST_TMPDIR/out.json"
+}
+
+@test "rewrite: a manifest with no final newline does not gain one" {
+  printf '{"packageManager":"pnpm@9.15.0"}' > "$BATS_TEST_TMPDIR/nonl.json"
+  rw "$BATS_TEST_TMPDIR/nonl.json" 9.15.9
+  [ "$(tail -c 1 "$BATS_TEST_TMPDIR/out.json")" = "}" ]
+}
+
+@test "rewrite: a manifest with a final newline keeps it" {
+  rw "$MFX/plain.json" 9.15.9
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/out.json")" -eq "$(wc -l < "$MFX/plain.json")" ]
+}
+
+@test "rewrite: CRLF line endings survive byte-for-byte" {
+  printf '{\r\n  "packageManager": "pnpm@9.15.0"\r\n}\r\n' > "$BATS_TEST_TMPDIR/crlf.json"
+  rw "$BATS_TEST_TMPDIR/crlf.json" 9.15.9
+  sed 's/9\.15\.0/9.15.9/' "$BATS_TEST_TMPDIR/crlf.json" > "$BATS_TEST_TMPDIR/want.json"
+  cmp "$BATS_TEST_TMPDIR/want.json" "$BATS_TEST_TMPDIR/out.json"
+}
+
+@test "rewrite: replaces a sha512 hashed value wholesale" {
+  printf '{"packageManager":"pnpm@9.15.0+sha512.abc.def"}' > "$BATS_TEST_TMPDIR/h512.json"
+  rw "$BATS_TEST_TMPDIR/h512.json" '9.15.9+sha512.beef'
+  grep -qF 'pnpm@9.15.9+sha512.beef' "$BATS_TEST_TMPDIR/out.json"
+  ! grep -qF 'abc.def' "$BATS_TEST_TMPDIR/out.json"
+}
+
+@test "rewrite: a nested key with a DIFFERENT value leaves the nested one alone" {
+  printf '{\n  "config": { "packageManager": "pnpm@8.0.0" },\n  "packageManager": "pnpm@9.15.0"\n}\n' \
+    > "$BATS_TEST_TMPDIR/nd.json"
+  rw "$BATS_TEST_TMPDIR/nd.json" 9.15.9
+  grep -qF '"pnpm@8.0.0"' "$BATS_TEST_TMPDIR/out.json"
+  grep -qF '"packageManager": "pnpm@9.15.9"' "$BATS_TEST_TMPDIR/out.json"
+}
+
+@test "rewrite: a nested key with the SAME value fails closed" {
+  # The exact shape that silently produced a wrong PR in an earlier revision:
+  # positional replacement edited the nested key and left the real pin stale.
+  printf '{\n  "config": { "packageManager": "pnpm@9.15.0" },\n  "packageManager": "pnpm@9.15.0"\n}\n' \
+    > "$BATS_TEST_TMPDIR/dup.json"
+  run bash "$SCRIPT" --mode=rewrite --version=9.15.9 < "$BATS_TEST_TMPDIR/dup.json"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"ambiguous"* ]] || return 1
+}
+
+@test "rewrite: rejects a nested-only packageManager" {
+  run bash "$SCRIPT" --mode=rewrite --version=9.15.9 < "$MFX/nested-decoy.json"
+  [ "$status" -eq 2 ]
+}
+
+@test "rewrite: requires --version" {
+  run bash "$SCRIPT" --mode=rewrite < "$MFX/plain.json"
+  [ "$status" -eq 2 ]
+}
+
+@test "rewrite: output is still valid JSON" {
+  rw "$MFX/plain.json" 9.15.9
+  jq -e . < "$BATS_TEST_TMPDIR/out.json" >/dev/null
+}
+
+# The brief's Step 1 test list did not include a fixture reaching the
+# --version format guard (line 164-165) or the rewrite-mode not-pnpm /
+# not-exact guards (lines 171, 172-173), even though the implementation in
+# Step 3 has them. Per the task's guard-coverage requirement, added here.
+
+@test "rewrite: malformed --version fails" {
+  run bash "$SCRIPT" --mode=rewrite --version=abc < "$MFX/plain.json"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--version is not x.y.z"* ]] || return 1
+}
+
+@test "rewrite: npm packageManager is out of scope" {
+  run bash "$SCRIPT" --mode=rewrite --version=9.15.9 < "$MFX/npm-pm.json"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not pnpm"* ]] || return 1
+}
+
+@test "rewrite: range instead of exact version fails" {
+  run bash "$SCRIPT" --mode=rewrite --version=9.15.9 < "$MFX/range.json"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not an exact"* ]] || return 1
+}
