@@ -46,7 +46,21 @@ INPUT=$(cat; printf 'X')
 INPUT="${INPUT%X}"
 
 case "$MODE" in
-  current) die "not implemented" ;;
+  current)
+    raw=$(printf '%s' "$INPUT" | jq -er '.packageManager // empty' 2>/dev/null) \
+      || die "package.json is not valid JSON, or has no top-level packageManager"
+    [ -n "$raw" ] || die "no top-level packageManager field"
+    case "$raw" in
+      pnpm@*) ;;
+      *)      die "packageManager is not pnpm: $raw" ;;
+    esac
+    rest="${raw#pnpm@}"
+    ver="${rest%%+*}"
+    if [ "$ver" = "$rest" ]; then suffix=""; else suffix="+${rest#*+}"; fi
+    [[ "$ver" =~ ^([0-9]+)\.[0-9]+\.[0-9]+$ ]] \
+      || die "packageManager version is not an exact x.y.z: $ver"
+    printf 'pnpm\t%s\t%s\t%s\n' "$ver" "${BASH_REMATCH[1]}" "$suffix"
+    ;;
   select)  die "not implemented" ;;
   rewrite) die "not implemented" ;;
 esac
