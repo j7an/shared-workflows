@@ -61,6 +61,86 @@ case "$MODE" in
       || die "packageManager version is not an exact x.y.z: $ver"
     printf 'pnpm\t%s\t%s\t%s\n' "$ver" "${BASH_REMATCH[1]}" "$suffix"
     ;;
-  select)  die "not implemented" ;;
+  select)
+    [ -n "$CURRENT" ]      || die "--mode=select requires --current"
+    [ -n "$NOW" ]          || die "--mode=select requires --now"
+    [ -n "$MIN_AGE_DAYS" ] || die "--mode=select requires --min-age-days"
+    [[ "$CURRENT" =~ ^([0-9]+)\.[0-9]+\.[0-9]+$ ]] || die "--current is not x.y.z: $CURRENT"
+    major="${BASH_REMATCH[1]}"
+    [[ "$NOW" =~ ^[0-9]+$ ]]          || die "--now is not an epoch: $NOW"
+    [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]] || die "--min-age-days is not a number: $MIN_AGE_DAYS"
+
+    printf '%s' "$INPUT" | jq -e 'has("versions") and has("time")' >/dev/null 2>&1 \
+      || die "packument is not valid JSON or lacks .versions/.time"
+
+    # Any stable release in this major at all? Empty means the major is unknown
+    # to the registry, which is a different condition from "nothing newer" and
+    # must not be reported as a clean no-op.
+    in_major=$(printf '%s' "$INPUT" | jq -r --arg maj "$major" '
+      [ .versions | keys[] | select(test("^" + $maj + "\\.[0-9]+\\.[0-9]+$")) ] | length')
+    [ "$in_major" -gt 0 ] || die "no published stable pnpm releases in major $major"
+
+    # Candidates: stable, in-major, not deprecated, strictly newer.
+    cands=$(printf '%s' "$INPUT" | jq -r \
+      --arg maj "$major" --arg cur "$CURRENT" '
+      def semver: split(".") | map(tonumber);
+      [ .versions
+        | to_entries[]
+        | select(.key | test("^" + $maj + "\\.[0-9]+\\.[0-9]+$"))
+        | select(.value | has("deprecated") | not)
+        | .key
+      ]
+      | map(select(semver > ($cur | semver)))
+      | sort_by(semver)[]') || die "packument selection failed"
+
+    if [ -z "$cands" ]; then
+      # Distinguish the reasons rather than reporting one undifferentiated no-op.
+      # major-available is checked BEFORE prerelease-only: if the pinned major
+      # is end-of-life, no stable release will ever land in it, so reporting
+      # prerelease-only would imply a wait that never ends. major-available is
+      # the honest, actionable signal whenever both are true. (Task 3 ruling,
+      # 2026-08-06: this reorders the brief's prescribed check order.)
+      if printf '%s' "$INPUT" | jq -e --arg maj "$major" '
+           [ .versions | keys[]
+             | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+             | select((split(".")[0] | tonumber) > ($maj | tonumber)) ] | length > 0
+         ' >/dev/null 2>&1; then
+        echo "major-available" >&2; exit 0
+      fi
+      if printf '%s' "$INPUT" | jq -e --arg maj "$major" --arg cur "$CURRENT" '
+           def semver: split(".") | map(tonumber);
+           [ .versions | keys[]
+             | select(test("^" + $maj + "\\.[0-9]+\\.[0-9]+-"))
+             | select((split("-")[0] | semver) > ($cur | semver)) ] | length > 0
+         ' >/dev/null 2>&1; then
+        echo "prerelease-only" >&2; exit 0
+      fi
+      echo "current" >&2; exit 0
+    fi
+
+    # Every candidate MUST have a timestamp. Silently dropping one would let a
+    # malformed packument look like a clean cooldown, which is fail-open.
+    soak="1"
+    cutoff=$(( NOW - MIN_AGE_DAYS * 86400 ))
+    selected=""
+    while IFS= read -r v; do
+      [ -n "$v" ] || continue
+      iso=$(printf '%s' "$INPUT" | jq -r --arg v "$v" '.time[$v] // empty')
+      [ -n "$iso" ] || die "malformed-packument: no .time entry for candidate $v"
+      pub=$(printf '%s' "$INPUT" | jq -r --arg t "$iso" \
+              '$t | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601') \
+        || die "malformed-packument: unparseable timestamp for $v: $iso"
+      if [ "$soak" = "0" ] || [ "$pub" -le "$cutoff" ]; then
+        selected="$v"
+      fi
+    done <<< "$cands"
+
+    if [ -z "$selected" ]; then
+      echo "cooldown" >&2
+      exit 0
+    fi
+    printf '%s\tnormal\n' "$selected"
+    exit 0
+    ;;
   rewrite) die "not implemented" ;;
 esac

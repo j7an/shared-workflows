@@ -1,0 +1,15 @@
+{
+  "name": "pnpm",
+  "versions": {
+    "9.15.0": { "version": "9.15.0" },
+    "9.15.7": { "version": "9.15.7" },
+    "9.15.8": { "version": "9.15.8", "deprecated": "This version is broken. Use 9.15.7." },
+    "9.15.9": { "version": "9.15.9", "deprecated": "This release is broken. Please upgrade to v9.15.10 or newer." }
+  },
+  "time": {
+    "9.15.0": "2025-01-01T00:00:00.000Z",
+    "9.15.7": "2025-03-06T10:33:46.381Z",
+    "9.15.8": "2025-03-09T21:43:22.097Z",
+    "9.15.9": "2025-03-10T02:47:09.271Z"
+  }
+}
