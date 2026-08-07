@@ -19,6 +19,12 @@ bats_require_minimum_version 1.5.0
 # verbatim out of the YAML, de-indented, and executed. A step renamed or
 # re-indented makes extract_step_block emit nothing and the tests fail rather
 # than silently passing against an empty script.
+#
+# EVERY negated assertion here carries `|| return 1`. Bash exempts `! cmd` from
+# errexit, so a bare mid-body `! grep ...` is a silent no-op under bats - the
+# same defect class as this project's bare-`[[ ]]` rule. That applies even to a
+# negation that happens to be the last line of its test today, because appending
+# one line below it would silently kill it.
 
 WF=".github/workflows/pnpm-packagemanager-update.yml"
 MFX="tests/fixtures/packagemanager-bump/manifests"
@@ -199,7 +205,7 @@ run_step() {
   grep -qx "new_value=9.15.9+sha224.${PAYLOAD_SHA224}" "$GITHUB_OUTPUT"
   grep -q "\"pnpm@9.15.9+sha224.${PAYLOAD_SHA224}\"" "$WORKDIR/package.json"
   # The algorithm must not have been upgraded to the digest we verified with.
-  ! grep -q "$PAYLOAD_SHA512" "$WORKDIR/package.json"
+  ! grep -q "$PAYLOAD_SHA512" "$WORKDIR/package.json" || return 1
   # Exactly the documented registry endpoint was fetched.
   grep -qx "$PACKUMENT_URL" "$CURL_ARGS"
 }
@@ -218,8 +224,8 @@ run_step() {
   grep -qx "new_value=9.15.9" "$GITHUB_OUTPUT"
   grep -q '"pnpm@9.15.9"' "$WORKDIR/package.json"
   # No suffix was invented for a pin that never had one.
-  ! grep -q 'pnpm@9.15.9+' "$WORKDIR/package.json"
-  ! grep -qx "$TARBALL_URL" "$CURL_ARGS"
+  ! grep -q 'pnpm@9.15.9+' "$WORKDIR/package.json" || return 1
+  ! grep -qx "$TARBALL_URL" "$CURL_ARGS" || return 1
 }
 
 @test "the rewrite is confined to the packageManager value" {
@@ -243,7 +249,7 @@ run_step() {
   run_resolve
   [ "$status" -eq 0 ]
   grep -qx "skip=true" "$GITHUB_OUTPUT"
-  ! grep -q "^new_value=" "$GITHUB_OUTPUT"
+  ! grep -q "^new_value=" "$GITHUB_OUTPUT" || return 1
   grep -q '"pnpm@9.15.0+sha224.953c8233' "$WORKDIR/package.json"
 }
 
@@ -264,7 +270,7 @@ run_step() {
   # fetch failure both exit 1 through different branches.
   [ "${output#*::error::integrity-failure: downloaded bytes do not match dist.integrity}" != "$output" ]
   grep -q '"pnpm@9.15.0+sha224.953c8233' "$WORKDIR/package.json"
-  ! grep -q "^new_value=" "$GITHUB_OUTPUT"
+  ! grep -q "^new_value=" "$GITHUB_OUTPUT" || return 1
 }
 
 @test "a packument with no dist.integrity emits a workflow warning annotation" {
@@ -294,13 +300,18 @@ run_step() {
   run_resolve
   [ "$status" -ne 0 ]
   [ "${output#*::error::tarball URL for pnpm 9.15.9 is not hosted on registry.npmjs.org}" != "$output" ]
-  ! grep -q "evil.example" "$CURL_ARGS"
+  ! grep -q "evil.example" "$CURL_ARGS" || return 1
   grep -q '"pnpm@9.15.0+sha224.953c8233' "$WORKDIR/package.json"
 }
 
-@test "userinfo cannot smuggle the expected host past the allowlist" {
-  # https://registry.npmjs.org@evil.example/... has authority
-  # "registry.npmjs.org@evil.example" and host evil.example.
+@test "the host comparison is exact, so a userinfo lookalike is refused too" {
+  # This binds the EXACTNESS of the `!=`, which is the entire guard. The
+  # authority of https://registry.npmjs.org@evil.example/... is the whole
+  # string "registry.npmjs.org@evil.example", which is simply not equal to
+  # "registry.npmjs.org" - so no userinfo stripping is needed, and an earlier
+  # draft's strip only ever WIDENED what was accepted. Relaxing the comparison
+  # to a substring or suffix match reddens this test and the lookalike-host
+  # test above together.
   place_manifest "$MFX/hashed.json"
   map_add "$PACKUMENT_URL" "$REPO_ROOT/$SFX/packument-userinfo-tarball.json"
   export INPUT_MANIFEST_PATH="package.json"
@@ -309,7 +320,7 @@ run_step() {
   run_resolve
   [ "$status" -ne 0 ]
   [ "${output#*::error::tarball URL for pnpm 9.15.9 is not hosted on registry.npmjs.org}" != "$output" ]
-  ! grep -q "evil.example" "$CURL_ARGS"
+  ! grep -q "evil.example" "$CURL_ARGS" || return 1
 }
 
 # --- Resolve and update: registry fetch ------------------------------------
@@ -323,7 +334,7 @@ run_step() {
   run_resolve
   [ "$status" -ne 0 ]
   [ "${output#*::error::registry fetch failed}" != "$output" ]
-  ! grep -q "skip=true" "$GITHUB_OUTPUT"
+  ! grep -q "skip=true" "$GITHUB_OUTPUT" || return 1
 }
 
 # --- Resolve and update: manifest_path ------------------------------------
@@ -339,7 +350,27 @@ run_step() {
   run_resolve
   [ "$status" -eq 0 ]
   grep -qx "manifest_path=package.json" "$GITHUB_OUTPUT"
-  ! grep -q "manifest_path=./package.json" "$GITHUB_OUTPUT"
+  ! grep -q "manifest_path=./package.json" "$GITHUB_OUTPUT" || return 1
+}
+
+@test "a path that normalizes to an absolute one is refused after normalization" {
+  # `.//etc/passwd` begins with '.', not '/', and contains no '..', so it clears
+  # a guard placed only on the raw input - and then the leading-"./" strip turns
+  # it into the absolute `/etc/passwd`. Without the post-normalization re-check
+  # the step read that file and published `manifest_path=/etc/passwd`, which
+  # feeds `add-paths:` and the verify comparison.
+  place_manifest "$MFX/plain.json"
+  map_add "$PACKUMENT_URL" "$REPO_ROOT/$SFX/packument-good.json"
+  export INPUT_MANIFEST_PATH=".//etc/passwd"
+  export INPUT_MIN_AGE_DAYS=5
+
+  run_resolve
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::manifest_path must be a relative path}" != "$output" ]
+  # The rejection must land BEFORE the value is published, not merely before
+  # the pull request is opened.
+  ! grep -q "^manifest_path=/" "$GITHUB_OUTPUT" || return 1
+  [ ! -s "$CURL_ARGS" ]
 }
 
 @test "a nested manifest path keeps its directory through normalization" {
@@ -522,12 +553,12 @@ pnpm-lock.yaml"
   run_step "Compose pull request body"
   [ "$status" -eq 0 ]
   body="$RUNNER_TEMP/pr-body.md"
-  ! grep -q '<img' "$body"
-  ! grep -q '<details' "$body"
+  ! grep -q '<img' "$body" || return 1
+  ! grep -q '<details' "$body" || return 1
   grep -q '&lt;img src=' "$body"
   grep -q '&lt;details' "$body"
   # Quoting is still per line, so a multi-line notice cannot escape the block.
-  ! grep -v '^> > ' "$body" | grep -q 'Hidden from a collapsed reviewer'
+  ! grep -v '^> > ' "$body" | grep -q 'Hidden from a collapsed reviewer' || return 1
 }
 
 @test "the fallback caveat appears only on the GITHUB_TOKEN path" {
@@ -545,7 +576,7 @@ pnpm-lock.yaml"
   export USE_FALLBACK_CAVEAT="false"
   run_step "Compose pull request body"
   [ "$status" -eq 0 ]
-  ! grep -q "recursion guard" "$RUNNER_TEMP/pr-body.md"
+  ! grep -q "recursion guard" "$RUNNER_TEMP/pr-body.md" || return 1
 }
 
 # --- Preflight auth ---------------------------------------------------------
@@ -557,7 +588,7 @@ pnpm-lock.yaml"
   run_step "Preflight auth"
   [ "$status" -ne 0 ]
   [ "${output#*::error::App auth half-configured}" != "$output" ]
-  ! grep -q "auth_mode=" "$GITHUB_OUTPUT"
+  ! grep -q "auth_mode=" "$GITHUB_OUTPUT" || return 1
 }
 
 @test "no App configuration at all is a legitimate fallback" {
@@ -581,6 +612,6 @@ notarealkey
   grep -qx "auth_mode=app" "$GITHUB_OUTPUT"
   grep -qx "use_fallback_caveat=false" "$GITHUB_OUTPUT"
   # The secret must never reach an output file or the step log.
-  ! grep -q "notarealkey" "$GITHUB_OUTPUT"
-  ! grep -q "notarealkey" <<< "$output"
+  ! grep -q "notarealkey" "$GITHUB_OUTPUT" || return 1
+  ! grep -q "notarealkey" <<< "$output" || return 1
 }

@@ -485,9 +485,17 @@ jobs:
 
           set -euo pipefail
 
-          case "$INPUT_MANIFEST_PATH" in
-            /*|*..*) echo "::error::manifest_path must be a relative path without '..': $INPUT_MANIFEST_PATH"; exit 1 ;;
-          esac
+          # Run BEFORE and AFTER normalization, because normalization can turn an
+          # accepted value into one that must be rejected: ".//etc/passwd" begins
+          # with '.', not '/', and contains no '..', so it clears a check on the
+          # raw input — and then normalizes to the absolute "/etc/passwd".
+          reject_unsafe_manifest_path() {
+            case "$1" in
+              /*|*..*) echo "::error::manifest_path must be a relative path without '..': $1"; exit 1 ;;
+            esac
+          }
+
+          reject_unsafe_manifest_path "$INPUT_MANIFEST_PATH"
           # Mirrors pre-commit-autoupdate.yml:129-131. The value also flows into
           # create-pull-request's `add-paths:`, which is newline-separated, so a
           # newline would silently widen the commit's path restriction.
@@ -505,6 +513,10 @@ jobs:
             MANIFEST="${MANIFEST#./}"
           done
           [ -n "$MANIFEST" ] || { echo "::error::manifest_path must not be empty"; exit 1; }
+          # Re-checked, and re-checked BEFORE the value is published: writing
+          # manifest_path first would hand an unvalidated path to `add-paths:`
+          # and the verify step even on the failing path.
+          reject_unsafe_manifest_path "$MANIFEST"
           echo "manifest_path=$MANIFEST" >> "$GITHUB_OUTPUT"
 
           [ -f "$MANIFEST" ] || { echo "::error::manifest not found: $MANIFEST"; exit 1; }
@@ -578,11 +590,13 @@ jobs:
             esac
             TARBALL_HOST="${TARBALL#https://}"
             TARBALL_HOST="${TARBALL_HOST%%/*}"
-            # Strip any userinfo: "https://registry.npmjs.org@evil.example/x" has
-            # authority "registry.npmjs.org@evil.example" and host evil.example.
-            case "$TARBALL_HOST" in
-              *@*) TARBALL_HOST="${TARBALL_HOST##*@}" ;;
-            esac
+            # Compared EXACTLY — not by suffix, not by substring. That exactness
+            # is the whole guard: it is what rejects "registry.npmjs.org.evil.example"
+            # and equally what rejects a userinfo lookalike like
+            # "registry.npmjs.org@evil.example", whose authority is simply not the
+            # string below. A URL carrying userinfo is therefore refused even when
+            # the host after the '@' really is the registry; the npm registry does
+            # not publish such URLs, and failing closed costs nothing here.
             if [ "$TARBALL_HOST" != "registry.npmjs.org" ]; then
               echo "::error::tarball URL for pnpm ${TARGET} is not hosted on registry.npmjs.org: $TARBALL"
               exit 1
