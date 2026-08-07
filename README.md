@@ -145,6 +145,97 @@ workflow falls back to `GITHUB_TOKEN`; fallback callers must grant
 a close/reopen or empty commit to start required CI because of GitHub's
 recursion guard.
 
+## pnpm packageManager Update
+
+`pnpm-packagemanager-update.yml` is a `workflow_call`-only reusable workflow
+that keeps a repo's pinned `packageManager` field (in `package.json`, default
+path) current against the pnpm releases published on the npm registry. It
+reads the current `pnpm@x.y.z[+algo.hex]` pin, queries the full npm packument
+for `pnpm`, selects the newest non-deprecated release in the *same* major that
+clears the minimum release age, rewrites only the `packageManager` value, and
+opens (or refreshes) a pull request carrying just that one-line change.
+
+Callers keep their own `schedule` and `workflow_dispatch` triggers; the shared
+workflow does the resolution, integrity verification, and PR management.
+
+```yaml
+name: pnpm packageManager Update
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  update:
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+    uses: j7an/shared-workflows/.github/workflows/pnpm-packagemanager-update.yml@v4
+    secrets: inherit
+```
+
+The job-level `permissions:` block above is mandatory, not decorative — the
+caller job must grant the permission ceiling. The reusable workflow narrows
+permissions per step, but a called workflow cannot grant itself permissions
+the caller withheld.
+
+### Inputs
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `manifest_path` | string | `"package.json"` | Path to the `package.json` carrying the `packageManager` field |
+| `minimum_release_age_days` | number | `5` | A pnpm release must be at least this old before a PR is opened. Bypassed when the currently pinned version is deprecated. Set `0` to disable waiting — unlike `dependency-safety.yml`'s input of the same name, this gates whether the PR is created at all and has no off switch |
+| `branch` | string | `"deps/pnpm-packagemanager"` | Pull request branch |
+| `title` | string | `"deps: update pnpm packageManager"` | Pull request title |
+| `commit_message` | string | `"deps: update pnpm packageManager"` | Commit message |
+| `labels` | string | `"dependencies"` | Labels passed to `create-pull-request` |
+| `sign_commits` | boolean | `true` | Whether `create-pull-request` signs commits |
+
+### Auth and the `GITHUB_TOKEN` fallback
+
+Like `pre-commit-autoupdate.yml`, this workflow prefers a GitHub App token
+(`vars.RELEASE_BOT_APP_ID` + `secrets.RELEASE_BOT_PRIVATE_KEY`) and falls back
+to `GITHUB_TOKEN` when either is absent. The fallback is degraded: a PR opened
+with `GITHUB_TOKEN` runs under GitHub's recursion guard, which can prevent
+required CI from starting on it, so a repo with required status checks should
+provision the App rather than rely on the fallback. See [Release Bot App
+setup](#release-bot-app-setup) for provisioning.
+
+### Major upgrades are refused
+
+Version selection never crosses a major boundary — only releases within the
+currently pinned major are considered. A major bump changes pnpm's own
+behavior in ways this workflow cannot safely evaluate unattended, so it is
+deliberately left to a human. If the pinned major has no eligible release
+(e.g. it's deprecated with nothing left to upgrade to within it), the workflow
+fails the step with an explicit error rather than silently picking a
+different major.
+
+### Deprecated pins bypass the minimum-age wait
+
+If the currently pinned version is marked deprecated on the npm registry, the
+`minimum_release_age_days` wait is bypassed for the replacement: staying on a
+known-broken toolchain is a present, confirmed problem, while the wait guards
+against a hypothetical one. The opened PR says so explicitly and quotes the
+registry's deprecation notice verbatim in a blockquote.
+
+### Integrity verification
+
+When the existing pin carries a `+<algo>.<hex>` integrity suffix, the
+workflow verifies the downloaded pnpm tarball against the npm registry's own
+`dist.integrity` claim before computing the new suffix, and fails closed on a
+mismatch. The suffix body is the digest of the downloaded tarball bytes
+themselves (not an extracted file) — this matches Corepack's own contract,
+confirmed by round-tripping `corepack use pnpm@<version>` and comparing
+Corepack's suffix, `openssl dgst` over the tarball, and the registry's
+`dist.integrity` decoded to hex. The workflow preserves whichever hash
+algorithm the existing pin already declares; a suffix added where none
+existed before defaults to `sha512`.
+
 ## Inputs
 
 | Input | Type | Default | Description |
