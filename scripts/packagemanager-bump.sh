@@ -20,6 +20,16 @@
 #       3 (select only) pinned version deprecated, no eligible replacement
 #       4 (rewrite only) ambiguous-manifest: the target value appears under
 #         more than one packageManager key; refusing textual replacement
+#
+# Each mode only validates the flags it consumes. Passing a flag another mode
+# ignores (e.g. --mode=current --version=1.2.3) is a silent no-op, not an
+# error — there is no cross-mode "unexpected flag for this mode" guard. A
+# typo'd flag name in a caller workflow will not be caught here.
+#
+# pipefail is set for defense-in-depth around future edits; every pipeline in
+# this script today already reports failure through its last command's exit
+# status (die's own checks, or `... || die ...` directly on the pipeline), so
+# no current test exercises pipefail itself.
 set -uo pipefail
 
 die() { echo "packagemanager-bump.sh: $1" >&2; exit "${2:-2}"; }
@@ -138,6 +148,10 @@ case "$MODE" in
     cutoff=$(( NOW - MIN_AGE_DAYS * 86400 ))
     selected=""
     while IFS= read -r v; do
+      # Structurally unreachable today: $cands is non-empty by this point
+      # (the empty case was intercepted above), and `read` on a non-empty
+      # here-string does not yield a trailing empty line. Kept as
+      # forward-defense against a future change to how $cands is produced.
       [ -n "$v" ] || continue
       iso=$(printf '%s' "$INPUT" | jq -r --arg v "$v" '.time[$v] // empty')
       [ -n "$iso" ] || die "malformed-packument: no .time entry for candidate $v"
@@ -189,6 +203,12 @@ case "$MODE" in
         while ((i = index(substr(s, pos), key)) > 0) {
           abs = pos + i - 1
           j = abs + length(key)
+          # Skips whitespace between the key and the colon (valid JSON like
+          # "packageManager" : ...). No fixture in this suite exercises it —
+          # every manifest here has the colon immediately after the key — so
+          # deleting this line does not redden any test. It fails closed
+          # (falls through to "could not locate") rather than misbehaving
+          # if removed; kept for real-world manifests that use this spacing.
           while (substr(s, j, 1) ~ /[ \t\r\n]/) j++
           if (substr(s, j, 1) == ":") {
             j++

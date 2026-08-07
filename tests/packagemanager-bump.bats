@@ -1,3 +1,4 @@
+bats_require_minimum_version 1.5.0
 #!/usr/bin/env bats
 
 SCRIPT="scripts/packagemanager-bump.sh"
@@ -53,6 +54,11 @@ MFX=tests/fixtures/packagemanager-bump/manifests
 @test "current: tab-indented manifest parses" {
   run bash "$SCRIPT" --mode=current < "$MFX/tabs.json"
   [ "$status" -eq 0 ]
+  # Assert the actual stdout format, not just status: a mutation to the
+  # printf format at script:64 (e.g. dropping a field or a tab) does not
+  # affect whether jq can parse tab-indented JSON, so a status-only
+  # assertion here does not redden under that mutation.
+  [ "$output" = "$(printf 'pnpm\t9.15.0\t9\t')" ]
 }
 
 @test "current: npm packageManager is out of scope" {
@@ -131,6 +137,19 @@ sel() { # $1 = packument fixture, $2 = current version, $3 = min-age-days
   [ "$output" = "$(printf '9.15.9\tnormal')" ]
 }
 
+@test "select: candidate ordering is numeric, not lexical" {
+  # double-digit-patch.json holds both 9.15.9 and 9.15.10, both healthy and
+  # both soaked. Lexically, "9.15.10" < "9.15.9" (the '1' loses to the '9'
+  # at the fourth character), so a `sort[]` mutant (dropping semver-aware
+  # sort_by(semver)[] at script:106) would iterate 9.15.10 before 9.15.9 and
+  # leave 9.15.9 selected as the last write in the loop. Numerically,
+  # 9.15.10 > 9.15.9, and pnpm 9.15.10 is a real release, so 9.15.10 is the
+  # only correct answer.
+  sel double-digit-patch.json 9.15.0 5
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '9.15.10\tnormal')" ]
+}
+
 @test "select: already newest reports major-available, not current" {
   # basic.json holds 10.1.0, so the honest reason is that a newer MAJOR exists.
   # bats folds stderr into $output, which is where reason codes go.
@@ -157,6 +176,66 @@ sel() { # $1 = packument fixture, $2 = current version, $3 = min-age-days
   [[ "$output" == *"cooldown"* ]] || return 1
 }
 
+# --- stdout/stderr split (the contract all three modes share) ---
+#
+# A reason code (cooldown, major-available, prerelease-only, current) MUST
+# land on stderr only: PR 2's workflow does `next=$(... --mode=select ...)`,
+# and command substitution captures stdout only. If a reason code leaked
+# onto stdout, `next` would silently become the reason-code string instead
+# of a version — or empty. `run` alone folds stderr into $output (as the
+# comments above note), which is exactly why nothing until now would catch
+# that leak. `run --separate-stderr` (bats >= 1.5.0; this repo pins 1.14.0,
+# see tests/npm-bump-extract.bats) is what makes stdout and stderr
+# separately assertable.
+
+@test "select: a reason-code outcome (cooldown) writes nothing to stdout" {
+  run --separate-stderr bash "$SCRIPT" --mode=select \
+    --current=9.15.0 --now="$CLOCK" --min-age-days=99999 < "$PFX/basic.json"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"cooldown"* ]] || return 1
+}
+
+@test "select: a reason-code outcome (major-available) writes nothing to stdout" {
+  run --separate-stderr bash "$SCRIPT" --mode=select \
+    --current=9.15.9 --now="$CLOCK" --min-age-days=5 < "$PFX/basic.json"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"major-available"* ]] || return 1
+}
+
+@test "select: a successful selection writes nothing to stderr" {
+  run --separate-stderr bash "$SCRIPT" --mode=select \
+    --current=9.15.0 --now="$CLOCK" --min-age-days=5 < "$PFX/basic.json"
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+  [ "$output" = "$(printf '9.15.9\tnormal')" ]
+}
+
+@test "current: a successful lookup writes nothing to stderr" {
+  run --separate-stderr bash "$SCRIPT" --mode=current < "$MFX/plain.json"
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+}
+
+@test "current: a failure writes nothing to stdout" {
+  run --separate-stderr bash "$SCRIPT" --mode=current < "$MFX/absent.json"
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+}
+
+@test "rewrite: a successful rewrite writes nothing to stderr" {
+  run --separate-stderr bash "$SCRIPT" --mode=rewrite --version=9.15.9 < "$MFX/plain.json"
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+}
+
+@test "rewrite: a failure writes nothing to stdout" {
+  run --separate-stderr bash "$SCRIPT" --mode=rewrite --version=9.15.9 < "$MFX/npm-pm.json"
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+}
+
 @test "select: a version published exactly at the cutoff counts as soaked" {
   # soak-boundary.json's only candidate, 9.15.1, is published at exactly
   # 2025-03-22T00:00:00Z. With CLOCK (2025-04-01T00:00:00Z) and
@@ -166,15 +245,6 @@ sel() { # $1 = packument fixture, $2 = current version, $3 = min-age-days
   sel soak-boundary.json 9.15.0 10
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf '9.15.1\tnormal')" ]
-}
-
-@test "select: cooldown and major-available are distinguishable" {
-  # The whole point of reason codes: two different zero-selection outcomes
-  # that a bare "nothing selected" assertion would conflate.
-  sel basic.json 9.15.0 99999
-  [[ "$output" == *"cooldown"* ]] || return 1
-  sel basic.json 9.15.9 5
-  [[ "$output" == *"major-available"* ]] || return 1
 }
 
 @test "select: a candidate missing its .time entry fails closed" {
@@ -199,16 +269,27 @@ sel() { # $1 = packument fixture, $2 = current version, $3 = min-age-days
 @test "select: packument without .time fails closed" {
   sel no-time.json 9.15.0 5
   [ "$status" -eq 2 ]
+  # Discriminate from the downstream "malformed-packument: no .time entry"
+  # guard, which also exits 2 on this fixture if the has("time") check is
+  # dropped from the upstream has("versions") and has("time") guard.
+  [[ "$output" == *"not valid JSON or lacks .versions/.time"* ]] || return 1
 }
 
 @test "select: invalid packument JSON fails closed" {
   run bash "$SCRIPT" --mode=select --current=9.15.0 --now="$CLOCK" --min-age-days=5 <<< 'nope'
   [ "$status" -eq 2 ]
+  # Same discrimination as the .time guard above: on non-JSON input, dropping
+  # the has("versions") and has("time") guard still exits 2 (jq -e fails
+  # downstream), just with a different message.
+  [[ "$output" == *"not valid JSON or lacks .versions/.time"* ]] || return 1
 }
 
 @test "select: missing --current fails" {
   run bash "$SCRIPT" --mode=select --now="$CLOCK" --min-age-days=5 < "$PFX/basic.json"
   [ "$status" -eq 2 ]
+  # Discriminate from the downstream "--current is not x.y.z" guard, which
+  # also exits 2 here if the explicit "requires --current" check is dropped.
+  [[ "$output" == *"requires --current"* ]] || return 1
 }
 
 @test "select: non-numeric --now fails" {
@@ -403,6 +484,10 @@ rw() { # $1 = manifest fixture, $2 = target version
 @test "rewrite: requires --version" {
   run bash "$SCRIPT" --mode=rewrite < "$MFX/plain.json"
   [ "$status" -eq 2 ]
+  # Discriminate from the downstream "--version is not x.y.z" format guard,
+  # which also exits 2 here if the explicit "requires --version" check is
+  # dropped.
+  [[ "$output" == *"requires --version"* ]] || return 1
 }
 
 @test "rewrite: output is still valid JSON" {
