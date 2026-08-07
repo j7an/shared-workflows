@@ -21,6 +21,7 @@ INLINE_PAIRS=(
   ".github/workflows/pre-commit-autoupdate.yml:scripts/pre-commit-autoupdate-preflight.sh"
   ".github/workflows/dependency-safety.yml:scripts/pyproject-bump-extract.sh"
   ".github/workflows/dependency-safety.yml:scripts/npm-bump-extract.sh"
+  ".github/workflows/pnpm-packagemanager-update.yml:scripts/packagemanager-bump.sh"
 )
 
 YAML_INDENT="          "  # exactly 10 spaces — matches the `run: |` indent
