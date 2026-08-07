@@ -397,3 +397,18 @@ rw() { # $1 = manifest fixture, $2 = target version
   [ "$status" -eq 2 ]
   [[ "$output" == *"not an exact"* ]] || return 1
 }
+
+@test "rewrite: JSON-escaped key passes jq validation but fails the literal scan" {
+  # escaped-pin.json spells the key as "packageManager" — jq decodes this
+  # to packageManager and the top-level/pnpm/exact-version validation (the
+  # same one --mode=current uses) succeeds, but the document does not
+  # literally contain the bytes "packageManager". The awk scan is a literal
+  # byte scan, not a JSON-aware one, so it must reach count==0 and fail
+  # closed here rather than silently doing nothing or corrupting the file.
+  run bash "$SCRIPT" --mode=rewrite --version=9.15.9 < "$MFX/escaped-pin.json"
+  [ "$status" -eq 2 ]
+  # "could not locate" is unique to this branch: grep -c confirms exactly one
+  # occurrence in the script, so this can't be a substring collision with the
+  # not-pnpm, not-exact, or ambiguous-manifest messages.
+  [[ "$output" == *"could not locate"* ]] || return 1
+}
