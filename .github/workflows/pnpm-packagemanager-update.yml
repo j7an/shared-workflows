@@ -46,8 +46,46 @@ jobs:
       pull-requests: write
       statuses: write
     steps:
+      - name: Preflight auth
+        id: preflight
+        env:
+          APP_ID: ${{ vars.RELEASE_BOT_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # Derive a boolean and drop the secret. Never echo APP_PRIVATE_KEY, and
+          # never write it to GITHUB_OUTPUT — outputs are readable by later steps
+          # and appear in the run's step summary.
+          if [ -n "$APP_PRIVATE_KEY" ] && [ -n "$APP_ID" ]; then
+            echo "auth_mode=app" >> "$GITHUB_OUTPUT"
+          else
+            echo "auth_mode=fallback" >> "$GITHUB_OUTPUT"
+          fi
+          unset APP_PRIVATE_KEY
+
+      - name: Generate GitHub App token
+        id: app-token
+        if: steps.preflight.outputs.auth_mode == 'app'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          # `client-id`, not `app-id` — matches pre-commit-autoupdate.yml:172.
+          client-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # Scope the token to what this workflow actually needs rather than
+          # inheriting every permission the installation holds.
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Resolve and update
         id: update
+        env:
+          INPUT_MANIFEST_PATH: ${{ inputs.manifest_path }}
+          INPUT_MIN_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
         run: |
           # --- BEGIN inline:scripts/packagemanager-bump.sh ---
           packagemanager_bump() (
@@ -284,3 +322,27 @@ jobs:
           esac
           )
           # --- END inline:scripts/packagemanager-bump.sh ---
+
+          set -euo pipefail
+
+          case "$INPUT_MANIFEST_PATH" in
+            /*|*..*) echo "::error::manifest_path must be a relative path without '..': $INPUT_MANIFEST_PATH"; exit 1 ;;
+          esac
+
+          MANIFEST="$INPUT_MANIFEST_PATH"
+          [ -f "$MANIFEST" ] || { echo "::error::manifest not found: $MANIFEST"; exit 1; }
+
+          if ! CUR_ROW=$(packagemanager_bump --mode=current < "$MANIFEST"); then
+            echo "::error::could not read a pnpm packageManager pin from $MANIFEST"
+            exit 1
+          fi
+          CUR_VER=$(printf '%s' "$CUR_ROW" | cut -f2)
+          CUR_MAJ=$(printf '%s' "$CUR_ROW" | cut -f3)
+          CUR_SUF=$(printf '%s' "$CUR_ROW" | cut -f4)
+          echo "Current pin: pnpm@${CUR_VER}${CUR_SUF} (major ${CUR_MAJ})"
+
+          PACKUMENT="${RUNNER_TEMP}/packument.json"
+          if ! curl -sfS --max-time 120 https://registry.npmjs.org/pnpm -o "$PACKUMENT"; then
+            echo "::error::registry fetch failed; refusing to proceed (a network error is not 'already current')"
+            exit 1
+          fi
