@@ -534,3 +534,121 @@ jobs:
             NEW_VALUE="${TARGET}+${SUFFIX_BODY}"
           fi
           echo "New packageManager value: pnpm@${NEW_VALUE}"
+
+          TMP_MANIFEST="${RUNNER_TEMP}/package.json.new"
+          packagemanager_bump --mode=rewrite --version="$NEW_VALUE" < "$MANIFEST" > "$TMP_MANIFEST" \
+            || { echo "::error::rewrite failed"; exit 1; }
+          mv "$TMP_MANIFEST" "$MANIFEST"
+
+          {
+            echo "target=$TARGET"
+            echo "new_value=$NEW_VALUE"
+            echo "select_mode=$SELECT_MODE"
+            echo "current=$CUR_VER"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$SELECT_MODE" = "bypass" ]; then
+            # Write registry-controlled prose to a FILE, never to $GITHUB_OUTPUT
+            # with a fixed heredoc delimiter. A deprecation message containing a
+            # bare `EOF` line would escape the block and inject arbitrary outputs,
+            # and that text comes from the registry, not from us.
+            jq -r --arg v "$CUR_VER" '.versions[$v].deprecated' "$PACKUMENT" \
+              > "${RUNNER_TEMP}/deprecation.txt"
+            echo "deprecation_file=${RUNNER_TEMP}/deprecation.txt" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compose pull request body
+        id: body
+        if: steps.update.outputs.skip != 'true'
+        env:
+          CURRENT: ${{ steps.update.outputs.current }}
+          TARGET: ${{ steps.update.outputs.target }}
+          SELECT_MODE: ${{ steps.update.outputs.select_mode }}
+          DEPRECATION_FILE: ${{ steps.update.outputs.deprecation_file }}
+          MIN_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Updates the pinned pnpm toolchain version."
+            echo
+            echo "\`packageManager\`: \`pnpm@${CURRENT}\` → \`pnpm@${TARGET}\`"
+            echo
+            if [ "$SELECT_MODE" = "bypass" ]; then
+              echo "> **Minimum release age was bypassed.**"
+              echo ">"
+              echo "> The previously pinned version \`${CURRENT}\` is deprecated on the npm"
+              echo "> registry, so the usual ${MIN_AGE_DAYS}-day wait was skipped: staying on a"
+              echo "> known-broken toolchain is a present, confirmed problem, while the wait"
+              echo "> guards against a hypothetical one."
+              echo ">"
+              echo "> The registry's notice for \`${CURRENT}\`, verbatim:"
+              echo ">"
+              # Quote every line, so a multi-line notice cannot break out of the
+              # blockquote and inject Markdown into the body.
+              sed 's/^/> > /' "$DEPRECATION_FILE"
+            else
+              echo "The target release is at least ${MIN_AGE_DAYS} days old and is not deprecated."
+            fi
+            echo
+            echo "Only the \`packageManager\` value changed; no lockfile was touched."
+          } > "${RUNNER_TEMP}/pr-body.md"
+          echo "path=${RUNNER_TEMP}/pr-body.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create or refresh the pull request
+        id: cpr
+        if: steps.update.outputs.skip != 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          branch: ${{ inputs.branch }}
+          delete-branch: true
+          commit-message: ${{ inputs.commit_message }}
+          labels: ${{ inputs.labels }}
+          sign-commits: ${{ inputs.sign_commits }}
+          add-paths: ${{ inputs.manifest_path }}
+          body-path: ${{ steps.body.outputs.path }}
+          title: ${{ steps.update.outputs.select_mode == 'bypass' && format('{0} (cooldown bypassed — previous pin deprecated)', inputs.title) || inputs.title }}
+
+      - name: Verify the pull request touches only the manifest
+        if: steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.cpr.outputs.pull-request-number }}
+          MANIFEST: ${{ inputs.manifest_path }}
+        run: |
+          set -euo pipefail
+          files=$(gh api "repos/${GH_REPO}/pulls/${PR}/files" --paginate --jq '.[].filename')
+          if [ "$files" != "$MANIFEST" ]; then
+            echo "::error::pull request touches unexpected paths:"
+            printf '%s\n' "$files"
+            exit 1
+          fi
+
+      - name: Post the pnpm packageManager evidence status
+        if: steps.update.outputs.skip != 'true' && steps.cpr.outputs.pull-request-head-sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.cpr.outputs.pull-request-head-sha }}
+          TARGET: ${{ steps.update.outputs.target }}
+          SELECT_MODE: ${{ steps.update.outputs.select_mode }}
+          MIN_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
+        run: |
+          set -euo pipefail
+          if [ "$SELECT_MODE" = "bypass" ]; then
+            DESC="pnpm ${TARGET}: exact published version, not deprecated, major unchanged, manifest only. Cooldown bypassed — prior pin deprecated."
+          else
+            DESC="pnpm ${TARGET}: exact published version, not deprecated, ${MIN_AGE_DAYS}d+ old, major unchanged, manifest only."
+          fi
+          # GitHub truncates at 140. Assert rather than hope: the first draft of
+          # the bypass string measured 141 and would have silently lost its tail.
+          if [ "${#DESC}" -gt 140 ]; then
+            echo "::error::status description is ${#DESC} chars, over GitHub's 140 limit: $DESC"
+            exit 1
+          fi
+          gh api "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
+            -f state=success \
+            -f context="pnpm-packageManager / evidence" \
+            -f description="$DESC" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
