@@ -46,6 +46,11 @@ jobs:
       pull-requests: write
       statuses: write
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
       - name: Preflight auth
         id: preflight
         env:
@@ -56,12 +61,36 @@ jobs:
           # Derive a boolean and drop the secret. Never echo APP_PRIVATE_KEY, and
           # never write it to GITHUB_OUTPUT — outputs are readable by later steps
           # and appear in the run's step summary.
-          if [ -n "$APP_PRIVATE_KEY" ] && [ -n "$APP_ID" ]; then
-            echo "auth_mode=app" >> "$GITHUB_OUTPUT"
+          if [ -n "$APP_PRIVATE_KEY" ]; then
+            HAS_APP_PRIVATE_KEY=true
           else
-            echo "auth_mode=fallback" >> "$GITHUB_OUTPUT"
+            HAS_APP_PRIVATE_KEY=false
           fi
           unset APP_PRIVATE_KEY
+
+          # Half-configured App auth fails loudly rather than degrading to the
+          # GITHUB_TOKEN fallback. A repo that set vars.RELEASE_BOT_APP_ID asked
+          # for App-authored PRs; silently opening GITHUB_TOKEN-authored ones
+          # instead leaves required CI unstarted with nothing to notice.
+          # pre-commit-autoupdate.yml:139-145 establishes this contract and this
+          # mirrors it, asymmetry included: a private key arriving through
+          # `secrets: inherit` with no repo-level APP_ID is an org-wide secret
+          # this repo never opted into, not a half-configuration.
+          AUTH_MODE="fallback"
+          USE_FALLBACK_CAVEAT="true"
+          if [ -n "$APP_ID" ]; then
+            if [ "$HAS_APP_PRIVATE_KEY" != "true" ]; then
+              echo "::error::App auth half-configured - set both vars.RELEASE_BOT_APP_ID and RELEASE_BOT_PRIVATE_KEY, or neither."
+              exit 1
+            fi
+            AUTH_MODE="app"
+            USE_FALLBACK_CAVEAT="false"
+          fi
+
+          {
+            echo "auth_mode=$AUTH_MODE"
+            echo "use_fallback_caveat=$USE_FALLBACK_CAVEAT"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Generate GitHub App token
         id: app-token
@@ -459,8 +488,25 @@ jobs:
           case "$INPUT_MANIFEST_PATH" in
             /*|*..*) echo "::error::manifest_path must be a relative path without '..': $INPUT_MANIFEST_PATH"; exit 1 ;;
           esac
+          # Mirrors pre-commit-autoupdate.yml:129-131. The value also flows into
+          # create-pull-request's `add-paths:`, which is newline-separated, so a
+          # newline would silently widen the commit's path restriction.
+          case "$INPUT_MANIFEST_PATH" in
+            *$'\n'*|*$'\r'*) echo "::error::manifest_path must not contain newlines or carriage returns"; exit 1 ;;
+          esac
 
+          # Normalize leading "./". `gh api .../pulls/{n}/files` reports paths in
+          # normalized form ("package.json"), so an unnormalized "./package.json"
+          # would make the post-PR verify step compare unequal strings and fail
+          # AFTER the pull request already exists. Validation, `add-paths:`, and
+          # the verify comparison all read the normalized value below.
           MANIFEST="$INPUT_MANIFEST_PATH"
+          while [ "${MANIFEST#./}" != "$MANIFEST" ]; do
+            MANIFEST="${MANIFEST#./}"
+          done
+          [ -n "$MANIFEST" ] || { echo "::error::manifest_path must not be empty"; exit 1; }
+          echo "manifest_path=$MANIFEST" >> "$GITHUB_OUTPUT"
+
           [ -f "$MANIFEST" ] || { echo "::error::manifest not found: $MANIFEST"; exit 1; }
 
           if ! CUR_ROW=$(packagemanager_bump --mode=current < "$MANIFEST"); then
@@ -510,14 +556,44 @@ jobs:
           if [ -z "$CUR_SUF" ]; then
             NEW_VALUE="$TARGET"
           else
-            # Preserve the algorithm the pin already declares. Corepack reads it
-            # from the existing suffix (`build[0]`); only a suffix being added
-            # from scratch defaults to sha512.
+            # Preserve the algorithm the pin already declares, read from the
+            # existing suffix. This branch only ever rewrites a suffix that is
+            # already there — the empty-$CUR_SUF branch above writes a bare
+            # version and never reaches packagemanager_integrity — so no
+            # algorithm default is chosen here or anywhere in this workflow.
             CUR_ALGO="${CUR_SUF#+}"; CUR_ALGO="${CUR_ALGO%%.*}"
 
             TARBALL=$(jq -r --arg v "$TARGET" '.versions[$v].dist.tarball // empty' "$PACKUMENT")
             INTEGRITY=$(jq -r --arg v "$TARGET" '.versions[$v].dist.integrity // empty' "$PACKUMENT")
             [ -n "$TARBALL" ] || { echo "::error::no tarball URL for pnpm ${TARGET}"; exit 1; }
+
+            # The tarball URL and the dist.integrity it is checked against come
+            # from the SAME document, so a hostile packument controls both sides
+            # and the integrity check proves nothing about origin. Constrain the
+            # host before fetching, so the bytes at least come from the registry
+            # this workflow decided to trust.
+            case "$TARBALL" in
+              https://*) ;;
+              *) echo "::error::tarball URL for pnpm ${TARGET} is not https: $TARBALL"; exit 1 ;;
+            esac
+            TARBALL_HOST="${TARBALL#https://}"
+            TARBALL_HOST="${TARBALL_HOST%%/*}"
+            # Strip any userinfo: "https://registry.npmjs.org@evil.example/x" has
+            # authority "registry.npmjs.org@evil.example" and host evil.example.
+            case "$TARBALL_HOST" in
+              *@*) TARBALL_HOST="${TARBALL_HOST##*@}" ;;
+            esac
+            if [ "$TARBALL_HOST" != "registry.npmjs.org" ]; then
+              echo "::error::tarball URL for pnpm ${TARGET} is not hosted on registry.npmjs.org: $TARBALL"
+              exit 1
+            fi
+
+            if [ -z "$INTEGRITY" ]; then
+              # packagemanager-integrity.sh warns on plain stderr, which never
+              # surfaces in the checks UI. The annotation belongs to the caller.
+              echo "::warning::the npm registry published no dist.integrity for pnpm ${TARGET}; the new packageManager suffix records the downloaded bytes without verifying them."
+            fi
+
             curl -sfS --max-time 120 "$TARBALL" -o "${RUNNER_TEMP}/pnpm.tgz" \
               || { echo "::error::integrity-failure: tarball fetch failed for pnpm ${TARGET}"; exit 1; }
 
@@ -566,6 +642,7 @@ jobs:
           SELECT_MODE: ${{ steps.update.outputs.select_mode }}
           DEPRECATION_FILE: ${{ steps.update.outputs.deprecation_file }}
           MIN_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
+          USE_FALLBACK_CAVEAT: ${{ steps.preflight.outputs.use_fallback_caveat }}
         run: |
           set -euo pipefail
           {
@@ -583,14 +660,26 @@ jobs:
               echo ">"
               echo "> The registry's notice for \`${CURRENT}\`, verbatim:"
               echo ">"
-              # Quote every line, so a multi-line notice cannot break out of the
-              # blockquote and inject Markdown into the body.
-              sed 's/^/> > /' "$DEPRECATION_FILE"
+              # Two independent neutralizations, both required.
+              #   s/</\&lt;/g  — blockquoting stops Markdown but NOT raw HTML.
+              #     `> > <img src=x>` renders a live image tag in the PR body,
+              #     leaking a viewer's IP and User-Agent to whoever the registry
+              #     prose names, and `<details>` can hide text from a reviewer.
+              #     Escaping `<` is enough to disarm every tag while leaving the
+              #     notice readable; `&` is deliberately left alone so ordinary
+              #     prose ("A & B") is not rewritten to `&amp;`.
+              #   s/^/> > /   — quote every line, so a multi-line notice cannot
+              #     break out of the blockquote and inject Markdown.
+              sed -e 's/</\&lt;/g' -e 's/^/> > /' "$DEPRECATION_FILE"
             else
               echo "The target release is at least ${MIN_AGE_DAYS} days old and is not deprecated."
             fi
             echo
             echo "Only the \`packageManager\` value changed; no lockfile was touched."
+            if [ "$USE_FALLBACK_CAVEAT" = "true" ]; then
+              echo
+              echo "Note: GITHUB_TOKEN-authored PRs may not trigger required CI automatically due to GitHub's recursion guard. If checks do not start, close and reopen this PR or push an empty commit."
+            fi
           } > "${RUNNER_TEMP}/pr-body.md"
           echo "path=${RUNNER_TEMP}/pr-body.md" >> "$GITHUB_OUTPUT"
 
@@ -605,7 +694,10 @@ jobs:
           commit-message: ${{ inputs.commit_message }}
           labels: ${{ inputs.labels }}
           sign-commits: ${{ inputs.sign_commits }}
-          add-paths: ${{ inputs.manifest_path }}
+          # The NORMALIZED path, not inputs.manifest_path: `./package.json` and
+          # `package.json` must be one string by the time it reaches add-paths,
+          # the verify step, and the GitHub API's own normalized reply.
+          add-paths: ${{ steps.update.outputs.manifest_path }}
           body-path: ${{ steps.body.outputs.path }}
           title: ${{ steps.update.outputs.select_mode == 'bypass' && format('{0} (cooldown bypassed — previous pin deprecated)', inputs.title) || inputs.title }}
 
@@ -615,7 +707,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ steps.cpr.outputs.pull-request-number }}
-          MANIFEST: ${{ inputs.manifest_path }}
+          MANIFEST: ${{ steps.update.outputs.manifest_path }}
         run: |
           set -euo pipefail
           files=$(gh api "repos/${GH_REPO}/pulls/${PR}/files" --paginate --jq '.[].filename')
@@ -626,16 +718,28 @@ jobs:
           fi
 
       - name: Post the pnpm packageManager evidence status
-        if: steps.update.outputs.skip != 'true' && steps.cpr.outputs.pull-request-head-sha != ''
+        # Gated on the PR NUMBER, not the head SHA. Gating on the head SHA meant
+        # a run that created a pull request but reported no head SHA skipped the
+        # status silently and went green — a PR with no evidence, which is the
+        # exact state this status exists to make impossible. The missing-SHA
+        # case is now a hard failure inside the step, below.
+        if: steps.update.outputs.skip != 'true' && steps.cpr.outputs.pull-request-number != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.cpr.outputs.pull-request-number }}
           HEAD_SHA: ${{ steps.cpr.outputs.pull-request-head-sha }}
           TARGET: ${{ steps.update.outputs.target }}
           SELECT_MODE: ${{ steps.update.outputs.select_mode }}
           MIN_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
         run: |
           set -euo pipefail
+          if [ -z "$HEAD_SHA" ]; then
+            # Never guess a SHA here. A status posted to the wrong commit is
+            # worse than no status: it reads as evidence for something else.
+            echo "::error::pull request #${PR} exists but create-pull-request reported no head SHA, so the 'pnpm-packageManager / evidence' status cannot be posted. Refusing to guess a commit."
+            exit 1
+          fi
           if [ "$SELECT_MODE" = "bypass" ]; then
             DESC="pnpm ${TARGET}: exact published version, not deprecated, major unchanged, manifest only. Cooldown bypassed — prior pin deprecated."
           else
