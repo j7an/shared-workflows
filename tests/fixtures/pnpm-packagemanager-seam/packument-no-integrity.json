@@ -1,0 +1,17 @@
+{
+  "name": "pnpm",
+  "dist-tags": { "latest": "9.15.9" },
+  "versions": {
+    "9.15.0": { "version": "9.15.0" },
+    "9.15.9": {
+      "version": "9.15.9",
+      "dist": {
+        "tarball": "https://registry.npmjs.org/pnpm/-/pnpm-9.15.9.tgz"
+      }
+    }
+  },
+  "time": {
+    "9.15.0": "2025-01-01T00:00:00.000Z",
+    "9.15.9": "2025-03-10T02:47:09.271Z"
+  }
+}

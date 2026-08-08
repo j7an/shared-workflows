@@ -1,0 +1,18 @@
+{
+  "name": "pnpm",
+  "dist-tags": { "latest": "9.15.9" },
+  "versions": {
+    "9.15.0": { "version": "9.15.0" },
+    "9.15.9": {
+      "version": "9.15.9",
+      "dist": {
+        "tarball": "https://registry.npmjs.org@evil.example/pnpm/-/pnpm-9.15.9.tgz",
+        "integrity": "sha512-7bm+1yGqal9vvGYZ06PCvj0EMEPwWprrx7EZeiqpxJpX1d3UZ0wXhXhQiNnx/0LHl6Aq3JuBehOaUJcNpsmVJA=="
+      }
+    }
+  },
+  "time": {
+    "9.15.0": "2025-01-01T00:00:00.000Z",
+    "9.15.9": "2025-03-10T02:47:09.271Z"
+  }
+}

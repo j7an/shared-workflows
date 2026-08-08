@@ -1,0 +1,5 @@
+This version is broken. <img src="https://tracker.evil.example/p.gif">
+<details><summary>Click for details</summary>
+Hidden from a collapsed reviewer.
+</details>
+Upgrade with `pnpm add -g pnpm`.
