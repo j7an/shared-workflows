@@ -100,15 +100,81 @@ run_blocks() {
   assert_contains "$job" 'TEST_COMMAND: ${{ inputs.test-command }}'
   assert_contains "$job" 'if [ -n "$TEST_COMMAND" ]; then'
   assert_contains "$job" 'PACK_CONTENTS_SCRIPT: ${{ inputs.pack-contents-script }}'
-  assert_contains "$job" 'sh "$PACK_CONTENTS_SCRIPT" pack.json'
+  assert_contains "$job" 'sh "$PACK_CONTENTS_SCRIPT" "$PACK_JSON_REL"'
 }
 
-@test "build job packs once and uploads npm-dist tarball artifact" {
+@test "build job packs once from the selected directory and stages the tarball" {
   job="$(build_job)"
-  assert_contains "$job" 'npm pack --json > pack.json'
+  assert_contains "$job" 'PACKAGE_DIR: ${{ steps.pkg.outputs.dir }}'
+  assert_contains "$job" 'PACK_COMMAND: ${{ inputs.pack-command }}'
+  assert_contains "$job" 'PACK_JSON="$RUNNER_TEMP/pack.json"'
+  assert_contains "$job" 'STAGE="$RUNNER_TEMP/dist"'
+  assert_contains "$job" 'Expected exactly one tarball'
   assert_contains "$job" "name: npm-dist"
-  assert_contains "$job" 'path: "*.tgz"'
+  assert_contains "$job" 'path: ${{ runner.temp }}/dist/*.tgz'
   assert_contains "$job" 'if-no-files-found: error'
+  assert_lacks "$job" 'npm pack --json > pack.json'
+  assert_lacks "$job" 'path: "*.tgz"'
+}
+
+@test "the pack command is invoked exactly once" {
+  count=$(grep -oF 'sh -c "$PACK_COMMAND"' "$YAML" | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ]
+}
+
+@test "the guard is invoked exactly once" {
+  count=$(grep -oF 'assert_packed_manifest "$RUNNER_TEMP/dist"' "$YAML" | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ]
+}
+
+@test "the guard receives the requested name and version" {
+  job="$(build_job)"
+  assert_contains "$job" 'PACKAGE_NAME: ${{ inputs.package-name }}'
+  assert_contains "$job" 'VERSION: ${{ steps.pkg.outputs.version }}'
+  assert_contains "$job" 'assert_packed_manifest "$RUNNER_TEMP/dist"/*.tgz "$PACKAGE_NAME" "$VERSION"'
+}
+
+@test "pack metadata is written outside the workspace" {
+  job="$(build_job)"
+  assert_contains "$job" 'PACK_JSON="$RUNNER_TEMP/pack.json"'
+  assert_lacks "$job" '> pack.json'
+}
+
+@test "the staged tarball is bound to the pack metadata filename" {
+  job="$(build_job)"
+  assert_contains "$job" 'EXPECTED_TARBALL'
+  assert_contains "$job" 'stale tarball'
+}
+
+@test "corepack enables only pnpm and yarn, never the npm shim" {
+  job="$(build_job)"
+  assert_contains "$job" 'corepack enable pnpm yarn'
+  ! printf '%s\n' "$job" | grep -qE 'corepack enable[[:space:]]*$' || return 1
+}
+
+@test "pack failures surface the packer's own error message" {
+  job="$(build_job)"
+  assert_contains "$job" 'jq -r '"'"'.error.message // empty'"'"' "$PACK_JSON"'
+  assert_contains "$job" 'has("error")'
+}
+
+@test "the packed manifest is asserted before upload" {
+  asrt="$(step_line 'Assert packed manifest is the requested package')"
+  upld="$(step_line 'Upload tarball artifact')"
+  [ -n "$asrt" ]
+  [ -n "$upld" ]
+  [ "$asrt" -lt "$upld" ]
+  grep -qF '# --- BEGIN inline:scripts/assert-packed-manifest.sh ---' "$YAML"
+  grep -qF '# --- END inline:scripts/assert-packed-manifest.sh ---' "$YAML"
+}
+
+@test "publish and github-release jobs stay artifact-driven" {
+  pub="$(publish_job)"
+  rel="$(github_release_job)"
+  assert_contains "$pub" 'npm publish ./*.tgz'
+  assert_contains "$rel" 'gh release upload "$TAG" ./*.tgz --clobber'
+  assert_lacks "$pub" 'package-dir'
+  assert_lacks "$rel" 'package-dir'
 }
 
 @test "publish job declares OIDC permission and npm environment" {
@@ -178,7 +244,7 @@ run_blocks() {
 @test "preflight runs before the caller test command" {
   pre="$(step_line 'Resolve package directory and preflight')"
   tst="$(step_line 'Run caller test command')"
-  pck="$(step_line 'Pack once and assert tarball contents')"
+  pck="$(step_line 'Pack once and stage the tarball')"
   [ -n "$pre" ]
   [ -n "$tst" ]
   [ -n "$pck" ]
