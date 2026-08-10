@@ -281,6 +281,21 @@ jobs:
           mkdir -p "$STAGE"
           rm -f "$STAGE"/*.tgz
 
+          # npm's failure envelope is {"error":{"code","summary","detail"}} -
+          # verified against npm 12.0.2, which exits 7 on a failing prepack and
+          # writes that object to stdout. There is NO "message" key; it is read
+          # last only as a fallback for a packer that uses it. When no key is
+          # recognized the raw metadata is dumped rather than swallowed, so a
+          # caller never has to reproduce the failure locally to see it.
+          report_pack_error() {
+            DETAIL=$(jq -r '[.error.summary, .error.detail, .error.message] | map(select(. != null and . != "")) | join(": ")' "$PACK_JSON" 2>/dev/null || true)
+            if [ -n "$DETAIL" ]; then
+              printf '%s\n' "$DETAIL" | sed 's/^/::error::/'
+            else
+              sed 's/^/::error::/' "$PACK_JSON" 2>/dev/null || true
+            fi
+          }
+
           # Metadata is written outside GITHUB_WORKSPACE because the shell
           # truncates a redirect target BEFORE the packer runs; a file created
           # in the package directory at that moment is sealed into the tarball
@@ -288,15 +303,15 @@ jobs:
           # after packing, so the caller-visible path is unchanged.
           if ! ( cd "$PACKAGE_DIR" && sh -c "$PACK_COMMAND" ) > "$PACK_JSON"; then
             echo "::error::pack command failed in ${PACKAGE_DIR}: ${PACK_COMMAND}"
-            jq -r '.error.message // empty' "$PACK_JSON" 2>/dev/null \
-              | sed 's/^/::error::/' || true
+            report_pack_error
             exit 1
           fi
 
           # Reachable when the caller's pack-command is a pipeline, where the
           # exit status is the last element's and a packer error is masked.
           if jq -e 'type == "object" and has("error")' "$PACK_JSON" >/dev/null 2>&1; then
-            echo "::error::pack command reported an error: $(jq -r '.error.message // "unknown"' "$PACK_JSON")"
+            echo "::error::pack command reported an error"
+            report_pack_error
             exit 1
           fi
 

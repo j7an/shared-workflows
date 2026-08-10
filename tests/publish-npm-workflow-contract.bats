@@ -143,19 +143,36 @@ run_blocks() {
 @test "the staged tarball is bound to the pack metadata filename" {
   job="$(build_job)"
   assert_contains "$job" 'EXPECTED_TARBALL'
-  assert_contains "$job" 'stale tarball'
+  assert_contains "$job" 'if [ "$FOUND_BASE" != "$EXPECTED_TARBALL" ]; then'
+  assert_contains "$job" 'refusing to publish a stale tarball'
+  # The echo alone would not stop the publish; the refusal must exit non-zero.
+  printf '%s\n' "$job" \
+    | grep -A1 'refusing to publish a stale tarball' \
+    | grep -qE '^[[:space:]]*exit 1$'
 }
 
 @test "corepack enables only pnpm and yarn, never the npm shim" {
   job="$(build_job)"
   assert_contains "$job" 'corepack enable pnpm yarn'
-  ! printf '%s\n' "$job" | grep -qE 'corepack enable[[:space:]]*$' || return 1
+  # Bare `corepack enable`, `--all`, and any explicit `npm` argument all install
+  # the npm shim, which hard-errors in a repo pinning packageManager: pnpm@...
+  # Only real command lines are considered, so the explanatory comment above the
+  # command (which names npm in prose) cannot satisfy or defeat this check.
+  ! printf '%s\n' "$job" \
+    | grep -E '^[[:space:]]*corepack enable' \
+    | grep -qE '(enable[[:space:]]*$|[[:space:]]npm([[:space:]]|$)|--all)' || return 1
 }
 
-@test "pack failures surface the packer's own error message" {
+@test "pack failures surface the packer's real error keys" {
   job="$(build_job)"
-  assert_contains "$job" 'jq -r '"'"'.error.message // empty'"'"' "$PACK_JSON"'
+  # npm's envelope is {"error":{"code","summary","detail"}} - there is no
+  # "message" key, so pinning it alone would certify a dead branch.
+  assert_contains "$job" '[.error.summary, .error.detail, .error.message]'
+  assert_lacks "$job" '.error.message // empty'
+  assert_lacks "$job" '.error.message // "unknown"'
   assert_contains "$job" 'has("error")'
+  # Safety net: unrecognized envelopes are dumped, never swallowed.
+  assert_contains "$job" 'sed '"'"'s/^/::error::/'"'"' "$PACK_JSON"'
 }
 
 @test "the packed manifest is asserted before upload" {

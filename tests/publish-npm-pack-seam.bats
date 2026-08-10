@@ -22,6 +22,11 @@ bats_require_minimum_version 1.5.0
 WF=".github/workflows/publish-npm.yml"
 STEP="Pack once and stage the tarball"
 
+# npm's real failure envelope, verified against npm 12.0.2: a failing prepack
+# exits 7 and writes {"error":{"code","summary","detail"}} to stdout. There is
+# no "message" key, so these stubs are modeled on the packer, not on the code.
+NPM_ERROR_ENVELOPE='{"error":{"code":7,"summary":"command failed","detail":"sh -c exit 7"}}'
+
 extract_step_block() {
   awk -v want="      - name: $1" '
     $0 == want { found=1; next }
@@ -99,6 +104,7 @@ run_pack_step() {
   [[ "$output" == *"stale-0.0.1.tgz"* ]] || return 1
   [[ "$output" == *"fresh-1.0.0.tgz"* ]] || return 1
   [ ! -f "$RUNNER_TEMP/dist/stale-0.0.1.tgz" ]
+  [ -z "$stderr" ]
 }
 
 @test "a stale tarball left in the staging dir is cleared before packing" {
@@ -109,6 +115,7 @@ run_pack_step() {
   [ "$status" -eq 0 ]
   [ ! -f "$RUNNER_TEMP/dist/previous-0.0.1.tgz" ]
   [ -f "$RUNNER_TEMP/dist/good-1.0.0.tgz" ]
+  [ -z "$stderr" ]
 }
 
 @test "no tarball fails the count check" {
@@ -126,6 +133,7 @@ run_pack_step() {
   [[ "$output" == *"Expected exactly one tarball in packages/perms, found 2"* ]] || return 1
   [ ! -f "$RUNNER_TEMP/dist/a.tgz" ]
   [ ! -f "$RUNNER_TEMP/dist/b.tgz" ]
+  [ -z "$stderr" ]
 }
 
 # --- unusable or failing pack metadata -------------------------------------
@@ -136,6 +144,7 @@ run_pack_step() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot prove which artifact this run produced"* ]] || return 1
   [ ! -f "$RUNNER_TEMP/dist/x.tgz" ]
+  [ -z "$stderr" ]
 }
 
 @test "metadata without a filename fails before staging" {
@@ -144,6 +153,7 @@ run_pack_step() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot prove which artifact this run produced"* ]] || return 1
   [ ! -f "$RUNNER_TEMP/dist/x.tgz" ]
+  [ -z "$stderr" ]
 }
 
 @test "empty metadata fails before staging" {
@@ -152,21 +162,44 @@ run_pack_step() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot prove which artifact this run produced"* ]] || return 1
   [ ! -f "$RUNNER_TEMP/dist/x.tgz" ]
+  [ -z "$stderr" ]
 }
 
 @test "an error object with exit 0 is caught" {
-  export PACK_COMMAND='printf "{\"error\":{\"message\":\"boom\"}}"'
+  export PACK_COMMAND="printf '%s' '$NPM_ERROR_ENVELOPE'"
   run --separate-stderr run_pack_step
   [ "$status" -ne 0 ]
-  [[ "$output" == *"pack command reported an error: boom"* ]] || return 1
+  [[ "$output" == *"pack command reported an error"* ]] || return 1
+  [[ "$output" == *"::error::command failed: sh -c exit 7"* ]] || return 1
+  [ -z "$stderr" ]
 }
 
-@test "a non-zero packer surfaces its own message" {
-  export PACK_COMMAND='printf "{\"error\":{\"message\":\"needs install\"}}"; exit 1'
+@test "a non-zero packer surfaces npm's summary and detail" {
+  export PACK_COMMAND="printf '%s' '$NPM_ERROR_ENVELOPE'; exit 7"
   run --separate-stderr run_pack_step
   [ "$status" -ne 0 ]
   [[ "$output" == *"pack command failed in packages/perms"* ]] || return 1
+  [[ "$output" == *"::error::command failed: sh -c exit 7"* ]] || return 1
+  [ -z "$stderr" ]
+}
+
+@test "an unrecognized error envelope still surfaces the raw metadata" {
+  # Nothing may be silently swallowed: with no summary/detail/message the whole
+  # envelope is dumped, so a caller never has to reproduce the failure locally.
+  export PACK_COMMAND='printf "{\"error\":{\"code\":7}}"; exit 7'
+  run --separate-stderr run_pack_step
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'::error::{"error":{"code":7}}'* ]] || return 1
+  [ -z "$stderr" ]
+}
+
+@test "a packer reporting only message is still surfaced" {
+  # Covers the defensive third element of the jq fallback list.
+  export PACK_COMMAND='printf "{\"error\":{\"message\":\"needs install\"}}"; exit 1'
+  run --separate-stderr run_pack_step
+  [ "$status" -ne 0 ]
   [[ "$output" == *"::error::needs install"* ]] || return 1
+  [ -z "$stderr" ]
 }
 
 # --- the sealed-pack.json leak regression ----------------------------------
@@ -182,6 +215,7 @@ run_pack_step() {
   [ -s "$RUNNER_TEMP/seen" ]
   ! grep -q '^pack.json$' "$RUNNER_TEMP/seen" || return 1
   [ -f "$WORKDIR/packages/perms/pack.json" ]
+  [ -z "$stderr" ]
 }
 
 # --- pack-contents-script argument -----------------------------------------
@@ -195,6 +229,7 @@ SH
   run --separate-stderr run_pack_step
   [ "$status" -eq 0 ]
   [ "$(cat "$RUNNER_TEMP/arg")" = "packages/perms/pack.json" ]
+  [ -z "$stderr" ]
 }
 
 @test "a root package receives the literal pack.json, as before" {
@@ -208,6 +243,7 @@ SH
   [ "$status" -eq 0 ]
   [ "$(cat "$RUNNER_TEMP/arg")" = "pack.json" ]
   [ -f "$RUNNER_TEMP/dist/root-1.0.0.tgz" ]
+  [ -z "$stderr" ]
 }
 
 @test "a failing pack-contents-script fails the step" {
@@ -221,4 +257,5 @@ SH
   [ "$status" -ne 0 ]
   [[ "$output" == *"contents rejected"* ]] || return 1
   [ ! -f "$RUNNER_TEMP/dist/c-1.0.0.tgz" ]
+  [ -z "$stderr" ]
 }
