@@ -278,3 +278,12 @@ run_blocks() {
   count=$(grep -oF 'npm_package_preflight "$PACKAGE_DIR"' "$YAML" | wc -l | tr -d ' ')
   [ "$count" -eq 1 ]
 }
+
+@test "pack-contents-script description documents both root and monorepo metadata paths" {
+  desc="$(input_block pack-contents-script)"
+  # A root caller (package-dir omitted) still gets the literal 'pack.json';
+  # only a monorepo caller gets '<package-dir>/pack.json'. The description
+  # must name both, or a monorepo caller reads stale root-only docs.
+  assert_contains "$desc" 'pack.json for a root package'
+  assert_contains "$desc" '<package-dir>/pack.json otherwise'
+}

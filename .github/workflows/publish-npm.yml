@@ -30,7 +30,7 @@ on:
         type: string
         required: false
         default: ""
-        description: "Optional caller repo script run as 'sh <script> pack.json' after npm pack"
+        description: "Optional caller repo script run as 'sh <script> <metadata-path>' after packing; <metadata-path> is pack.json for a root package or <package-dir>/pack.json otherwise"
       verify-command:
         type: string
         required: false

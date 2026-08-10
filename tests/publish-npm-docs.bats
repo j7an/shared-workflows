@@ -71,6 +71,59 @@ normalize_ws() {
   assert_contains "$section" 'does not run `npm ci` by default'
 }
 
+@test "README documents package-dir and pack-command" {
+  section="$(publish_npm_section)"
+  assert_contains "$section" '`package-dir`'
+  assert_contains "$section" '`pack-command`'
+  assert_contains "$section" 'npm pack --json'
+}
+
+@test "README states the working directory of each caller hook" {
+  section="$(publish_npm_section)"
+  normalized="$(printf '%s\n' "$section" | normalize_ws)"
+  assert_contains "$normalized" 'test-command` runs from the repository root'
+  assert_contains "$normalized" 'repository-root-relative'
+}
+
+@test "README states what the pre-upload guard does not promise" {
+  section="$(publish_npm_section)"
+  normalized="$(printf '%s\n' "$section" | normalize_ws)"
+  assert_contains "$normalized" 'does not certify'
+}
+
+@test "README scopes each invocation to a single package" {
+  section="$(publish_npm_section)"
+  normalized="$(printf '%s\n' "$section" | normalize_ws)"
+  assert_contains "$normalized" 'one package per invocation'
+  assert_contains "$section" 'tag-prefix'
+  assert_contains "$section" 'permissions/v'
+}
+
+@test "README documents the pnpm workspace requirements" {
+  section="$(publish_npm_section)"
+  assert_contains "$section" 'packageManager'
+  assert_contains "$section" 'pnpm pack --json'
+  assert_contains "$section" 'frozen'
+  assert_contains "$section" 'workspace:'
+}
+
+@test "README documents per-package trusted publisher setup" {
+  section="$(publish_npm_section)"
+  normalized="$(printf '%s\n' "$section" | normalize_ws)"
+  assert_contains "$normalized" 'separately for every npm package'
+  assert_contains "$section" 'id-token: write'
+}
+
+@test "the monorepo caller example is complete and copy-pasteable" {
+  section="$(publish_npm_section)"
+  assert_contains "$section" 'package-dir: packages/permissions'
+  assert_contains "$section" 'pack-command: pnpm pack --json'
+  # Every caller example must carry its own permissions block; an example
+  # missing id-token fails at publish time with an opaque OIDC error.
+  count=$(printf '%s\n' "$section" | grep -c 'id-token: write')
+  [ "$count" -ge 2 ]
+}
+
 @test "README publish-npm prose lines stay wrapped" {
   section="$(publish_npm_section)"
   in_fence=0
