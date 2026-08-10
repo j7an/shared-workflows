@@ -1,0 +1,4 @@
+{ "name": "@probe/clean", "version": "1.0.0",
+  "dependencies": { "a": "workspace:^", "b": "catalog:" },
+  "optionalDependencies": { "c": "link:../c" },
+  "peerDependencies": { "d": "portal:../d" } }

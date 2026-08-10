@@ -1,0 +1,13 @@
+{ "name": "@probe/clean", "version": "1.0.0",
+  "dependencies": {
+    "aliased": "npm:other@^1.0.0",
+    "viagit": "git+https://example.com/x/y.git",
+    "viassh": "git+ssh://git@example.com/x/y.git",
+    "viagitproto": "git://example.com/x/y.git",
+    "viahttps": "https://example.com/x/y.tgz",
+    "viahttp": "http://example.com/x/y.tgz",
+    "viagithub": "github:user/repo#semver:^1.0.0",
+    "viagitlab": "gitlab:user/repo",
+    "viabitbucket": "bitbucket:user/repo",
+    "viagist": "gist:abc123"
+  } }
