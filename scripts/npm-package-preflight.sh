@@ -40,16 +40,6 @@ fi
 
 workspace="${GITHUB_WORKSPACE:-$PWD}"
 
-# --- tag -> version ------------------------------------------------------
-# Anchored on the trailing semver, so a tag-prefix such as "permissions/v"
-# is ignored rather than needing to be configured here.
-version=$(printf '%s' "$tag" \
-  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$' || true)
-if [ -z "$version" ]; then
-  echo "::error::Could not parse semver version from tag '${tag}'" >&2
-  exit 1
-fi
-
 # --- reject control characters -------------------------------------------
 # 'dir=' is appended to $GITHUB_OUTPUT, whose key=value form treats a raw
 # newline as a record separator: an embedded newline would inject a second
@@ -116,6 +106,27 @@ fi
 if ! jq -e . "$manifest" >/dev/null 2>&1; then
   echo "::error::${dir}/package.json is not valid JSON" >&2
   exit 2
+fi
+
+# --- tag -> version --------------------------------------------------------
+# Anchored on the trailing semver, so a tag-prefix such as "permissions/v"
+# is ignored rather than needing to be configured here.
+#
+# This runs after every exit-2 (malformed input) check above, deliberately:
+# exit 2 must always win over exit 1 when both are wrong, or a bad
+# package-dir gets reported as "package not publishable" instead of
+# "caller misconfigured the call".
+#
+# No control-character guard is needed on $tag itself: grep -oE extracts
+# only the matched substring and discards everything else, and the matched
+# charset [0-9A-Za-z.-] contains no '=', so no forged 'key=value' line can
+# reach stdout through it. Widening the charset (e.g. to allow '+build'
+# metadata) would need this guarantee re-checked.
+version=$(printf '%s' "$tag" \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$' || true)
+if [ -z "$version" ]; then
+  echo "::error::Could not parse semver version from tag '${tag}'" >&2
+  exit 1
 fi
 
 # --- manifest policy -----------------------------------------------------
