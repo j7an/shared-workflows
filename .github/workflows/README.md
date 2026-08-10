@@ -501,7 +501,7 @@ template.
 | `package-dir` | string | no | `"."` | Directory of the package to publish, relative to the repository root. Must stay inside the checkout: absolute paths, `..` segments and control characters are rejected. |
 | `pack-command` | string | no | `npm pack --json` | Command run from `package-dir`. Must produce exactly one tarball there and JSON metadata on stdout. |
 | `test-command` | string | no | `""` | Optional pre-pack command run in the caller checkout. |
-| `pack-contents-script` | string | no | `""` | Optional script run as `sh <script> pack.json` after `npm pack --json`. |
+| `pack-contents-script` | string | no | `""` | Optional script run as `sh <script> <metadata-path>` after packing; `<metadata-path>` is `pack.json` for a root package, `<package-dir>/pack.json` otherwise. |
 | `verify-command` | string | no | `""` | Optional post-registry verification command run with `PACKAGE` and `VERSION` in the environment. |
 
 If `npm pack` depends on installed dependencies, generated files, or lifecycle
@@ -535,10 +535,10 @@ need `id-token: write`.
 
 ### pnpm workspaces
 
-`npm pack` cannot resolve the `workspace:` or `catalog:` protocols. It seals
-them into the tarball unchanged and exits successfully, producing a package
-that installs for nobody. `pnpm pack` rewrites both to registry-resolvable
-versions, so pnpm callers should:
+`npm pack` does not resolve the `workspace:` or `catalog:` protocols: in
+practice it seals them into the tarball unchanged and exits successfully,
+producing a package that installs for nobody. `pnpm pack` rewrites both to
+registry-resolvable versions, so pnpm callers should:
 
 - pin `packageManager` in the repository root manifest;
 - run a frozen install before packing, in `test-command`;
@@ -553,10 +553,12 @@ fails if the packed name or version is not what was requested — a `prepack` or
 local-path or workspace protocol. `devDependencies` are not checked, since
 consumers never install them.
 
-The guard matches a protocol prefix. It rejects the `workspace:`, `catalog:`,
-`link:`, `portal:`, `patch:`, `file:` and `git+file:` classes; it does not
-certify that a surviving specifier resolves. A malformed but allowed-prefix
-specifier such as `npm:` will pass this check and fail at install time.
+The guard matches a protocol prefix against a default-deny allowlist: anything
+outside npm's registry-resolvable protocol set is rejected, including the
+`workspace:`, `catalog:`, `link:`, `portal:`, `patch:`, `file:` and
+`git+file:` classes. It does not certify that a surviving specifier resolves.
+A malformed but allowed-prefix specifier such as `npm:` will pass this check
+and fail at install time.
 
 ### Caller setup
 
@@ -642,9 +644,9 @@ jobs:
       pack-command: pnpm pack --json
 ```
 
-The workspace package's manifest also needs a `repository.directory` field, so
-its `repository.url` matches the GitHub repository while still identifying
-which workspace it publishes:
+The workspace package's manifest should also carry a `repository.directory`
+field, so its `repository.url` matches the GitHub repository while still
+identifying which workspace it publishes:
 
 ```json
 {

@@ -118,10 +118,22 @@ normalize_ws() {
   section="$(publish_npm_section)"
   assert_contains "$section" 'package-dir: packages/permissions'
   assert_contains "$section" 'pack-command: pnpm pack --json'
-  # Every caller example must carry its own permissions block; an example
-  # missing id-token fails at publish time with an opaque OIDC error.
-  count=$(printf '%s\n' "$section" | grep -c 'id-token: write')
-  [ "$count" -ge 2 ]
+  # Scoped to the monorepo example itself, not the whole publish-npm section:
+  # an unscoped count stays >=2 (the "Caller setup" permissions block and the
+  # "Scope" prose sentence) even if this example's own permissions block is
+  # deleted outright, so it would never catch a missing id-token here.
+  example="$(printf '%s\n' "$section" | awk '/^### Example caller: monorepo package$/{f=1} f')"
+  count=$(printf '%s\n' "$example" | grep -c 'id-token: write')
+  [ "$count" -ge 1 ]
+}
+
+@test "README inputs table documents the pack-contents-script metadata path" {
+  section="$(publish_npm_section)"
+  row="$(printf '%s\n' "$section" | grep '^| `pack-contents-script`')"
+  [ -n "$row" ]
+  assert_contains "$row" '<package-dir>/pack.json'
+  assert_contains "$row" 'for a root package'
+  assert_contains "$row" 'after packing'
 }
 
 @test "README publish-npm prose lines stay wrapped" {
