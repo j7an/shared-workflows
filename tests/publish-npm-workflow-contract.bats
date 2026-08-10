@@ -161,6 +161,11 @@ run_blocks() {
   ! printf '%s\n' "$job" \
     | grep -E '^[[:space:]]*corepack enable' \
     | grep -qE '(enable[[:space:]]*$|[[:space:]]npm([[:space:]]|$)|--all)' || return 1
+  # A failing corepack must not take down an npm-only caller's release, so the
+  # enable carries its own fallback rather than relying on the step's `-e`.
+  printf '%s\n' "$job" \
+    | grep -E '^[[:space:]]*corepack enable' \
+    | grep -qF '||'
 }
 
 @test "pack failures surface the packer's real error keys" {
@@ -258,7 +263,7 @@ run_blocks() {
   assert_contains "$(input_block pack-command)" 'default: "npm pack --json"'
 }
 
-@test "preflight runs before the caller test command" {
+@test "preflight runs before the caller test command and before packing" {
   pre="$(step_line 'Resolve package directory and preflight')"
   tst="$(step_line 'Run caller test command')"
   pck="$(step_line 'Pack once and stage the tarball')"

@@ -127,6 +127,39 @@ tarball_for() {
   [ -z "$output" ]
 }
 
+@test "bare relative and absolute paths are rejected as local paths" {
+  run --separate-stderr "$SCRIPT" "$(tarball_for bare-path-dep)" "$NAME" "$VERSION"
+  [ "$status" -eq 1 ]
+  # npm-package-arg resolves each of these to a local directory with no
+  # protocol prefix, so '../core' means exactly what 'file:../core' means.
+  [[ "$stderr" == *"dependencies.@probe/core"* ]] || return 1
+  [[ "$stderr" == *"dependencies.sib"* ]] || return 1
+  [[ "$stderr" == *"optionalDependencies.home"* ]] || return 1
+  [[ "$stderr" == *"peerDependencies.abs"* ]] || return 1
+  [[ "$stderr" == *"local path cannot be published"* ]] || return 1
+  [[ "$stderr" == *"4 unpublishable"* ]] || return 1
+  [ -z "$output" ]
+}
+
+@test "a leading space does not let a specifier slip past the protocol anchor" {
+  run --separate-stderr "$SCRIPT" "$(tarball_for leading-space-workspace)" "$NAME" "$VERSION"
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *"dependencies.@probe/core"* ]] || return 1
+  [[ "$stderr" == *"pnpm pack --json"* ]] || return 1
+  [[ "$stderr" == *"1 unpublishable"* ]] || return 1
+  [ -z "$output" ]
+}
+
+@test "a bare range, a dist-tag and '*' survive the local-path fallback" {
+  # The regression the local-path fallback could plausibly introduce: a
+  # colon-less specifier that is NOT a path must still reach `continue`.
+  tgz="$(tarball_for clean)"
+  run --separate-stderr "$SCRIPT" "$tgz" "$NAME" "$VERSION"
+  [ "$status" -eq 0 ]
+  [ "$output" = "${tgz} is ${NAME}@${VERSION} with no unpublishable dependency specifiers." ]
+  [ -z "$stderr" ]
+}
+
 @test "devDependencies are ignored" {
   tgz="$(tarball_for dev-only)"
   run --separate-stderr "$SCRIPT" "$tgz" "$NAME" "$VERSION"

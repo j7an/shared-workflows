@@ -254,8 +254,8 @@ jobs:
           # field pins pnpm - which would break existing npm-packing callers.
           # Tolerant of a missing corepack so npm-only callers never regress.
           if command -v corepack >/dev/null 2>&1; then
-            corepack enable pnpm yarn
-            echo "corepack shims enabled for pnpm and yarn"
+            corepack enable pnpm yarn || echo "::warning::corepack enable failed; pnpm/yarn shims not installed"
+            echo "corepack shim setup attempted for pnpm and yarn"
           else
             echo "::warning::corepack unavailable; pnpm/yarn shims not installed"
           fi
@@ -318,7 +318,10 @@ jobs:
           # Recursive descent handles all three metadata shapes without
           # branching: npm's array, npm 12's name-keyed object, pnpm's flat
           # object. An empty result means the metadata is unusable.
-          EXPECTED_TARBALL=$(jq -r '.. | .filename? // empty' "$PACK_JSON" 2>/dev/null | head -n1)
+          # `|| true` so the diagnostic below survives: on malformed metadata
+          # jq exits non-zero, which would abort this step silently under
+          # `set -e` with pipefail on, printing nothing at all.
+          EXPECTED_TARBALL=$(jq -r '.. | .filename? // empty' "$PACK_JSON" 2>/dev/null | head -n1 || true)
           if [ -z "$EXPECTED_TARBALL" ]; then
             echo "::error::pack metadata carries no tarball filename; cannot prove which artifact this run produced"
             exit 1
@@ -374,10 +377,15 @@ jobs:
           #      cannot be undone - only superseded.
           #
           #   2. Dependency protocol class. Rejection works by allowlist: the accepted
-          #      set is npm's registry-resolution contract, verified against npm's own
+          #      set is npm's non-local resolution protocols - the registry, the git-host
+          #      shortcuts and remote tarballs - verified against npm's own
           #      npm-package-arg parser, while the rejected set is package-manager
           #      workspace sugar that grows over time. A newly invented protocol
           #      therefore fails loudly here instead of publishing silently.
+          #
+          # `private` is deliberately NOT re-checked here even though a prepack script
+          # could set it after preflight rejected it: `npm publish` refuses a private
+          # package outright, so that path already fails closed one job later.
           #
           # SCOPE OF THE SECOND CHECK. It matches a protocol PREFIX. It does not
           # validate the rest of the specifier, so a malformed value carrying an allowed
@@ -453,13 +461,24 @@ jobs:
               continue
             fi
 
+            # Trim leading whitespace so ' workspace:^' cannot slip past the anchor.
+            spec="${spec#"${spec%%[![:space:]]*}"}"
+
             # Anchored at the start so 'github:u/r#semver:^1.0.0' yields 'github:',
             # never 'semver:'. Plain ranges, tags and '*' carry no colon at all.
             proto=$(printf '%s' "$spec" \
               | grep -oiE '^[a-z][a-z0-9+.-]*:' \
               | tr '[:upper:]' '[:lower:]' || true)
             if [ -z "$proto" ]; then
-              continue
+              # npm-package-arg resolves a leading '.', '/' or '~/' to a local directory
+              # with no protocol prefix, so '../core' means exactly 'file:../core'.
+              # The 'C:' Windows-drive form npa also accepts is already caught above as
+              # an unknown protocol. The tilde is backslash-escaped because a case
+              # pattern is tilde-expanded: a bare ~/* would match $HOME, not '~/'.
+              case "$spec" in
+                .*|/*|\~/*) proto="file:" ;;
+                *) continue ;;
+              esac
             fi
 
             case "$proto" in

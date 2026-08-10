@@ -11,10 +11,15 @@
 #      cannot be undone - only superseded.
 #
 #   2. Dependency protocol class. Rejection works by allowlist: the accepted
-#      set is npm's registry-resolution contract, verified against npm's own
+#      set is npm's non-local resolution protocols - the registry, the git-host
+#      shortcuts and remote tarballs - verified against npm's own
 #      npm-package-arg parser, while the rejected set is package-manager
 #      workspace sugar that grows over time. A newly invented protocol
 #      therefore fails loudly here instead of publishing silently.
+#
+# `private` is deliberately NOT re-checked here even though a prepack script
+# could set it after preflight rejected it: `npm publish` refuses a private
+# package outright, so that path already fails closed one job later.
 #
 # SCOPE OF THE SECOND CHECK. It matches a protocol PREFIX. It does not
 # validate the rest of the specifier, so a malformed value carrying an allowed
@@ -90,13 +95,24 @@ while IFS="$tab" read -r field name spec; do
     continue
   fi
 
+  # Trim leading whitespace so ' workspace:^' cannot slip past the anchor.
+  spec="${spec#"${spec%%[![:space:]]*}"}"
+
   # Anchored at the start so 'github:u/r#semver:^1.0.0' yields 'github:',
   # never 'semver:'. Plain ranges, tags and '*' carry no colon at all.
   proto=$(printf '%s' "$spec" \
     | grep -oiE '^[a-z][a-z0-9+.-]*:' \
     | tr '[:upper:]' '[:lower:]' || true)
   if [ -z "$proto" ]; then
-    continue
+    # npm-package-arg resolves a leading '.', '/' or '~/' to a local directory
+    # with no protocol prefix, so '../core' means exactly 'file:../core'.
+    # The 'C:' Windows-drive form npa also accepts is already caught above as
+    # an unknown protocol. The tilde is backslash-escaped because a case
+    # pattern is tilde-expanded: a bare ~/* would match $HOME, not '~/'.
+    case "$spec" in
+      .*|/*|\~/*) proto="file:" ;;
+      *) continue ;;
+    esac
   fi
 
   case "$proto" in
