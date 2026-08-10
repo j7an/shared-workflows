@@ -24,6 +24,10 @@ input_block() {
   workflow_inputs_block | sed -n "/^      ${input}:$/,/^      [a-zA-Z0-9_-]*:$/p"
 }
 
+step_line() {
+  grep -n "^      - name: $1\$" "$YAML" | head -n1 | cut -d: -f1
+}
+
 assert_contains() {
   local text="$1"
   local expected="$2"
@@ -79,11 +83,13 @@ run_blocks() {
   assert_contains "$job" 'merge-base --is-ancestor'
 }
 
-@test "build job gates tag version against package.json version" {
+@test "build job preflights the selected package before tests or packing" {
   job="$(build_job)"
-  assert_contains "$job" "require('./package.json').version"
+  assert_contains "$job" 'PACKAGE_DIR: ${{ inputs.package-dir }}'
+  assert_contains "$job" 'PACKAGE_NAME: ${{ inputs.package-name }}'
+  assert_contains "$job" 'npm_package_preflight "$PACKAGE_DIR" "$PACKAGE_NAME" "$TAG"'
   assert_contains "$job" 'refusing to publish'
-  assert_contains "$job" 'version=$VERSION'
+  assert_lacks "$job" "require('./package.json').version"
 }
 
 @test "build job uses Node 24 and optional caller pre-pack hooks" {
@@ -157,4 +163,30 @@ run_blocks() {
   runs="$(run_blocks)"
   assert_contains "$runs" 'npm publish ./*.tgz'
   assert_lacks "$runs" '${{ inputs.'
+}
+
+@test "publish-npm.yml exposes package-dir and pack-command with safe defaults" {
+  inputs="$(workflow_inputs_block)"
+  assert_contains "$inputs" "package-dir:"
+  assert_contains "$inputs" "pack-command:"
+  assert_contains "$(input_block package-dir)" 'default: "."'
+  assert_contains "$(input_block pack-command)" 'default: "npm pack --json"'
+}
+
+@test "preflight runs before the caller test command" {
+  pre="$(step_line 'Resolve package directory and preflight')"
+  tst="$(step_line 'Run caller test command')"
+  [ -n "$pre" ]
+  [ -n "$tst" ]
+  [ "$pre" -lt "$tst" ]
+}
+
+@test "preflight logic is embedded inline, not fetched at runtime" {
+  grep -qF '# --- BEGIN inline:scripts/npm-package-preflight.sh ---' "$YAML"
+  grep -qF '# --- END inline:scripts/npm-package-preflight.sh ---' "$YAML"
+}
+
+@test "preflight is invoked exactly once" {
+  count=$(grep -cF 'npm_package_preflight "$PACKAGE_DIR"' "$YAML")
+  [ "$count" -eq 1 ]
 }
