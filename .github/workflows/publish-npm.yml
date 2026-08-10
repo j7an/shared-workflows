@@ -235,6 +235,8 @@ jobs:
           )
           # --- END inline:scripts/npm-package-preflight.sh ---
 
+          set -euo pipefail
+
           OUT="$RUNNER_TEMP/preflight.out"
           npm_package_preflight "$PACKAGE_DIR" "$PACKAGE_NAME" "$TAG" > "$OUT"
           cat "$OUT" >> "$GITHUB_OUTPUT"

@@ -90,6 +90,8 @@ run_blocks() {
   assert_contains "$job" 'npm_package_preflight "$PACKAGE_DIR" "$PACKAGE_NAME" "$TAG"'
   assert_contains "$job" 'refusing to publish'
   assert_lacks "$job" "require('./package.json').version"
+  assert_contains "$job" 'cat "$OUT" >> "$GITHUB_OUTPUT"'
+  assert_contains "$job" 'version: ${{ steps.pkg.outputs.version }}'
 }
 
 @test "build job uses Node 24 and optional caller pre-pack hooks" {
@@ -176,9 +178,12 @@ run_blocks() {
 @test "preflight runs before the caller test command" {
   pre="$(step_line 'Resolve package directory and preflight')"
   tst="$(step_line 'Run caller test command')"
+  pck="$(step_line 'Pack once and assert tarball contents')"
   [ -n "$pre" ]
   [ -n "$tst" ]
+  [ -n "$pck" ]
   [ "$pre" -lt "$tst" ]
+  [ "$pre" -lt "$pck" ]
 }
 
 @test "preflight logic is embedded inline, not fetched at runtime" {
@@ -187,6 +192,6 @@ run_blocks() {
 }
 
 @test "preflight is invoked exactly once" {
-  count=$(grep -cF 'npm_package_preflight "$PACKAGE_DIR"' "$YAML")
+  count=$(grep -oF 'npm_package_preflight "$PACKAGE_DIR"' "$YAML" | wc -l | tr -d ' ')
   [ "$count" -eq 1 ]
 }
