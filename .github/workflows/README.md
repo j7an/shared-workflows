@@ -554,11 +554,15 @@ local-path or workspace protocol. `devDependencies` are not checked, since
 consumers never install them.
 
 The guard matches a protocol prefix against a default-deny allowlist: anything
-outside npm's registry-resolvable protocol set is rejected, including the
-`workspace:`, `catalog:`, `link:`, `portal:`, `patch:`, `file:` and
-`git+file:` classes. It does not certify that a surviving specifier resolves.
-A malformed but allowed-prefix specifier such as `npm:` will pass this check
-and fail at install time.
+outside npm's non-local resolution protocols — `npm:`, the `git:` family,
+`http:`/`https:` tarballs and the `github:`, `gitlab:`, `bitbucket:` and
+`gist:` shortcuts — is rejected, including the `workspace:`, `catalog:`,
+`link:`, `portal:`, `patch:`, `file:` and `git+file:` classes. A specifier
+carrying no protocol at all but starting with `.`, `/` or `~/` is rejected
+too: npm reads `../core` as a local directory, exactly as it reads
+`file:../core`. It does not certify that a surviving specifier resolves. A
+malformed but allowed-prefix specifier such as `npm:` will pass this check and
+fail at install time.
 
 ### Caller setup
 
@@ -583,10 +587,11 @@ enforces that floor before publishing. Do not pass `--provenance` or set
 `NPM_CONFIG_PROVENANCE`. npm generates provenance automatically for a public
 package published from a public repository through trusted publishing.
 
-npm's trusted-publishing docs also require the manifest's `repository.url`
-field to exactly match the GitHub repository publishing it. For a monorepo
-package, set `repository.directory` to the package's `package-dir`, for
-example `packages/permissions`.
+Provenance generation requires the manifest's `repository.url` field to
+exactly match the GitHub repository publishing it, so the publish fails if it
+does not. For a monorepo package, `repository.directory` should also be set to
+the package's `package-dir`, for example `packages/permissions`; npm does not
+require it, but it is what identifies which workspace the package came from.
 
 ### Example caller
 
