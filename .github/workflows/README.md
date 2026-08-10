@@ -498,8 +498,10 @@ template.
 |---|---|---|---|---|
 | `tag` | string | yes | - | Semver tag to publish, such as `v1.2.3`. |
 | `package-name` | string | yes | - | npm package name used for registry verification. |
+| `package-dir` | string | no | `"."` | Directory of the package to publish, relative to the repository root. Must stay inside the checkout: absolute paths, `..` segments and control characters are rejected. |
+| `pack-command` | string | no | `npm pack --json` | Command run from `package-dir`. Must produce exactly one tarball there and JSON metadata on stdout. |
 | `test-command` | string | no | `""` | Optional pre-pack command run in the caller checkout. |
-| `pack-contents-script` | string | no | `""` | Optional script run as `sh <script> pack.json` after `npm pack --json`. |
+| `pack-contents-script` | string | no | `""` | Optional script run as `sh <script> <metadata-path>` after packing; `<metadata-path>` is `pack.json` for a root package, `<package-dir>/pack.json` otherwise. |
 | `verify-command` | string | no | `""` | Optional post-registry verification command run with `PACKAGE` and `VERSION` in the environment. |
 
 If `npm pack` depends on installed dependencies, generated files, or lifecycle
@@ -507,6 +509,60 @@ scripts such as `prepare` or `prepack`, include the required setup in
 `test-command`, for example `npm ci && npm test && npm run build`. The reusable
 workflow does not run `npm ci` by default because not every npm package uses a
 lockfile or a build step.
+
+### Working directories
+
+`test-command` runs from the repository root, so a monorepo caller can run a
+workspace-wide install and a filtered test run in one command.
+`pack-contents-script` is repository-root-relative, is invoked from the
+repository root, and receives a repository-root-relative metadata path as its
+first argument — `pack.json` for a root package, `<package-dir>/pack.json`
+otherwise. Read it from `$1` rather than hardcoding it.
+
+`pack-command` runs from `package-dir`, exactly once. Pack metadata is written
+outside the checkout and copied back only after the tarball is sealed, so it
+cannot be packed into a package that does not declare a `files` allowlist.
+
+### Scope
+
+This workflow publishes one package per invocation. A repository with several
+independently versioned packages calls it once per package, and each package
+needs its own `tag-release.yml` `tag-prefix`, such as `permissions/v`, so the
+tags never collide. Configure a trusted publisher separately for every npm
+package, using the actual calling workflow filename, the `npm` environment and
+the `npm publish` allowed action. Both the caller and this reusable workflow
+need `id-token: write`.
+
+### pnpm workspaces
+
+`npm pack` does not resolve the `workspace:` or `catalog:` protocols: in
+practice it seals them into the tarball unchanged and exits successfully,
+producing a package that installs for nobody. `pnpm pack` rewrites both to
+registry-resolvable versions, so pnpm callers should:
+
+- pin `packageManager` in the repository root manifest;
+- run a frozen install before packing, in `test-command`;
+- set `pack-command: pnpm pack --json`.
+
+### What the pre-upload guard checks
+
+Before uploading, the workflow reads the sealed manifest out of the tarball and
+fails if the packed name or version is not what was requested — a `prepack` or
+`prepare` script can rewrite `package.json` after the initial check — or if any
+`dependencies`, `optionalDependencies` or `peerDependencies` entry uses a
+local-path or workspace protocol. `devDependencies` are not checked, since
+consumers never install them.
+
+The guard matches a protocol prefix against a default-deny allowlist: anything
+outside npm's non-local resolution protocols — `npm:`, the `git:` family,
+`http:`/`https:` tarballs and the `github:`, `gitlab:`, `bitbucket:` and
+`gist:` shortcuts — is rejected, including the `workspace:`, `catalog:`,
+`link:`, `portal:`, `patch:`, `file:` and `git+file:` classes. A specifier
+carrying no protocol at all but starting with `.`, `/` or `~/` is rejected
+too: npm reads `../core` as a local directory, exactly as it reads
+`file:../core`. It does not certify that a surviving specifier resolves. A
+malformed but allowed-prefix specifier such as `npm:` will pass this check and
+fail at install time.
 
 ### Caller setup
 
@@ -530,6 +586,12 @@ npm trusted publishing requires npm CLI `>= 11.5.1`; the reusable workflow
 enforces that floor before publishing. Do not pass `--provenance` or set
 `NPM_CONFIG_PROVENANCE`. npm generates provenance automatically for a public
 package published from a public repository through trusted publishing.
+
+Provenance generation requires the manifest's `repository.url` field to
+exactly match the GitHub repository publishing it, so the publish fails if it
+does not. For a monorepo package, `repository.directory` should also be set to
+the package's `package-dir`, for example `packages/permissions`; npm does not
+require it, but it is what identifies which workspace the package came from.
 
 ### Example caller
 
@@ -561,6 +623,45 @@ jobs:
 For packages without a CLI or install smoke test, omit `verify-command`. The
 workflow still verifies that `npm view <package>@<version> version` returns
 success before creating the GitHub Release.
+
+### Example caller: monorepo package
+
+```yaml
+name: Publish npm
+
+on:
+  push:
+    tags:
+      - "permissions/v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    uses: j7an/shared-workflows/.github/workflows/publish-npm.yml@v4
+    with:
+      tag: ${{ github.ref_name }}
+      package-name: "@pi-kit/permissions"
+      package-dir: packages/permissions
+      test-command: pnpm install --frozen-lockfile && pnpm test
+      pack-command: pnpm pack --json
+```
+
+The workspace package's manifest should also carry a `repository.directory`
+field, so its `repository.url` matches the GitHub repository while still
+identifying which workspace it publishes:
+
+```json
+{
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/j7an/pi-kit.git",
+    "directory": "packages/permissions"
+  }
+}
+```
 
 ## `publish-pypi.yml`
 

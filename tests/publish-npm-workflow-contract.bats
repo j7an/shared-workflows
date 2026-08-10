@@ -24,6 +24,10 @@ input_block() {
   workflow_inputs_block | sed -n "/^      ${input}:$/,/^      [a-zA-Z0-9_-]*:$/p"
 }
 
+step_line() {
+  grep -n "^      - name: $1\$" "$YAML" | head -n1 | cut -d: -f1
+}
+
 assert_contains() {
   local text="$1"
   local expected="$2"
@@ -79,11 +83,15 @@ run_blocks() {
   assert_contains "$job" 'merge-base --is-ancestor'
 }
 
-@test "build job gates tag version against package.json version" {
+@test "build job preflights the selected package before tests or packing" {
   job="$(build_job)"
-  assert_contains "$job" "require('./package.json').version"
+  assert_contains "$job" 'PACKAGE_DIR: ${{ inputs.package-dir }}'
+  assert_contains "$job" 'PACKAGE_NAME: ${{ inputs.package-name }}'
+  assert_contains "$job" 'npm_package_preflight "$PACKAGE_DIR" "$PACKAGE_NAME" "$TAG"'
   assert_contains "$job" 'refusing to publish'
-  assert_contains "$job" 'version=$VERSION'
+  assert_lacks "$job" "require('./package.json').version"
+  assert_contains "$job" 'cat "$OUT" >> "$GITHUB_OUTPUT"'
+  assert_contains "$job" 'version: ${{ steps.pkg.outputs.version }}'
 }
 
 @test "build job uses Node 24 and optional caller pre-pack hooks" {
@@ -92,15 +100,103 @@ run_blocks() {
   assert_contains "$job" 'TEST_COMMAND: ${{ inputs.test-command }}'
   assert_contains "$job" 'if [ -n "$TEST_COMMAND" ]; then'
   assert_contains "$job" 'PACK_CONTENTS_SCRIPT: ${{ inputs.pack-contents-script }}'
-  assert_contains "$job" 'sh "$PACK_CONTENTS_SCRIPT" pack.json'
+  assert_contains "$job" 'sh "$PACK_CONTENTS_SCRIPT" "$PACK_JSON_REL"'
 }
 
-@test "build job packs once and uploads npm-dist tarball artifact" {
+@test "build job packs once from the selected directory and stages the tarball" {
   job="$(build_job)"
-  assert_contains "$job" 'npm pack --json > pack.json'
+  assert_contains "$job" 'PACKAGE_DIR: ${{ steps.pkg.outputs.dir }}'
+  assert_contains "$job" 'PACK_COMMAND: ${{ inputs.pack-command }}'
+  assert_contains "$job" 'PACK_JSON="$RUNNER_TEMP/pack.json"'
+  assert_contains "$job" 'STAGE="$RUNNER_TEMP/dist"'
+  assert_contains "$job" 'Expected exactly one tarball'
   assert_contains "$job" "name: npm-dist"
-  assert_contains "$job" 'path: "*.tgz"'
+  assert_contains "$job" 'path: ${{ runner.temp }}/dist/*.tgz'
   assert_contains "$job" 'if-no-files-found: error'
+  assert_lacks "$job" 'npm pack --json > pack.json'
+  assert_lacks "$job" 'path: "*.tgz"'
+}
+
+@test "the pack command is invoked exactly once" {
+  count=$(grep -oF 'sh -c "$PACK_COMMAND"' "$YAML" | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ]
+}
+
+@test "the guard is invoked exactly once" {
+  count=$(grep -oF 'assert_packed_manifest "$RUNNER_TEMP/dist"' "$YAML" | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ]
+}
+
+@test "the guard receives the requested name and version" {
+  job="$(build_job)"
+  assert_contains "$job" 'PACKAGE_NAME: ${{ inputs.package-name }}'
+  assert_contains "$job" 'VERSION: ${{ steps.pkg.outputs.version }}'
+  assert_contains "$job" 'assert_packed_manifest "$RUNNER_TEMP/dist"/*.tgz "$PACKAGE_NAME" "$VERSION"'
+}
+
+@test "pack metadata is written outside the workspace" {
+  job="$(build_job)"
+  assert_contains "$job" 'PACK_JSON="$RUNNER_TEMP/pack.json"'
+  assert_lacks "$job" '> pack.json'
+}
+
+@test "the staged tarball is bound to the pack metadata filename" {
+  job="$(build_job)"
+  assert_contains "$job" 'EXPECTED_TARBALL'
+  assert_contains "$job" 'if [ "$FOUND_BASE" != "$EXPECTED_TARBALL" ]; then'
+  assert_contains "$job" 'refusing to publish a stale tarball'
+  # The echo alone would not stop the publish; the refusal must exit non-zero.
+  printf '%s\n' "$job" \
+    | grep -A1 'refusing to publish a stale tarball' \
+    | grep -qE '^[[:space:]]*exit 1$'
+}
+
+@test "corepack enables only pnpm and yarn, never the npm shim" {
+  job="$(build_job)"
+  assert_contains "$job" 'corepack enable pnpm yarn'
+  # Bare `corepack enable`, `--all`, and any explicit `npm` argument all install
+  # the npm shim, which hard-errors in a repo pinning packageManager: pnpm@...
+  # Only real command lines are considered, so the explanatory comment above the
+  # command (which names npm in prose) cannot satisfy or defeat this check.
+  ! printf '%s\n' "$job" \
+    | grep -E '^[[:space:]]*corepack enable' \
+    | grep -qE '(enable[[:space:]]*$|[[:space:]]npm([[:space:]]|$)|--all)' || return 1
+  # A failing corepack must not take down an npm-only caller's release, so the
+  # enable carries its own fallback rather than relying on the step's `-e`.
+  printf '%s\n' "$job" \
+    | grep -E '^[[:space:]]*corepack enable' \
+    | grep -qF '||'
+}
+
+@test "pack failures surface the packer's real error keys" {
+  job="$(build_job)"
+  # npm's envelope is {"error":{"code","summary","detail"}} - there is no
+  # "message" key, so pinning it alone would certify a dead branch.
+  assert_contains "$job" '[.error.summary, .error.detail, .error.message]'
+  assert_lacks "$job" '.error.message // empty'
+  assert_lacks "$job" '.error.message // "unknown"'
+  assert_contains "$job" 'has("error")'
+  # Safety net: unrecognized envelopes are dumped, never swallowed.
+  assert_contains "$job" 'sed '"'"'s/^/::error::/'"'"' "$PACK_JSON"'
+}
+
+@test "the packed manifest is asserted before upload" {
+  asrt="$(step_line 'Assert packed manifest is the requested package')"
+  upld="$(step_line 'Upload tarball artifact')"
+  [ -n "$asrt" ]
+  [ -n "$upld" ]
+  [ "$asrt" -lt "$upld" ]
+  grep -qF '# --- BEGIN inline:scripts/assert-packed-manifest.sh ---' "$YAML"
+  grep -qF '# --- END inline:scripts/assert-packed-manifest.sh ---' "$YAML"
+}
+
+@test "publish and github-release jobs stay artifact-driven" {
+  pub="$(publish_job)"
+  rel="$(github_release_job)"
+  assert_contains "$pub" 'npm publish ./*.tgz'
+  assert_contains "$rel" 'gh release upload "$TAG" ./*.tgz --clobber'
+  assert_lacks "$pub" 'package-dir'
+  assert_lacks "$rel" 'package-dir'
 }
 
 @test "publish job declares OIDC permission and npm environment" {
@@ -157,4 +253,42 @@ run_blocks() {
   runs="$(run_blocks)"
   assert_contains "$runs" 'npm publish ./*.tgz'
   assert_lacks "$runs" '${{ inputs.'
+}
+
+@test "publish-npm.yml exposes package-dir and pack-command with safe defaults" {
+  inputs="$(workflow_inputs_block)"
+  assert_contains "$inputs" "package-dir:"
+  assert_contains "$inputs" "pack-command:"
+  assert_contains "$(input_block package-dir)" 'default: "."'
+  assert_contains "$(input_block pack-command)" 'default: "npm pack --json"'
+}
+
+@test "preflight runs before the caller test command and before packing" {
+  pre="$(step_line 'Resolve package directory and preflight')"
+  tst="$(step_line 'Run caller test command')"
+  pck="$(step_line 'Pack once and stage the tarball')"
+  [ -n "$pre" ]
+  [ -n "$tst" ]
+  [ -n "$pck" ]
+  [ "$pre" -lt "$tst" ]
+  [ "$pre" -lt "$pck" ]
+}
+
+@test "preflight logic is embedded inline, not fetched at runtime" {
+  grep -qF '# --- BEGIN inline:scripts/npm-package-preflight.sh ---' "$YAML"
+  grep -qF '# --- END inline:scripts/npm-package-preflight.sh ---' "$YAML"
+}
+
+@test "preflight is invoked exactly once" {
+  count=$(grep -oF 'npm_package_preflight "$PACKAGE_DIR"' "$YAML" | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ]
+}
+
+@test "pack-contents-script description documents both root and monorepo metadata paths" {
+  desc="$(input_block pack-contents-script)"
+  # A root caller (package-dir omitted) still gets the literal 'pack.json';
+  # only a monorepo caller gets '<package-dir>/pack.json'. The description
+  # must name both, or a monorepo caller reads stale root-only docs.
+  assert_contains "$desc" 'pack.json for a root package'
+  assert_contains "$desc" '<package-dir>/pack.json otherwise'
 }

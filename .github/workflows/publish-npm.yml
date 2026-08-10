@@ -11,16 +11,26 @@ on:
         type: string
         required: true
         description: "npm package name used for post-publish registry verification"
+      package-dir:
+        type: string
+        required: false
+        default: "."
+        description: "Directory of the package to publish, relative to the repository root"
       test-command:
         type: string
         required: false
         default: ""
         description: "Optional caller repo command to run before packing"
+      pack-command:
+        type: string
+        required: false
+        default: "npm pack --json"
+        description: "Command run from package-dir; must produce one tarball and JSON metadata on stdout"
       pack-contents-script:
         type: string
         required: false
         default: ""
-        description: "Optional caller repo script run as 'sh <script> pack.json' after npm pack"
+        description: "Optional caller repo script run as 'sh <script> <metadata-path>' after packing; <metadata-path> is pack.json for a root package or <package-dir>/pack.json otherwise"
       verify-command:
         type: string
         required: false
@@ -38,7 +48,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ steps.pkg.outputs.version }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
@@ -63,27 +73,192 @@ jobs:
           fi
           echo "Tag ${TAG} (${TAG_SHA}) is an ancestor of main - proceeding."
 
+      - name: Resolve package directory and preflight
+        id: pkg
+        env:
+          PACKAGE_DIR: ${{ inputs.package-dir }}
+          PACKAGE_NAME: ${{ inputs.package-name }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          # --- BEGIN inline:scripts/npm-package-preflight.sh ---
+          npm_package_preflight() (
+          # npm-package-preflight.sh — select and validate the package publish-npm.yml
+          # is about to publish.
+          #
+          # Resolves <package-dir> inside GITHUB_WORKSPACE, refuses anything that could
+          # reach outside the checkout, and verifies the selected manifest is the
+          # package the caller named at the version the tag names. Runs before the
+          # caller's test command and before packing so a misconfigured call fails
+          # early and cheaply.
+          #
+          # This establishes identity at the SOURCE. That guarantee does not survive
+          # packing, because prepack/prepare lifecycle scripts may rewrite the manifest,
+          # so assert-packed-manifest.sh re-establishes it against the sealed artifact.
+          #
+          # Usage:
+          #   ./scripts/npm-package-preflight.sh <package-dir> <package-name> <tag>
+          #
+          # Stdout (success only), shaped for appending to $GITHUB_OUTPUT:
+          #   dir=<repository-relative directory>
+          #   version=<semver parsed from the tag>
+          #
+          # Exit codes:
+          #   0 — package selected and validated
+          #   1 — the selected package is not publishable: private, name mismatch,
+          #       version mismatch, or an unparseable tag. Caller MUST fail.
+          #   2 — the package-dir input is malformed or unsafe: control characters,
+          #       absolute, contains '..', escapes the checkout, missing, or has no
+          #       readable package.json.
+
+          set -euo pipefail
+
+          raw_dir="${1-}"
+          expected_name="${2-}"
+          tag="${3-}"
+
+          if [ -z "$expected_name" ] || [ -z "$tag" ]; then
+            echo "::error::usage: npm-package-preflight.sh <package-dir> <package-name> <tag>" >&2
+            exit 2
+          fi
+
+          workspace="${GITHUB_WORKSPACE:-$PWD}"
+
+          # --- reject control characters -------------------------------------------
+          # 'dir=' is appended to $GITHUB_OUTPUT, whose key=value form treats a raw
+          # newline as a record separator: an embedded newline would inject a second
+          # output key and could override 'version'. Reject the whole control range
+          # rather than only CR/LF - none of it is legitimate in a path here.
+          #
+          # This is robustness, not containment: a caller who can set package-dir can
+          # already set pack-command, which is arbitrary shell. It earns its place by
+          # turning a silently corrupted $GITHUB_OUTPUT into a named error.
+          case "$raw_dir" in
+            *[[:cntrl:]]*)
+              echo "::error::package-dir contains a control character; only printable characters are allowed" >&2
+              exit 2 ;;
+          esac
+
+          # --- package-dir shape ---------------------------------------------------
+          dir="$raw_dir"
+          if [ -z "$dir" ]; then
+            dir="."
+          fi
+          while [ "${#dir}" -gt 1 ] && [ "${dir%/}" != "$dir" ]; do
+            dir="${dir%/}"
+          done
+
+          case "$dir" in
+            /*)
+              echo "::error::package-dir '${raw_dir}' is absolute; it must be relative to the repository root" >&2
+              exit 2 ;;
+          esac
+
+          # Reject '..' as a shape, not as an outcome: 'a/../a' is refused even though
+          # it would resolve back inside the checkout.
+          case "/$dir/" in
+            */../*)
+              echo "::error::package-dir '${raw_dir}' contains a '..' path segment" >&2
+              exit 2 ;;
+          esac
+
+          # --- resolve and contain -------------------------------------------------
+          # 'cd && pwd -P' is the portable canonicalization: macOS realpath is BSD and
+          # lacks GNU long options. -P resolves symlinks, so a symlinked directory
+          # pointing outside the checkout is caught by the containment test below.
+          ws_real=$(cd "$workspace" 2>/dev/null && pwd -P) || {
+            echo "::error::GITHUB_WORKSPACE '${workspace}' is not a directory" >&2
+            exit 2
+          }
+          pkg_real=$(cd "$ws_real/$dir" 2>/dev/null && pwd -P) || {
+            echo "::error::package-dir '${raw_dir}' does not exist in the checkout" >&2
+            exit 2
+          }
+          case "$pkg_real" in
+            "$ws_real") ;;
+            "$ws_real"/*) ;;
+            *)
+              echo "::error::package-dir '${raw_dir}' resolves to '${pkg_real}', outside the checkout" >&2
+              exit 2 ;;
+          esac
+
+          manifest="$pkg_real/package.json"
+          if [ ! -f "$manifest" ]; then
+            echo "::error::package-dir '${raw_dir}' has no package.json" >&2
+            exit 2
+          fi
+          if ! jq -e . "$manifest" >/dev/null 2>&1; then
+            echo "::error::${dir}/package.json is not valid JSON" >&2
+            exit 2
+          fi
+
+          # --- tag -> version --------------------------------------------------------
+          # Anchored on the trailing semver, so a tag-prefix such as "permissions/v"
+          # is ignored rather than needing to be configured here.
+          #
+          # This runs after every exit-2 (malformed input) check above, deliberately:
+          # exit 2 must always win over exit 1 when both are wrong, or a bad
+          # package-dir gets reported as "package not publishable" instead of
+          # "caller misconfigured the call".
+          #
+          # No control-character guard is needed on $tag itself: grep -oE extracts
+          # only the matched substring and discards everything else, and the matched
+          # charset [0-9A-Za-z.-] contains no '=', so no forged 'key=value' line can
+          # reach stdout through it. Widening the charset (e.g. to allow '+build'
+          # metadata) would need this guarantee re-checked.
+          version=$(printf '%s' "$tag" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$' || true)
+          if [ -z "$version" ]; then
+            echo "::error::Could not parse semver version from tag '${tag}'" >&2
+            exit 1
+          fi
+
+          # --- manifest policy -----------------------------------------------------
+          if [ "$(jq -r '.private // false' "$manifest")" = "true" ]; then
+            echo "::error::${dir}/package.json is marked private:true and cannot be published" >&2
+            exit 1
+          fi
+
+          actual_name=$(jq -r '.name // ""' "$manifest")
+          if [ "$actual_name" != "$expected_name" ]; then
+            echo "::error::${dir}/package.json name '${actual_name}' does not match package-name input '${expected_name}'" >&2
+            exit 1
+          fi
+
+          actual_version=$(jq -r '.version // ""' "$manifest")
+          if [ "$actual_version" != "$version" ]; then
+            echo "::error::Tag version ${version} != ${dir}/package.json version ${actual_version} - refusing to publish" >&2
+            exit 1
+          fi
+
+          printf 'dir=%s\n' "$dir"
+          printf 'version=%s\n' "$version"
+          )
+          # --- END inline:scripts/npm-package-preflight.sh ---
+
+          set -euo pipefail
+
+          OUT="$RUNNER_TEMP/preflight.out"
+          npm_package_preflight "$PACKAGE_DIR" "$PACKAGE_NAME" "$TAG" > "$OUT"
+          cat "$OUT" >> "$GITHUB_OUTPUT"
+          cat "$OUT"
+
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
 
-      - name: Verify tag version matches package.json
-        id: version
-        env:
-          TAG: ${{ inputs.tag }}
+      - name: Enable corepack package manager shims
         run: |
-          VERSION=$(printf '%s' "$TAG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$' || true)
-          if [ -z "$VERSION" ]; then
-            echo "::error::Could not parse semver version from tag '$TAG'"
-            exit 1
+          # Deliberately NOT bare `corepack enable`: that also shims npm, and
+          # corepack's npm shim hard-errors in a repo whose packageManager
+          # field pins pnpm - which would break existing npm-packing callers.
+          # Tolerant of a missing corepack so npm-only callers never regress.
+          if command -v corepack >/dev/null 2>&1; then
+            corepack enable pnpm yarn || echo "::warning::corepack enable failed; pnpm/yarn shims not installed"
+            echo "corepack shim setup attempted for pnpm and yarn"
+          else
+            echo "::warning::corepack unavailable; pnpm/yarn shims not installed"
           fi
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          if [ "$VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Tag version ${VERSION} != package.json version ${PKG_VERSION} - refusing to publish"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Run caller test command
         env:
@@ -95,27 +270,257 @@ jobs:
             echo "No caller test command configured; skipping."
           fi
 
-      - name: Pack once and assert tarball contents
+      - name: Pack once and stage the tarball
         env:
+          PACKAGE_DIR: ${{ steps.pkg.outputs.dir }}
+          PACK_COMMAND: ${{ inputs.pack-command }}
           PACK_CONTENTS_SCRIPT: ${{ inputs.pack-contents-script }}
         run: |
-          npm pack --json > pack.json
-          if [ -n "$PACK_CONTENTS_SCRIPT" ]; then
-            sh "$PACK_CONTENTS_SCRIPT" pack.json
-          fi
-          TARBALL_COUNT=$(find . -maxdepth 1 -type f -name '*.tgz' | wc -l | tr -d ' ')
-          if [ "$TARBALL_COUNT" != "1" ]; then
-            echo "::error::Expected exactly one npm tarball, found ${TARBALL_COUNT}"
-            find . -maxdepth 1 -type f -name '*.tgz' -print
+          PACK_JSON="$RUNNER_TEMP/pack.json"
+          STAGE="$RUNNER_TEMP/dist"
+          mkdir -p "$STAGE"
+          rm -f "$STAGE"/*.tgz
+
+          # npm's failure envelope is {"error":{"code","summary","detail"}} -
+          # verified against npm 12.0.2, which exits 7 on a failing prepack and
+          # writes that object to stdout. There is NO "message" key; it is read
+          # last only as a fallback for a packer that uses it. When no key is
+          # recognized the raw metadata is dumped rather than swallowed, so a
+          # caller never has to reproduce the failure locally to see it.
+          report_pack_error() {
+            DETAIL=$(jq -r '[.error.summary, .error.detail, .error.message] | map(select(. != null and . != "")) | join(": ")' "$PACK_JSON" 2>/dev/null || true)
+            if [ -n "$DETAIL" ]; then
+              printf '%s\n' "$DETAIL" | sed 's/^/::error::/'
+            else
+              sed 's/^/::error::/' "$PACK_JSON" 2>/dev/null || true
+            fi
+          }
+
+          # Metadata is written outside GITHUB_WORKSPACE because the shell
+          # truncates a redirect target BEFORE the packer runs; a file created
+          # in the package directory at that moment is sealed into the tarball
+          # of any package without a `files` allowlist. It is copied back
+          # after packing, so the caller-visible path is unchanged.
+          if ! ( cd "$PACKAGE_DIR" && sh -c "$PACK_COMMAND" ) > "$PACK_JSON"; then
+            echo "::error::pack command failed in ${PACKAGE_DIR}: ${PACK_COMMAND}"
+            report_pack_error
             exit 1
           fi
-          ls -lh ./*.tgz
+
+          # Reachable when the caller's pack-command is a pipeline, where the
+          # exit status is the last element's and a packer error is masked.
+          if jq -e 'type == "object" and has("error")' "$PACK_JSON" >/dev/null 2>&1; then
+            echo "::error::pack command reported an error"
+            report_pack_error
+            exit 1
+          fi
+
+          # Recursive descent handles all three metadata shapes without
+          # branching: npm's array, npm 12's name-keyed object, pnpm's flat
+          # object. An empty result means the metadata is unusable.
+          # `|| true` so the diagnostic below survives: on malformed metadata
+          # jq exits non-zero, which would abort this step silently under
+          # `set -e` with pipefail on, printing nothing at all.
+          EXPECTED_TARBALL=$(jq -r '.. | .filename? // empty' "$PACK_JSON" 2>/dev/null | head -n1 || true)
+          if [ -z "$EXPECTED_TARBALL" ]; then
+            echo "::error::pack metadata carries no tarball filename; cannot prove which artifact this run produced"
+            exit 1
+          fi
+
+          # Byte-identical to the historical argument for root-package callers.
+          if [ "$PACKAGE_DIR" = "." ]; then
+            PACK_JSON_REL="pack.json"
+          else
+            PACK_JSON_REL="$PACKAGE_DIR/pack.json"
+          fi
+          cp "$PACK_JSON" "$PACK_JSON_REL"
+
+          if [ -n "$PACK_CONTENTS_SCRIPT" ]; then
+            sh "$PACK_CONTENTS_SCRIPT" "$PACK_JSON_REL"
+          fi
+
+          TARBALL_COUNT=$(find "$PACKAGE_DIR" -maxdepth 1 -type f -name '*.tgz' | wc -l | tr -d ' ')
+          if [ "$TARBALL_COUNT" != "1" ]; then
+            echo "::error::Expected exactly one tarball in ${PACKAGE_DIR}, found ${TARBALL_COUNT}"
+            find "$PACKAGE_DIR" -maxdepth 1 -type f -name '*.tgz' -print
+            exit 1
+          fi
+
+          # A count of one is not proof of provenance: a stale .tgz left by the
+          # caller's test-command would satisfy it.
+          FOUND=$(find "$PACKAGE_DIR" -maxdepth 1 -type f -name '*.tgz')
+          FOUND_BASE=$(basename "$FOUND")
+          if [ "$FOUND_BASE" != "$EXPECTED_TARBALL" ]; then
+            echo "::error::Staged tarball ${FOUND_BASE} is not the artifact this pack produced (${EXPECTED_TARBALL}); refusing to publish a stale tarball"
+            exit 1
+          fi
+
+          mv "$FOUND" "$STAGE/"
+          ls -lh "$STAGE"/*.tgz
+
+      - name: Assert packed manifest is the requested package
+        env:
+          PACKAGE_NAME: ${{ inputs.package-name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          # --- BEGIN inline:scripts/assert-packed-manifest.sh ---
+          assert_packed_manifest() (
+          # assert-packed-manifest.sh — verify a packed tarball is safe to publish.
+          #
+          # Reads package/package.json out of the SEALED tarball rather than the working
+          # tree, and checks two things:
+          #
+          #   1. Identity. The sealed name and version must match what the workflow was
+          #      asked to publish. Preflight already checked the on-disk manifest, but
+          #      prepack/prepare lifecycle scripts run between then and now and may
+          #      rewrite it. npm versions are immutable, so publishing the wrong package
+          #      cannot be undone - only superseded.
+          #
+          #   2. Dependency protocol class. Rejection works by allowlist: the accepted
+          #      set is npm's non-local resolution protocols - the registry, the git-host
+          #      shortcuts and remote tarballs - verified against npm's own
+          #      npm-package-arg parser, while the rejected set is package-manager
+          #      workspace sugar that grows over time. A newly invented protocol
+          #      therefore fails loudly here instead of publishing silently.
+          #
+          # `private` is deliberately NOT re-checked here even though a prepack script
+          # could set it after preflight rejected it: `npm publish` refuses a private
+          # package outright, so that path already fails closed one job later.
+          #
+          # SCOPE OF THE SECOND CHECK. It matches a protocol PREFIX. It does not
+          # validate the rest of the specifier, so a malformed value carrying an allowed
+          # prefix passes - 'npm:', 'npm:@scope' and 'https:' all throw in
+          # npm-package-arg but pass here. The promise is therefore narrow: this guard
+          # rejects local-path and workspace-protocol dependency classes. It does not
+          # certify that a surviving specifier resolves. Malformed specifiers of that
+          # kind break the publisher's own install long before reaching this point; the
+          # failure this guard exists to prevent is a WELL-FORMED workspace: specifier
+          # that packs and publishes green.
+          #
+          # Usage:
+          #   ./scripts/assert-packed-manifest.sh <tarball-path> <expected-name> <expected-version>
+          #
+          # Exit codes:
+          #   0 — identity confirmed and no disallowed specifier
+          #   1 — identity mismatch, or one or more disallowed specifiers (all listed)
+          #   2 — the tarball is unreadable or has no package/package.json
+
+          set -euo pipefail
+
+          tarball="${1-}"
+          expected_name="${2-}"
+          expected_version="${3-}"
+
+          if [ -z "$expected_name" ] || [ -z "$expected_version" ]; then
+            echo "::error::usage: assert-packed-manifest.sh <tarball-path> <expected-name> <expected-version>" >&2
+            exit 2
+          fi
+          if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
+            echo "::error::assert-packed-manifest.sh: tarball '${tarball}' not found" >&2
+            exit 2
+          fi
+
+          manifest=$(tar -xzOf "$tarball" package/package.json 2>/dev/null || true)
+          if [ -z "$manifest" ]; then
+            echo "::error::${tarball} contains no package/package.json" >&2
+            exit 2
+          fi
+          if ! printf '%s' "$manifest" | jq -e . >/dev/null 2>&1; then
+            echo "::error::${tarball} package/package.json is not valid JSON" >&2
+            exit 2
+          fi
+
+          # --- identity ------------------------------------------------------------
+          sealed_name=$(printf '%s' "$manifest" | jq -r '.name // ""')
+          sealed_version=$(printf '%s' "$manifest" | jq -r '.version // ""')
+
+          if [ "$sealed_name" != "$expected_name" ]; then
+            echo "::error::Sealed manifest name '${sealed_name}' does not match the requested package '${expected_name}'. A prepack or prepare script may have rewritten package.json after preflight - refusing to publish" >&2
+            exit 1
+          fi
+          if [ "$sealed_version" != "$expected_version" ]; then
+            echo "::error::Sealed manifest version '${sealed_version}' does not match the requested version '${expected_version}' - refusing to publish" >&2
+            exit 1
+          fi
+
+          # --- dependency protocol class -------------------------------------------
+          # field <TAB> name <TAB> specifier, for the three fields a consumer installs.
+          # devDependencies are deliberately absent: they are never installed from a
+          # published package, so a workspace: there is harmless.
+          rows=$(printf '%s' "$manifest" | jq -r '
+            ["dependencies","optionalDependencies","peerDependencies"][] as $f
+            | (.[$f] // {}) | to_entries[]
+            | [$f, .key, (.value | tostring)] | @tsv
+          ')
+
+          violations=0
+          tab=$(printf '\t')
+
+          while IFS="$tab" read -r field name spec; do
+            if [ -z "$field" ]; then
+              continue
+            fi
+
+            # Trim leading whitespace so ' workspace:^' cannot slip past the anchor.
+            spec="${spec#"${spec%%[![:space:]]*}"}"
+
+            # Anchored at the start so 'github:u/r#semver:^1.0.0' yields 'github:',
+            # never 'semver:'. Plain ranges, tags and '*' carry no colon at all.
+            proto=$(printf '%s' "$spec" \
+              | grep -oiE '^[a-z][a-z0-9+.-]*:' \
+              | tr '[:upper:]' '[:lower:]' || true)
+            if [ -z "$proto" ]; then
+              # npm-package-arg resolves a leading '.', '/' or '~/' to a local directory
+              # with no protocol prefix, so '../core' means exactly 'file:../core'.
+              # The 'C:' Windows-drive form npa also accepts is already caught above as
+              # an unknown protocol. The tilde is backslash-escaped because a case
+              # pattern is tilde-expanded: a bare ~/* would match $HOME, not '~/'.
+              case "$spec" in
+                .*|/*|\~/*) proto="file:" ;;
+                *) continue ;;
+              esac
+            fi
+
+            case "$proto" in
+              npm:|git:|git+ssh:|git+http:|git+https:|http:|https:|github:|gitlab:|bitbucket:|gist:)
+                continue ;;
+            esac
+
+            violations=$((violations + 1))
+            case "$proto" in
+              workspace:)
+                hint='set pack-command to "pnpm pack --json" and complete a frozen install before packing' ;;
+              catalog:)
+                hint='set pack-command to "pnpm pack --json" so pnpm resolves the catalog entry' ;;
+              link:|portal:|patch:|file:|git+file:)
+                hint='a local path cannot be published; depend on a registry version instead' ;;
+              *)
+                hint='unrecognized dependency protocol; if it is registry-resolvable, please open an issue' ;;
+            esac
+            printf '::error::%s.%s uses unpublishable specifier %s - %s\n' \
+              "$field" "$name" "$spec" "$hint" >&2
+          done <<EOF
+          $rows
+          EOF
+
+          if [ "$violations" -gt 0 ]; then
+            echo "::error::${tarball} sealed ${violations} unpublishable dependency specifier(s)" >&2
+            exit 1
+          fi
+
+          echo "${tarball} is ${sealed_name}@${sealed_version} with no unpublishable dependency specifiers."
+          )
+          # --- END inline:scripts/assert-packed-manifest.sh ---
+
+          set -euo pipefail
+
+          assert_packed_manifest "$RUNNER_TEMP/dist"/*.tgz "$PACKAGE_NAME" "$VERSION"
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-dist
-          path: "*.tgz"
+          path: ${{ runner.temp }}/dist/*.tgz
           if-no-files-found: error
           retention-days: 7
 
