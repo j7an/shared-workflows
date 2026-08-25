@@ -45,6 +45,14 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 5
+    groups:
+      all-actions:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -57,6 +65,9 @@ updates:
       npm-minor-patch:
         update-types: ["minor", "patch"]
 ```
+
+The `all-actions` group combines routine minor and patch version updates into
+one pull request. Major and security update handling remains unchanged.
 
 See [Dependabot cool-down docs](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown--) for per-severity and per-ecosystem overrides.
 
