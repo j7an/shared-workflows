@@ -5,6 +5,7 @@ on:
     paths:
       - 'scripts/**'
       - 'tests/**'
+      - '.github/dependabot.yml'
       - '.github/workflows/**'
 
 permissions:
