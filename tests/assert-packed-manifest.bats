@@ -154,9 +154,10 @@ tarball_for() {
   run --separate-stderr "$SCRIPT" "$(tarball_for leading-control-paths)" "$NAME" "$VERSION"
   [ "$status" -eq 1 ]
   [[ "$stderr" == *"dependencies.tab-core"* ]] || return 1
+  [[ "$stderr" == *"dependencies.cr-core"* ]] || return 1
   [[ "$stderr" == *"optionalDependencies.newline-core"* ]] || return 1
   [[ "$stderr" == *"local path cannot be published"* ]] || return 1
-  [[ "$stderr" == *"2 unpublishable"* ]] || return 1
+  [[ "$stderr" == *"3 unpublishable"* ]] || return 1
   [ -z "$output" ]
 }
 

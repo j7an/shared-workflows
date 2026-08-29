@@ -95,7 +95,7 @@ while IFS="$tab" read -r field name spec; do
     continue
   fi
 
-  # Trim literal whitespace and only leading jq @tsv tab/newline escapes.
+  # Trim literal whitespace and only leading jq @tsv tab/newline/CR escapes.
   # This preserves field framing and keeps any later escape sequence inside a
   # single diagnostic line. A literal '\\t' or '\\n' from the manifest arrives
   # doubled and does not match these one-backslash patterns.
@@ -104,6 +104,7 @@ while IFS="$tab" read -r field name spec; do
     case "$spec" in
       \\t*) spec="${spec#\\t}" ;;
       \\n*) spec="${spec#\\n}" ;;
+      \\r*) spec="${spec#\\r}" ;;
       *) break ;;
     esac
   done

@@ -2,7 +2,8 @@
   "name": "@probe/clean",
   "version": "1.0.0",
   "dependencies": {
-    "tab-core": "\t../tab-core"
+    "tab-core": "\t../tab-core",
+    "cr-core": "\r../cr-core"
   },
   "optionalDependencies": {
     "newline-core": "\n../newline-core"
