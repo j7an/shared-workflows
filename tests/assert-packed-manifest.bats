@@ -160,6 +160,15 @@ tarball_for() {
   [ -z "$output" ]
 }
 
+@test "an embedded jq-escaped newline stays inside one diagnostic" {
+  run --separate-stderr "$SCRIPT" "$(tarball_for embedded-control-protocol)" "$NAME" "$VERSION"
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *'workspace:\n::warning::forged'* ]] || return 1
+  [[ "$stderr" != *$'\n::warning::forged'* ]] || return 1
+  [[ "$stderr" == *"1 unpublishable"* ]] || return 1
+  [ -z "$output" ]
+}
+
 @test "a bare range, a dist-tag and '*' survive the local-path fallback" {
   # The regression the local-path fallback could plausibly introduce: a
   # colon-less specifier that is NOT a path must still reach `continue`.

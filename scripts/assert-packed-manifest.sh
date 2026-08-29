@@ -95,14 +95,18 @@ while IFS="$tab" read -r field name spec; do
     continue
   fi
 
-  # jq @tsv protects row and field framing by escaping control characters.
-  # Decode after `read` so a real leading tab or newline is whitespace here,
-  # while an original literal backslash sequence remains literal after this
-  # single decoding pass.
-  printf -v spec '%b' "$spec"
-
-  # Trim leading whitespace so ' workspace:^' cannot slip past the anchor.
-  spec="${spec#"${spec%%[![:space:]]*}"}"
+  # Trim literal whitespace and only leading jq @tsv tab/newline escapes.
+  # This preserves field framing and keeps any later escape sequence inside a
+  # single diagnostic line. A literal '\\t' or '\\n' from the manifest arrives
+  # doubled and does not match these one-backslash patterns.
+  while :; do
+    spec="${spec#"${spec%%[![:space:]]*}"}"
+    case "$spec" in
+      \\t*) spec="${spec#\\t}" ;;
+      \\n*) spec="${spec#\\n}" ;;
+      *) break ;;
+    esac
+  done
 
   # Anchored at the start so 'github:u/r#semver:^1.0.0' yields 'github:',
   # never 'semver:'. Plain ranges, tags and '*' carry no colon at all.
