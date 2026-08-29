@@ -1,0 +1,7 @@
+{
+  "name": "@probe/clean",
+  "version": "1.0.0",
+  "dependencies": {
+    "forged": "workspace:\n::warning::forged"
+  }
+}

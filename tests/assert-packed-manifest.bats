@@ -150,6 +150,26 @@ tarball_for() {
   [ -z "$output" ]
 }
 
+@test "jq-escaped leading control whitespace does not hide bare local paths" {
+  run --separate-stderr "$SCRIPT" "$(tarball_for leading-control-paths)" "$NAME" "$VERSION"
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *"dependencies.tab-core"* ]] || return 1
+  [[ "$stderr" == *"dependencies.cr-core"* ]] || return 1
+  [[ "$stderr" == *"optionalDependencies.newline-core"* ]] || return 1
+  [[ "$stderr" == *"local path cannot be published"* ]] || return 1
+  [[ "$stderr" == *"3 unpublishable"* ]] || return 1
+  [ -z "$output" ]
+}
+
+@test "an embedded jq-escaped newline stays inside one diagnostic" {
+  run --separate-stderr "$SCRIPT" "$(tarball_for embedded-control-protocol)" "$NAME" "$VERSION"
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *'workspace:\n::warning::forged'* ]] || return 1
+  [[ "$stderr" != *$'\n::warning::forged'* ]] || return 1
+  [[ "$stderr" == *"1 unpublishable"* ]] || return 1
+  [ -z "$output" ]
+}
+
 @test "a bare range, a dist-tag and '*' survive the local-path fallback" {
   # The regression the local-path fallback could plausibly introduce: a
   # colon-less specifier that is NOT a path must still reach `continue`.
