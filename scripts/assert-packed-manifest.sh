@@ -95,6 +95,12 @@ while IFS="$tab" read -r field name spec; do
     continue
   fi
 
+  # jq @tsv protects row and field framing by escaping control characters.
+  # Decode after `read` so a real leading tab or newline is whitespace here,
+  # while an original literal backslash sequence remains literal after this
+  # single decoding pass.
+  printf -v spec '%b' "$spec"
+
   # Trim leading whitespace so ' workspace:^' cannot slip past the anchor.
   spec="${spec#"${spec%%[![:space:]]*}"}"
 

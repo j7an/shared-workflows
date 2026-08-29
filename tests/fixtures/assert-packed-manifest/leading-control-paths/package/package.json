@@ -1,0 +1,13 @@
+{
+  "name": "@probe/clean",
+  "version": "1.0.0",
+  "dependencies": {
+    "tab-core": "\t../tab-core"
+  },
+  "optionalDependencies": {
+    "newline-core": "\n../newline-core"
+  },
+  "peerDependencies": {
+    "literal-backslash": "\\t../literal-core"
+  }
+}
