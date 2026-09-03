@@ -157,7 +157,7 @@ job_permissions_block() {
   assert_lacks "$(job_block release)" "Compute release plan"
 }
 
-@test "created-tag output is written only after the ref POST" {
+@test "created-tag output is written after the ref POST and propagated unchanged" {
   body=$(step_block "Create and push tag")
   post_line=$(printf '%s\n' "$body" | grep -nF \
     'gh api -X POST "repos/${REPO}/git/refs"' | cut -d: -f1)
@@ -166,6 +166,10 @@ job_permissions_block() {
   [ -n "$post_line" ]
   [ -n "$output_line" ]
   [ "$output_line" -gt "$post_line" ]
+  assert_contains "$(job_block release)" \
+    'tag: ${{ steps.create-tag.outputs.tag }}'
+  assert_contains "$(on_block)" \
+    'value: ${{ jobs.release.outputs.tag }}'
 }
 
 @test "final live-main equality check precedes tag creation" {

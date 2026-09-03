@@ -1,10 +1,14 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   REPO_ROOT="$BATS_TEST_DIRNAME/.."
   SCRIPT="$REPO_ROOT/scripts/revalidate-tag-release-plan.sh"
+  YAML="$REPO_ROOT/.github/workflows/tag-release.yml"
   TEST_REPO="$BATS_TEST_TMPDIR/repo"
   FAKE_BIN="$BATS_TEST_TMPDIR/bin"
+  WORKFLOW_RUN_SCRIPT="$BATS_TEST_TMPDIR/revalidate-workflow-step.sh"
   mkdir -p "$TEST_REPO" "$FAKE_BIN"
 
   git -C "$TEST_REPO" init -q
@@ -46,7 +50,10 @@ setup() {
 #!/bin/sh
 case "$*" in
   *"/git/ref/heads/main"*)
-    [ "${FAKE_GH_FAIL_MAIN:-false}" != true ] || exit 1
+    if [ "${FAKE_GH_FAIL_MAIN:-false}" = true ]; then
+      printf 'fake gh raw main authentication diagnostic\n' >&2
+      exit 1
+    fi
     if [ "${FAKE_GH_BAD_MAIN:-false}" = true ]; then
       printf '{"bad":true}\n'
     else
@@ -54,7 +61,10 @@ case "$*" in
     fi
     ;;
   *"/git/matching-refs/tags/"*)
-    [ "${FAKE_GH_FAIL_TAGS:-false}" != true ] || exit 1
+    if [ "${FAKE_GH_FAIL_TAGS:-false}" = true ]; then
+      printf 'fake gh raw proposed-tag transport diagnostic\n' >&2
+      exit 1
+    fi
     printf '%s\n' "$FAKE_NEXT_TAG_JSON"
     ;;
   *)
@@ -65,12 +75,36 @@ SH
   chmod +x "$FAKE_BIN/gh"
 }
 
+extract_revalidation_body() {
+  awk '
+    $0 == "      - name: Revalidate approved release plan" { in_step=1; next }
+    in_step && /^      - / { exit }
+    in_step && /^        run: \|$/ { in_run=1; next }
+    in_run && $0 != "" && !/^          / { exit }
+    in_run { sub(/^          /, ""); print }
+  ' "$YAML"
+}
+
+run_workflow_validator() {
+  extract_revalidation_body >"$WORKFLOW_RUN_SCRIPT"
+  run --separate-stderr bash -c 'cd "$1" && bash "$2"' \
+    _ "$TEST_REPO" "$WORKFLOW_RUN_SCRIPT"
+}
+
 run_validator() {
   run --separate-stderr bash -c 'cd "$1" && "$2"' _ "$TEST_REPO" "$SCRIPT"
 }
 
 @test "accepts the exact approved main and tag snapshot" {
   run_validator
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"approved release plan is still current"* ]]
+}
+
+@test "workflow revalidation normalizes an explicitly empty tag prefix" {
+  export TAG_PREFIX=
+  run_workflow_validator
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   [[ "$stderr" == *"approved release plan is still current"* ]]
@@ -140,6 +174,7 @@ run_validator() {
   run_validator
   [ "$status" -eq 1 ]
   [[ "$stderr" == *"could not inspect live main"* ]]
+  [[ "$stderr" != *"fake gh raw main authentication diagnostic"* ]]
 }
 
 @test "fails closed on malformed main JSON" {
@@ -154,6 +189,7 @@ run_validator() {
   run_validator
   [ "$status" -eq 1 ]
   [[ "$stderr" == *"could not inspect proposed tag"* ]]
+  [[ "$stderr" != *"fake gh raw proposed-tag transport diagnostic"* ]]
 }
 
 @test "fails closed when the matching tag digest cannot be computed" {

@@ -282,6 +282,8 @@ jobs:
           PLANNED_TAG_SNAPSHOT_SHA256: ${{ needs.plan.outputs.tag_snapshot_sha256 }}
           PLANNED_NEXT_TAG: ${{ needs.plan.outputs.next_tag }}
         run: |
+          TAG_PREFIX="${TAG_PREFIX:-v}"
+
           # --- BEGIN inline:scripts/revalidate-tag-release-plan.sh ---
           revalidate_tag_release_plan() (
 
