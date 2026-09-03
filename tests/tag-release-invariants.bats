@@ -154,6 +154,28 @@ extract_step_body() {
   fi
 }
 
+@test "invariant: tag release checks final live main before creating its ref" {
+  body=$(extract_step_body "Create and push tag")
+  [ -n "$body" ]
+  target_line=$(printf '%s\n' "$body" | grep -nF \
+    '[ -z "${TAG_TARGET_SHA:-}" ]' | cut -d: -f1)
+  live_main_line=$(printf '%s\n' "$body" | grep -nF \
+    'LIVE_MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main"' | cut -d: -f1)
+  equality_line=$(printf '%s\n' "$body" | grep -nF \
+    '[ "$LIVE_MAIN_SHA" != "$TAG_TARGET_SHA" ]' | cut -d: -f1)
+  post_line=$(printf '%s\n' "$body" | grep -nF \
+    'gh api -X POST "repos/${REPO}/git/refs"' | cut -d: -f1)
+  [ -n "$target_line" ]
+  [ -n "$live_main_line" ]
+  [ -n "$equality_line" ]
+  [ -n "$post_line" ]
+  [ "$target_line" -lt "$live_main_line" ]
+  [ "$live_main_line" -lt "$equality_line" ]
+  [ "$equality_line" -lt "$post_line" ]
+  printf '%s' "$body" | grep -qF 'Could not verify live main immediately before tag creation'
+  printf '%s' "$body" | grep -qF 'Main changed before tag creation; expected ${TAG_TARGET_SHA}'
+}
+
 @test "invariant: tag-release target verification is report-only" {
   body=$(extract_step_body "Create and push tag")
   [ -n "$body" ]
