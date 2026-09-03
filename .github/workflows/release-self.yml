@@ -19,7 +19,7 @@ permissions: {}
 jobs:
   tag:
     permissions:
-      contents: write
+      contents: read
     uses: ./.github/workflows/tag-release.yml
     with:
       bump: ${{ inputs.bump }}

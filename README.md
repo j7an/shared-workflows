@@ -636,6 +636,12 @@ jobs:
 
 Releases are cut manually via the `release-self.yml` workflow dispatch. Merging a PR to `main` does **not** create a tag on its own. When a maintainer dispatches `release-self.yml` (with `bump: auto`), it scans Conventional Commits since the last tag, computes the next semver tag, and updates the floating `vX` / `vX.Y` tags to point at the new commit.
 
+Every bump mode now calculates before mutation. The read-only `Plan release`
+job displays the exact proposed tag and source, then
+`Approve and create vX.Y.Z` waits at the caller-owned `release` environment.
+Rejecting the deployment creates no tag; if `main` or matching tags change
+while approval is pending, dispatch a fresh run and review the new proposal.
+
 Release tags are created as lightweight refs that point directly at the target
 commit. When `tag-release.yml` creates a version-bump commit, that commit must
 verify before `main` advances. When no bump commit is created, target commit
@@ -742,6 +748,8 @@ permissions:
 
 jobs:
   tag:
+    permissions:
+      contents: read
     uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v4
     secrets:
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
@@ -774,6 +782,8 @@ permissions:
 
 jobs:
   tag:
+    permissions:
+      contents: read
     uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v4
     with:
       bump: ${{ inputs.bump }}

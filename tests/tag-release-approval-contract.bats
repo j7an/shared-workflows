@@ -175,3 +175,23 @@ job_permissions_block() {
   [ -n "$post_line" ]
   [ "$check_line" -lt "$post_line" ]
 }
+
+@test "self-release caller grants the tag job only contents read" {
+  block=$(awk '
+    /^  tag:$/ { flag=1; print; next }
+    flag && /^  [A-Za-z0-9_-]+:$/ { exit }
+    flag { print }
+  ' .github/workflows/release-self.yml)
+  assert_contains "$block" "permissions:"
+  assert_contains "$block" "contents: read"
+  assert_lacks "$block" "contents: write"
+}
+
+@test "release documentation explains proposal approval and stale rejection" {
+  docs=$(cat README.md .github/workflows/README.md)
+  assert_contains "$docs" "Plan release"
+  assert_contains "$docs" "Approve and create"
+  assert_contains "$docs" "fresh dispatch"
+  assert_contains "$docs" "contents: read"
+  assert_contains "$docs" "created tag"
+}
