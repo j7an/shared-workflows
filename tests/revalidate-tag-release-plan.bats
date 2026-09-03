@@ -10,6 +10,7 @@ setup() {
   git -C "$TEST_REPO" init -q
   git -C "$TEST_REPO" config user.name "Tag Plan Test"
   git -C "$TEST_REPO" config user.email "tag-plan@example.invalid"
+  git -C "$TEST_REPO" config commit.gpgSign false
   printf 'one\n' >"$TEST_REPO/file"
   git -C "$TEST_REPO" add file
   git -C "$TEST_REPO" commit -qm "fix: baseline"
