@@ -36,34 +36,43 @@ on:
     outputs:
       tag:
         description: "The semver tag that was created (e.g. v1.2.3)"
-        value: ${{ jobs.tag-release.outputs.tag }}
+        value: ${{ jobs.release.outputs.tag }}
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: tag-release
   cancel-in-progress: false
 
 jobs:
-  tag-release:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.compute.outputs.next_tag }}
-    # Gate secret access on a named environment so a malicious workflow edit
-    # can't reach RELEASE_BOT_PRIVATE_KEY without passing the environment's
-    # branch-policy check (main only). Pairs with the if: below as a
-    # GitHub-side enforcement of the same invariant.
-    environment: release
+  plan:
+    name: Plan release
     # Releases must originate from main's latest commit. workflow_dispatch
     # lets the operator pick any branch in the Actions UI, so we gate
     # explicitly instead of relying on trust.
     if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.compute.outputs.source_sha }}
+      first_release: ${{ steps.compute.outputs.first_release }}
+      latest_tag: ${{ steps.compute.outputs.latest_tag }}
+      latest_ref_sha: ${{ steps.compute.outputs.latest_ref_sha }}
+      latest_commit_sha: ${{ steps.compute.outputs.latest_commit_sha }}
+      tag_snapshot_sha256: ${{ steps.compute.outputs.tag_snapshot_sha256 }}
+      next_tag: ${{ steps.compute.outputs.next_tag }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
 
       - name: Preflight — verify Release Bot App credentials
         env:
@@ -85,23 +94,7 @@ jobs:
           fi
           echo "Release Bot App ID present: ${APP_ID}"
 
-      - name: Mint GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-          # Least privilege: read for checkout, write for Git Data API
-          # content/ref/tag operations (blobs, trees, commits, refs, tags).
-          permission-contents: write
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Compute release
+      - name: Compute release plan
         id: compute
         env:
           CHOICE: ${{ inputs.bump }}
@@ -200,11 +193,35 @@ jobs:
 
           NEXT_TAG="${PREFIX}${MAJOR}.${MINOR}.${PATCH}"
           echo "Next tag: $NEXT_TAG"
-          echo "next_tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
+
+          SOURCE_SHA="${GITHUB_SHA}"
+          if [ "$FIRST_RELEASE" = "true" ]; then
+            LATEST_OUTPUT=""
+            LATEST_REF_SHA=""
+            LATEST_COMMIT_SHA=""
+          else
+            LATEST_OUTPUT="$LATEST"
+            LATEST_REF_SHA=$(git rev-parse "refs/tags/$LATEST")
+            LATEST_COMMIT_SHA=$(git rev-parse "$LATEST^{commit}")
+          fi
+          TAG_SNAPSHOT_SHA256=$(
+            git for-each-ref \
+              --format='%(refname)%09%(objectname)' \
+              "refs/tags/${PREFIX}*.*.*" |
+              LC_ALL=C sort |
+              shasum -a 256 |
+              awk '{print $1}'
+          )
 
           # --- Write step summary ---
           {
             echo "### Release $NEXT_TAG ($CHOSEN bump)"
+            echo "**Source commit:** \`$SOURCE_SHA\`"
+            if [ "$FIRST_RELEASE" = "true" ]; then
+              echo "**Previous tag commit:** _none (first release)_"
+            else
+              echo "**Previous tag commit:** \`$LATEST_COMMIT_SHA\`"
+            fi
             echo ""
             echo "**Source:** \`$LATEST\` -> \`$NEXT_TAG\`"
             echo "**Input:** \`$CHOICE\` -> $CHOICE_NOTE"
@@ -219,10 +236,222 @@ jobs:
             git log --format='- %s (%h)' "$RANGE"
           } >> "$GITHUB_STEP_SUMMARY"
 
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "first_release=$FIRST_RELEASE"
+            echo "latest_tag=$LATEST_OUTPUT"
+            echo "latest_ref_sha=$LATEST_REF_SHA"
+            echo "latest_commit_sha=$LATEST_COMMIT_SHA"
+            echo "tag_snapshot_sha256=$TAG_SNAPSHOT_SHA256"
+            echo "next_tag=$NEXT_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Approve and create ${{ needs.plan.outputs.next_tag }}
+    needs: plan
+    # Gate secret access on a named environment so a malicious workflow edit
+    # can't reach RELEASE_BOT_PRIVATE_KEY without passing the environment's
+    # branch-policy check (main only).
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.create-tag.outputs.tag }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Revalidate approved release plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          PLANNED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
+          PLANNED_FIRST_RELEASE: ${{ needs.plan.outputs.first_release }}
+          PLANNED_LATEST_TAG: ${{ needs.plan.outputs.latest_tag }}
+          PLANNED_LATEST_REF_SHA: ${{ needs.plan.outputs.latest_ref_sha }}
+          PLANNED_LATEST_COMMIT_SHA: ${{ needs.plan.outputs.latest_commit_sha }}
+          PLANNED_TAG_SNAPSHOT_SHA256: ${{ needs.plan.outputs.tag_snapshot_sha256 }}
+          PLANNED_NEXT_TAG: ${{ needs.plan.outputs.next_tag }}
+        run: |
+          TAG_PREFIX="${TAG_PREFIX:-v}"
+
+          # --- BEGIN inline:scripts/revalidate-tag-release-plan.sh ---
+          revalidate_tag_release_plan() (
+
+          set -euo pipefail
+
+          die_input() {
+            printf '::error::revalidate tag-release plan: %s\n' "$1" >&2
+            exit 2
+          }
+
+          die_state() {
+            printf '::error::revalidate tag-release plan: %s\n' "$1" >&2
+            exit 1
+          }
+
+          require_value() {
+            eval "value=\${$1-}"
+            [ -n "$value" ] || die_input "$1 is required"
+          }
+
+          is_sha1() {
+            printf '%s' "$1" | grep -qE '^[0-9a-f]{40}$'
+          }
+
+          tag_snapshot_sha256() {
+            git for-each-ref \
+              --format='%(refname)%09%(objectname)' \
+              "refs/tags/${TAG_PREFIX}*.*.*" |
+              LC_ALL=C sort |
+              shasum -a 256 |
+              awk '{print $1}'
+          }
+
+          for name in \
+            GITHUB_REPOSITORY GH_TOKEN TAG_PREFIX PLANNED_SOURCE_SHA \
+            PLANNED_FIRST_RELEASE PLANNED_TAG_SNAPSHOT_SHA256 PLANNED_NEXT_TAG; do
+            require_value "$name"
+          done
+
+          printf '%s' "$GITHUB_REPOSITORY" |
+            grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' ||
+            die_input "GITHUB_REPOSITORY must be owner/repo"
+          printf '%s' "$TAG_PREFIX" | grep -qE '^[A-Za-z0-9._/-]+$' ||
+            die_input "TAG_PREFIX has an invalid shape"
+          is_sha1 "$PLANNED_SOURCE_SHA" ||
+            die_input "PLANNED_SOURCE_SHA is not a lowercase 40-character SHA"
+          printf '%s' "$PLANNED_TAG_SNAPSHOT_SHA256" |
+            grep -qE '^[0-9a-f]{64}$' ||
+            die_input "PLANNED_TAG_SNAPSHOT_SHA256 is not a lowercase SHA-256"
+
+          case "$PLANNED_FIRST_RELEASE" in
+            true|false) ;;
+            *) die_input "PLANNED_FIRST_RELEASE must be true or false" ;;
+          esac
+
+          version=${PLANNED_NEXT_TAG#"$TAG_PREFIX"}
+          [ "$version" != "$PLANNED_NEXT_TAG" ] &&
+            printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+            die_input "PLANNED_NEXT_TAG is not the selected prefix plus stable SemVer"
+
+          if [ "$PLANNED_FIRST_RELEASE" = true ]; then
+            [ -z "${PLANNED_LATEST_TAG-}" ] ||
+              die_input "PLANNED_LATEST_TAG must be empty for a first release"
+            [ -z "${PLANNED_LATEST_REF_SHA-}" ] ||
+              die_input "PLANNED_LATEST_REF_SHA must be empty for a first release"
+            [ -z "${PLANNED_LATEST_COMMIT_SHA-}" ] ||
+              die_input "PLANNED_LATEST_COMMIT_SHA must be empty for a first release"
+          else
+            require_value PLANNED_LATEST_TAG
+            require_value PLANNED_LATEST_REF_SHA
+            require_value PLANNED_LATEST_COMMIT_SHA
+            is_sha1 "$PLANNED_LATEST_REF_SHA" ||
+              die_input "PLANNED_LATEST_REF_SHA is not a lowercase 40-character SHA"
+            is_sha1 "$PLANNED_LATEST_COMMIT_SHA" ||
+              die_input "PLANNED_LATEST_COMMIT_SHA is not a lowercase 40-character SHA"
+          fi
+
+          head_sha=$(git rev-parse HEAD 2>/dev/null) ||
+            die_state "could not inspect checked-out source"
+          [ "$head_sha" = "$PLANNED_SOURCE_SHA" ] ||
+            die_state "checked-out source does not match the approved source"
+
+          if ! main_json=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" 2>/dev/null); then
+            die_state "could not inspect live main"
+          fi
+          if ! live_main=$(printf '%s\n' "$main_json" |
+            jq -er 'select(.object.type == "commit") | .object.sha |
+              select(type == "string")' 2>/dev/null); then
+            die_state "live main response was malformed"
+          fi
+          is_sha1 "$live_main" || die_state "live main response was malformed"
+          [ "$live_main" = "$PLANNED_SOURCE_SHA" ] ||
+            die_state "main changed after release planning"
+
+          if ! current_latest=$(git tag -l "${TAG_PREFIX}*.*.*" \
+            --sort=-version:refname 2>/dev/null | sed -n '1p'); then
+            die_state "could not inspect matching tags"
+          fi
+          if [ -z "$current_latest" ]; then
+            current_first_release=true
+            current_ref_sha=
+            current_commit_sha=
+          else
+            current_first_release=false
+            current_ref_sha=$(git rev-parse "refs/tags/$current_latest" 2>/dev/null) ||
+              die_state "could not inspect latest tag ref"
+            current_commit_sha=$(git rev-parse "$current_latest^{commit}" 2>/dev/null) ||
+              die_state "could not inspect latest tag target"
+          fi
+
+          [ "$current_first_release" = "$PLANNED_FIRST_RELEASE" ] ||
+            die_state "first-release state changed"
+          [ "$current_latest" = "${PLANNED_LATEST_TAG-}" ] ||
+            die_state "highest matching tag changed"
+          [ "$current_ref_sha" = "${PLANNED_LATEST_REF_SHA-}" ] ||
+            die_state "latest tag ref changed"
+          [ "$current_commit_sha" = "${PLANNED_LATEST_COMMIT_SHA-}" ] ||
+            die_state "latest tag target changed"
+
+          if ! current_digest=$(tag_snapshot_sha256 2>/dev/null); then
+            die_state "could not inspect matching tag set"
+          fi
+          [ "$current_digest" = "$PLANNED_TAG_SNAPSHOT_SHA256" ] ||
+            die_state "matching tag set changed"
+
+          if ! matches_json=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${PLANNED_NEXT_TAG}" \
+            2>/dev/null); then
+            die_state "could not inspect proposed tag"
+          fi
+          if ! exact_count=$(printf '%s\n' "$matches_json" |
+            jq -er --arg ref "refs/tags/$PLANNED_NEXT_TAG" \
+              'if type == "array" and
+                  all(.[];
+                    (.ref | type == "string") and
+                    (.object | type == "object") and
+                    (.object.type == "commit" or .object.type == "tag") and
+                    ((.object.sha | type) == "string") and
+                    (.object.sha | test("^[0-9a-f]{40}$")))
+               then
+                 [.[] | select(.ref == $ref)] | length
+               else error("not an array")
+               end' 2>/dev/null); then
+            die_state "proposed-tag response was malformed"
+          fi
+          [ "$exact_count" -eq 0 ] || die_state "proposed tag already exists"
+
+          printf 'revalidate tag-release plan: approved release plan is still current\n' >&2
+          )
+          # --- END inline:scripts/revalidate-tag-release-plan.sh ---
+          revalidate_tag_release_plan
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # Least privilege: read for checkout, write for Git Data API
+          # content/ref/tag operations (blobs, trees, commits, refs, tags).
+          permission-contents: write
+
       - name: Bump version files
         env:
-          NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
+          NEXT_TAG: ${{ needs.plan.outputs.next_tag }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
+          PLANNED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           PREFIX="${TAG_PREFIX:-v}"
@@ -426,11 +655,11 @@ jobs:
           case "$BUMP_EXIT" in
             0)
               # --- Git Data API rewrite (spec §3.1) ---
-              # BASE_SHA is the workflow's runtime view of the repo HEAD —
-              # the SHA actions/checkout checked out. Reading refs/heads/main
-              # fresh here would race with concurrent pushes (spec §2).
+              # BASE_SHA is the source commit captured by the approved plan.
+              # Reading refs/heads/main fresh here would race with concurrent
+              # pushes (spec §2).
               REPO="${GITHUB_REPOSITORY}"
-              BASE_SHA="${GITHUB_SHA}"
+              BASE_SHA="${PLANNED_SOURCE_SHA}"
 
               # Step 4 (spec): read parent tree SHA from BASE_SHA's commit.
               PARENT_TREE_SHA=$(gh api "repos/${REPO}/git/commits/${BASE_SHA}" --jq '.tree.sha')
@@ -503,7 +732,7 @@ jobs:
               # (different timestamp → different SHA), and this non-force PATCH
               # will 422 (non-fast-forward). Recover with a fresh
               # `workflow_dispatch` from main, using the SAME `bump` and
-              # `tag-prefix` inputs as the failed run. "Compute release"
+              # `tag-prefix` inputs as the failed run. The plan
               # derives the version from the last *tag* — still unchanged,
               # since the tag was never created — so a different `bump` (e.g.
               # `auto` in place of an explicit override) or `tag-prefix` would
@@ -530,14 +759,15 @@ jobs:
               ;;
             2)
               # No bump created. The commit to tag is exactly the commit that
-              # "Compute release" semver-analyzed — i.e. GITHUB_SHA. Reading
+              # approved plan semver-analyzed — i.e. the planned
+              # source SHA. Reading
               # live refs/heads/main here instead would race with concurrent
               # pushes (spec §2) and could tag a commit that was never
               # analyzed, publishing it under a bump computed from a different
-              # tree. GITHUB_SHA also covers rerun-after-partial-failure: a
-              # fresh dispatch resolves GITHUB_SHA to current main HEAD anyway.
-              echo "TAG_TARGET_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
-              RESULT="No changes — config absent, all up to date, or all entries skipped (tag will point at analyzed commit: ${GITHUB_SHA})"
+              # tree. PLANNED_SOURCE_SHA also covers rerun-after-partial-failure:
+              # a fresh dispatch resolves it to current main HEAD anyway.
+              echo "TAG_TARGET_SHA=${PLANNED_SOURCE_SHA}" >> "$GITHUB_ENV"
+              RESULT="No changes — config absent, all up to date, or all entries skipped (tag will point at analyzed commit: ${PLANNED_SOURCE_SHA})"
               ;;
             *)
               echo "::error::bump-version-files.sh exited with unexpected code $BUMP_EXIT"
@@ -562,13 +792,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create and push tag
+        id: create-tag
         env:
-          NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
+          NEXT_TAG: ${{ needs.plan.outputs.next_tag }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           # TAG_TARGET_SHA is set by the prior "Bump version files" step:
           #   - case 0: the new bump commit's SHA (returned by POST /git/commits)
-          #   - case 2: GITHUB_SHA — the semver-analyzed commit, no ref read
+          #   - case 2: PLANNED_SOURCE_SHA — the semver-analyzed commit, no ref read
           #            (spec §2 / review Finding 1)
           # Either way, NEVER from local checkout state (spec §2).
           REPO="${GITHUB_REPOSITORY}"
@@ -578,12 +809,23 @@ jobs:
             exit 1
           fi
 
+          if ! LIVE_MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" \
+            --jq 'select(.object.type == "commit") | .object.sha' 2>/dev/null); then
+            echo "::error::Could not verify live main immediately before tag creation"
+            exit 1
+          fi
+          if [ "$LIVE_MAIN_SHA" != "$TAG_TARGET_SHA" ]; then
+            echo "::error::Main changed before tag creation; expected ${TAG_TARGET_SHA}"
+            exit 1
+          fi
+
           # Create a lightweight tag ref directly to the target commit.
           # Do not create an annotated tag object; GitHub does not auto-sign
           # App-created tag objects under the release provenance model we need.
           gh api -X POST "repos/${REPO}/git/refs" \
             -f ref="refs/tags/${NEXT_TAG}" \
             -f sha="$TAG_TARGET_SHA"
+          echo "tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
 
           TARGET_VERIFIED=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.verified' 2>/dev/null || printf 'unknown')
           TARGET_REASON=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.reason' 2>/dev/null || printf 'unavailable')

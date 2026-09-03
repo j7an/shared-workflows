@@ -6,8 +6,8 @@
 # Spec §2 invariant: the rewritten "Bump version files" and "Create and push
 # tag" steps must never depend on a post-checkout local-state read for
 # deciding what SHA to use as a commit parent, what SHA to update main to,
-# or what SHA to tag. The single load-bearing SHA value is $GITHUB_SHA,
-# captured once.
+# or what SHA to tag. The single load-bearing SHA value is the source SHA
+# captured by the approved plan.
 
 setup() {
   REPO_ROOT="$BATS_TEST_DIRNAME/.."
@@ -52,19 +52,23 @@ extract_step_body() {
   done
 }
 
-@test "invariant: 'Bump version files' step uses GITHUB_SHA as commit parent" {
+@test "invariant: 'Bump version files' step uses the planned source SHA as commit parent" {
   body=$(extract_step_body "Bump version files")
-  # After Phase B rewrite, BASE_SHA must be derived from GITHUB_SHA, not from
+  # After the plan/release split, BASE_SHA must come from the approved plan, not from
   # GET /git/ref/heads/main (which would race per spec §2). Skip this check
   # if the step still uses git push (Phase A only — pre-Phase-B baseline).
   if printf '%s' "$body" | grep -qF 'git push origin HEAD:main'; then
     skip "Phase A baseline — bump step still uses git push; check applies after Phase B"
   fi
-  # Assert the full load-bearing chain, not merely that GITHUB_SHA appears
+  # Assert the full load-bearing chain, not merely that the planned source appears
   # somewhere — a stray `echo "$GITHUB_SHA"` must NOT satisfy this test:
-  #   GITHUB_SHA  ->  BASE_SHA  ->  jq --arg parent  ->  commit payload
-  printf '%s' "$body" | grep -qF 'BASE_SHA="${GITHUB_SHA}"' || {
-    echo "VIOLATION: bump step does not bind BASE_SHA to GITHUB_SHA (spec §2 / §3.1 step 1)"
+  #   PLANNED_SOURCE_SHA  ->  BASE_SHA  ->  jq --arg parent  ->  commit payload
+  printf '%s' "$body" | grep -qF 'PLANNED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}' || {
+    echo "VIOLATION: bump step does not bind PLANNED_SOURCE_SHA to plan output"
+    false
+  }
+  printf '%s' "$body" | grep -qF 'BASE_SHA="${PLANNED_SOURCE_SHA}"' || {
+    echo "VIOLATION: bump step does not bind BASE_SHA to PLANNED_SOURCE_SHA (spec §2 / §3.1 step 1)"
     false
   }
   # `--` ends grep option parsing so the leading `--arg` is treated as a
@@ -148,6 +152,28 @@ extract_step_body() {
     echo "VIOLATION: Create and push tag still carries annotated tag object state"
     false
   fi
+}
+
+@test "invariant: tag release checks final live main before creating its ref" {
+  body=$(extract_step_body "Create and push tag")
+  [ -n "$body" ]
+  target_line=$(printf '%s\n' "$body" | grep -nF \
+    '[ -z "${TAG_TARGET_SHA:-}" ]' | cut -d: -f1)
+  live_main_line=$(printf '%s\n' "$body" | grep -nF \
+    'LIVE_MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main"' | cut -d: -f1)
+  equality_line=$(printf '%s\n' "$body" | grep -nF \
+    '[ "$LIVE_MAIN_SHA" != "$TAG_TARGET_SHA" ]' | cut -d: -f1)
+  post_line=$(printf '%s\n' "$body" | grep -nF \
+    'gh api -X POST "repos/${REPO}/git/refs"' | cut -d: -f1)
+  [ -n "$target_line" ]
+  [ -n "$live_main_line" ]
+  [ -n "$equality_line" ]
+  [ -n "$post_line" ]
+  [ "$target_line" -lt "$live_main_line" ]
+  [ "$live_main_line" -lt "$equality_line" ]
+  [ "$equality_line" -lt "$post_line" ]
+  printf '%s' "$body" | grep -qF 'Could not verify live main immediately before tag creation'
+  printf '%s' "$body" | grep -qF 'Main changed before tag creation; expected ${TAG_TARGET_SHA}'
 }
 
 @test "invariant: tag-release target verification is report-only" {

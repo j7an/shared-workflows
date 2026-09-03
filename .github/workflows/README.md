@@ -339,6 +339,25 @@ Computes the next semver tag from Conventional Commits since the last tag, optio
 |---|---|---|
 | `RELEASE_BOT_PRIVATE_KEY` | yes | GitHub App private key. App ID is read from `vars.RELEASE_BOT_APP_ID`. |
 
+### Preview and approval
+
+`Plan release` computes the exact proposed tag without a write token or access
+to the Release Bot private key. It shows the source SHA, previous tag, inferred
+and selected bump, reason, and included commits. The dependent
+`Approve and create vX.Y.Z` job uses the fixed caller-owned `release`
+environment, so every `auto`, `patch`, `minor`, and `major` release can be
+approved or rejected after its exact tag is visible.
+
+Approval binds to that source and matching-tag snapshot. If `main` or a
+matching tag changes while approval is pending, the job fails before minting
+the App token. Start a fresh dispatch; do not rerun the stale job.
+
+Rejected, cancelled, or expired proposals create no tag. The reusable
+workflow's `tag` output exposes only a successfully created tag and is set
+only after the exact lightweight tag ref is created successfully. The reusable
+workflow references `release`, but the caller remains responsible for
+configuring that environment's reviewers, deployment branches, and secrets.
+
 ### Monorepo example (two release streams)
 
 ```yaml
@@ -350,6 +369,8 @@ on:
 
 jobs:
   tag:
+    permissions:
+      contents: read
     uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v4
     with:
       bump: ${{ inputs.bump }}
@@ -367,6 +388,8 @@ on:
 
 jobs:
   tag:
+    permissions:
+      contents: read
     uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v4
     with:
       bump: ${{ inputs.bump }}
