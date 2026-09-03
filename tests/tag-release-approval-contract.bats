@@ -102,10 +102,13 @@ job_permissions_block() {
   done
 }
 
-@test "App credential appears only in the gated release job" {
+@test "App ID preflight runs during planning while private credentials remain gated" {
   plan=$(job_block plan)
   release=$(job_block release)
+  assert_contains "$plan" "- name: Preflight — verify Release Bot App credentials"
+  assert_contains "$plan" 'APP_ID: ${{ vars.RELEASE_BOT_APP_ID }}'
   assert_lacks "$plan" 'private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}'
+  assert_lacks "$release" "- name: Preflight — verify Release Bot App credentials"
   assert_contains "$release" 'private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}'
   assert_contains "$release" "permission-contents: write"
   assert_action_pin "$release" "actions/create-github-app-token"

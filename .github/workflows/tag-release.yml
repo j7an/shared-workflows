@@ -74,6 +74,26 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      - name: Preflight — verify Release Bot App credentials
+        env:
+          APP_ID: ${{ vars.RELEASE_BOT_APP_ID }}
+        run: |
+          if [ -z "${APP_ID}" ]; then
+            {
+              echo "### Release Bot App not configured"
+              echo ""
+              echo "\`vars.RELEASE_BOT_APP_ID\` is empty. Tag Release needs a GitHub App identity"
+              echo "to push tags so that \`release.yml\` fires (the default \`GITHUB_TOKEN\` is"
+              echo "suppressed by GitHub's recursion guard)."
+              echo ""
+              echo "See [README › Release Bot App setup](../../README.md#release-bot-app-setup)"
+              echo "for one-time provisioning steps."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Release Bot App not configured (see README#release-bot-app-setup)"
+            exit 1
+          fi
+          echo "Release Bot App ID present: ${APP_ID}"
+
       - name: Compute release plan
         id: compute
         env:
@@ -414,26 +434,6 @@ jobs:
           )
           # --- END inline:scripts/revalidate-tag-release-plan.sh ---
           revalidate_tag_release_plan
-
-      - name: Preflight — verify Release Bot App credentials
-        env:
-          APP_ID: ${{ vars.RELEASE_BOT_APP_ID }}
-        run: |
-          if [ -z "${APP_ID}" ]; then
-            {
-              echo "### Release Bot App not configured"
-              echo ""
-              echo "\`vars.RELEASE_BOT_APP_ID\` is empty. Tag Release needs a GitHub App identity"
-              echo "to push tags so that \`release.yml\` fires (the default \`GITHUB_TOKEN\` is"
-              echo "suppressed by GitHub's recursion guard)."
-              echo ""
-              echo "See [README › Release Bot App setup](../../README.md#release-bot-app-setup)"
-              echo "for one-time provisioning steps."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::Release Bot App not configured (see README#release-bot-app-setup)"
-            exit 1
-          fi
-          echo "Release Bot App ID present: ${APP_ID}"
 
       - name: Mint GitHub App token
         id: app-token
