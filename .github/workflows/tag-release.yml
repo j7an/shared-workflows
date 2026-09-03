@@ -36,72 +36,45 @@ on:
     outputs:
       tag:
         description: "The semver tag that was created (e.g. v1.2.3)"
-        value: ${{ jobs.tag-release.outputs.tag }}
+        value: ${{ jobs.release.outputs.tag }}
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: tag-release
   cancel-in-progress: false
 
 jobs:
-  tag-release:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.compute.outputs.next_tag }}
-    # Gate secret access on a named environment so a malicious workflow edit
-    # can't reach RELEASE_BOT_PRIVATE_KEY without passing the environment's
-    # branch-policy check (main only). Pairs with the if: below as a
-    # GitHub-side enforcement of the same invariant.
-    environment: release
+  plan:
+    name: Plan release
     # Releases must originate from main's latest commit. workflow_dispatch
     # lets the operator pick any branch in the Actions UI, so we gate
     # explicitly instead of relying on trust.
     if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.compute.outputs.source_sha }}
+      first_release: ${{ steps.compute.outputs.first_release }}
+      latest_tag: ${{ steps.compute.outputs.latest_tag }}
+      latest_ref_sha: ${{ steps.compute.outputs.latest_ref_sha }}
+      latest_commit_sha: ${{ steps.compute.outputs.latest_commit_sha }}
+      tag_snapshot_sha256: ${{ steps.compute.outputs.tag_snapshot_sha256 }}
+      next_tag: ${{ steps.compute.outputs.next_tag }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
 
-      - name: Preflight — verify Release Bot App credentials
-        env:
-          APP_ID: ${{ vars.RELEASE_BOT_APP_ID }}
-        run: |
-          if [ -z "${APP_ID}" ]; then
-            {
-              echo "### Release Bot App not configured"
-              echo ""
-              echo "\`vars.RELEASE_BOT_APP_ID\` is empty. Tag Release needs a GitHub App identity"
-              echo "to push tags so that \`release.yml\` fires (the default \`GITHUB_TOKEN\` is"
-              echo "suppressed by GitHub's recursion guard)."
-              echo ""
-              echo "See [README › Release Bot App setup](../../README.md#release-bot-app-setup)"
-              echo "for one-time provisioning steps."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::Release Bot App not configured (see README#release-bot-app-setup)"
-            exit 1
-          fi
-          echo "Release Bot App ID present: ${APP_ID}"
-
-      - name: Mint GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-          # Least privilege: read for checkout, write for Git Data API
-          # content/ref/tag operations (blobs, trees, commits, refs, tags).
-          permission-contents: write
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           fetch-tags: true
-          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
-      - name: Compute release
+      - name: Compute release plan
         id: compute
         env:
           CHOICE: ${{ inputs.bump }}
@@ -200,11 +173,35 @@ jobs:
 
           NEXT_TAG="${PREFIX}${MAJOR}.${MINOR}.${PATCH}"
           echo "Next tag: $NEXT_TAG"
-          echo "next_tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
+
+          SOURCE_SHA="${GITHUB_SHA}"
+          if [ "$FIRST_RELEASE" = "true" ]; then
+            LATEST_OUTPUT=""
+            LATEST_REF_SHA=""
+            LATEST_COMMIT_SHA=""
+          else
+            LATEST_OUTPUT="$LATEST"
+            LATEST_REF_SHA=$(git rev-parse "refs/tags/$LATEST")
+            LATEST_COMMIT_SHA=$(git rev-parse "$LATEST^{commit}")
+          fi
+          TAG_SNAPSHOT_SHA256=$(
+            git for-each-ref \
+              --format='%(refname)%09%(objectname)' \
+              "refs/tags/${PREFIX}*.*.*" |
+              LC_ALL=C sort |
+              shasum -a 256 |
+              awk '{print $1}'
+          )
 
           # --- Write step summary ---
           {
             echo "### Release $NEXT_TAG ($CHOSEN bump)"
+            echo "**Source commit:** \`$SOURCE_SHA\`"
+            if [ "$FIRST_RELEASE" = "true" ]; then
+              echo "**Previous tag commit:** _none (first release)_"
+            else
+              echo "**Previous tag commit:** \`$LATEST_COMMIT_SHA\`"
+            fi
             echo ""
             echo "**Source:** \`$LATEST\` -> \`$NEXT_TAG\`"
             echo "**Input:** \`$CHOICE\` -> $CHOICE_NOTE"
@@ -219,10 +216,75 @@ jobs:
             git log --format='- %s (%h)' "$RANGE"
           } >> "$GITHUB_STEP_SUMMARY"
 
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "first_release=$FIRST_RELEASE"
+            echo "latest_tag=$LATEST_OUTPUT"
+            echo "latest_ref_sha=$LATEST_REF_SHA"
+            echo "latest_commit_sha=$LATEST_COMMIT_SHA"
+            echo "tag_snapshot_sha256=$TAG_SNAPSHOT_SHA256"
+            echo "next_tag=$NEXT_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Approve and create ${{ needs.plan.outputs.next_tag }}
+    needs: plan
+    # Gate secret access on a named environment so a malicious workflow edit
+    # can't reach RELEASE_BOT_PRIVATE_KEY without passing the environment's
+    # branch-policy check (main only).
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.create-tag.outputs.tag }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Preflight — verify Release Bot App credentials
+        env:
+          APP_ID: ${{ vars.RELEASE_BOT_APP_ID }}
+        run: |
+          if [ -z "${APP_ID}" ]; then
+            {
+              echo "### Release Bot App not configured"
+              echo ""
+              echo "\`vars.RELEASE_BOT_APP_ID\` is empty. Tag Release needs a GitHub App identity"
+              echo "to push tags so that \`release.yml\` fires (the default \`GITHUB_TOKEN\` is"
+              echo "suppressed by GitHub's recursion guard)."
+              echo ""
+              echo "See [README › Release Bot App setup](../../README.md#release-bot-app-setup)"
+              echo "for one-time provisioning steps."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Release Bot App not configured (see README#release-bot-app-setup)"
+            exit 1
+          fi
+          echo "Release Bot App ID present: ${APP_ID}"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # Least privilege: read for checkout, write for Git Data API
+          # content/ref/tag operations (blobs, trees, commits, refs, tags).
+          permission-contents: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
       - name: Bump version files
         env:
-          NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
+          NEXT_TAG: ${{ needs.plan.outputs.next_tag }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
+          PLANNED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           PREFIX="${TAG_PREFIX:-v}"
@@ -426,11 +488,11 @@ jobs:
           case "$BUMP_EXIT" in
             0)
               # --- Git Data API rewrite (spec §3.1) ---
-              # BASE_SHA is the workflow's runtime view of the repo HEAD —
-              # the SHA actions/checkout checked out. Reading refs/heads/main
-              # fresh here would race with concurrent pushes (spec §2).
+              # BASE_SHA is the source commit captured by the approved plan.
+              # Reading refs/heads/main fresh here would race with concurrent
+              # pushes (spec §2).
               REPO="${GITHUB_REPOSITORY}"
-              BASE_SHA="${GITHUB_SHA}"
+              BASE_SHA="${PLANNED_SOURCE_SHA}"
 
               # Step 4 (spec): read parent tree SHA from BASE_SHA's commit.
               PARENT_TREE_SHA=$(gh api "repos/${REPO}/git/commits/${BASE_SHA}" --jq '.tree.sha')
@@ -503,7 +565,7 @@ jobs:
               # (different timestamp → different SHA), and this non-force PATCH
               # will 422 (non-fast-forward). Recover with a fresh
               # `workflow_dispatch` from main, using the SAME `bump` and
-              # `tag-prefix` inputs as the failed run. "Compute release"
+              # `tag-prefix` inputs as the failed run. The plan
               # derives the version from the last *tag* — still unchanged,
               # since the tag was never created — so a different `bump` (e.g.
               # `auto` in place of an explicit override) or `tag-prefix` would
@@ -530,14 +592,15 @@ jobs:
               ;;
             2)
               # No bump created. The commit to tag is exactly the commit that
-              # "Compute release" semver-analyzed — i.e. GITHUB_SHA. Reading
+              # approved plan semver-analyzed — i.e. the planned
+              # source SHA. Reading
               # live refs/heads/main here instead would race with concurrent
               # pushes (spec §2) and could tag a commit that was never
               # analyzed, publishing it under a bump computed from a different
-              # tree. GITHUB_SHA also covers rerun-after-partial-failure: a
-              # fresh dispatch resolves GITHUB_SHA to current main HEAD anyway.
-              echo "TAG_TARGET_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
-              RESULT="No changes — config absent, all up to date, or all entries skipped (tag will point at analyzed commit: ${GITHUB_SHA})"
+              # tree. PLANNED_SOURCE_SHA also covers rerun-after-partial-failure:
+              # a fresh dispatch resolves it to current main HEAD anyway.
+              echo "TAG_TARGET_SHA=${PLANNED_SOURCE_SHA}" >> "$GITHUB_ENV"
+              RESULT="No changes — config absent, all up to date, or all entries skipped (tag will point at analyzed commit: ${PLANNED_SOURCE_SHA})"
               ;;
             *)
               echo "::error::bump-version-files.sh exited with unexpected code $BUMP_EXIT"
@@ -562,13 +625,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create and push tag
+        id: create-tag
         env:
-          NEXT_TAG: ${{ steps.compute.outputs.next_tag }}
+          NEXT_TAG: ${{ needs.plan.outputs.next_tag }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           # TAG_TARGET_SHA is set by the prior "Bump version files" step:
           #   - case 0: the new bump commit's SHA (returned by POST /git/commits)
-          #   - case 2: GITHUB_SHA — the semver-analyzed commit, no ref read
+          #   - case 2: PLANNED_SOURCE_SHA — the semver-analyzed commit, no ref read
           #            (spec §2 / review Finding 1)
           # Either way, NEVER from local checkout state (spec §2).
           REPO="${GITHUB_REPOSITORY}"
@@ -584,6 +648,7 @@ jobs:
           gh api -X POST "repos/${REPO}/git/refs" \
             -f ref="refs/tags/${NEXT_TAG}" \
             -f sha="$TAG_TARGET_SHA"
+          echo "tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
 
           TARGET_VERIFIED=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.verified' 2>/dev/null || printf 'unknown')
           TARGET_REASON=$(gh api "repos/${REPO}/git/commits/${TAG_TARGET_SHA}" --jq '.verification.reason' 2>/dev/null || printf 'unavailable')
