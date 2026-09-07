@@ -56,6 +56,67 @@ assert_input_error() {
   return 0
 }
 
+run_coverage_finalizer() {
+  local evaluation_outcome=$1 upload_outcome=$2 status_content=${3-}
+  mkdir -p "$COVERAGE_OUTPUT_DIRECTORY" || return 1
+  printf '%s' 'Original bounded coverage diagnosis.' >"$GITHUB_STEP_SUMMARY" || return 1
+  if [ -n "$status_content" ]; then
+    printf '%s' "$status_content" >"$COVERAGE_OUTPUT_DIRECTORY/status" || return 1
+  fi
+  run env \
+    COVERAGE_OUTPUT_DIRECTORY="$COVERAGE_OUTPUT_DIRECTORY" \
+    COVERAGE_EVALUATE_OUTCOME="$evaluation_outcome" \
+    COVERAGE_UPLOAD_OUTCOME="$upload_outcome" \
+    GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
+    python3 "$BATS_TEST_DIRNAME/../actions/coverage/finalize.py"
+}
+
+@test "finalizer returns each valid stored evaluation status" {
+  local expected
+  for expected in 0 1 2; do
+    COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/finalize-$expected"
+    run_coverage_finalizer failure success "$expected"$'\n'
+    [ "$status" -eq "$expected" ] || return 1
+    [ "$(cat "$GITHUB_STEP_SUMMARY")" = 'Original bounded coverage diagnosis.' ] || return 1
+  done
+}
+
+@test "finalizer rejects absent and invalid stored statuses" {
+  run_coverage_finalizer failure success ''
+  [ "$status" -eq 2 ] || return 1
+  grep -Fq 'Coverage reporting error' "$GITHUB_STEP_SUMMARY" || return 1
+  grep -Fq 'Original bounded coverage diagnosis.' "$GITHUB_STEP_SUMMARY" || return 1
+
+  COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/finalize-invalid"
+  run_coverage_finalizer failure success $'10\n'
+  [ "$status" -eq 2 ] || return 1
+  grep -Fq 'Coverage reporting error' "$GITHUB_STEP_SUMMARY" || return 1
+}
+
+@test "finalizer reports an evaluation launch failure without discarding diagnostics" {
+  run_coverage_finalizer failure success ''
+  [ "$status" -eq 2 ] || return 1
+  grep -Fq 'Coverage reporting error' "$GITHUB_STEP_SUMMARY" || return 1
+  grep -Fq 'Original bounded coverage diagnosis.' "$GITHUB_STEP_SUMMARY" || return 1
+}
+
+@test "finalizer fails reporting after every valid evaluation status and keeps diagnosis" {
+  local expected
+  for expected in 0 1 2; do
+    COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/finalize-upload-$expected"
+    run_coverage_finalizer failure failure "$expected"$'\n'
+    [ "$status" -eq 2 ] || return 1
+    grep -Fq 'Coverage reporting error' "$GITHUB_STEP_SUMMARY" || return 1
+    grep -Fq 'Original bounded coverage diagnosis.' "$GITHUB_STEP_SUMMARY" || return 1
+  done
+}
+
+@test "finalizer preserves a threshold failure after successful upload" {
+  run_coverage_finalizer failure success $'1\n'
+  [ "$status" -eq 1 ] || return 1
+  [ "$(cat "$GITHUB_STEP_SUMMARY")" = 'Original bounded coverage diagnosis.' ] || return 1
+}
+
 @test "rejects every absent required action input" {
   for variable in COVERAGE_REPORT_PATH COVERAGE_DIFF_COVER_PATH COVERAGE_BASE_SHA COVERAGE_MINIMUM COVERAGE_SOURCE_PATHS; do
     run_coverage_evaluator_without "$variable"
