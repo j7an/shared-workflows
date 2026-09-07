@@ -3,8 +3,9 @@
 load 'helpers/coverage-action-fixture'
 
 setup() {
-  coverage_fixture_init
-  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1
+  coverage_fixture_init || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1 || return 1
+  return 0
 }
 
 assert_input_error() {
@@ -12,6 +13,7 @@ assert_input_error() {
   grep -Fq -- "$1" "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
   [ "$(cat "$COVERAGE_OUTPUT_DIRECTORY/status")" = 2 ] || return 1
   [ "$(wc -c < "$COVERAGE_OUTPUT_DIRECTORY/metadata.json")" -lt 4096 ] || return 1
+  return 0
 }
 
 @test "rejects every absent required action input" {
@@ -54,48 +56,57 @@ assert_input_error() {
   COVERAGE_BASE_SHA=0000000000000000000000000000000000000000
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "invalid-base-sha" || return 1
-  COVERAGE_BASE_SHA=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD)
+  COVERAGE_BASE_SHA=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
   DIFF_COVER_PATH="$BATS_TEST_TMPDIR/missing-tool"
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "invalid-diff-cover" || return 1
   DIFF_COVER_PATH="$BATS_TEST_TMPDIR/not-executable"
-  printf '#!/bin/sh\n' >"$DIFF_COVER_PATH"
+  printf '#!/bin/sh\n' >"$DIFF_COVER_PATH" || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "invalid-diff-cover" || return 1
-  chmod +x "$DIFF_COVER_PATH"
-  printf '#!/bin/sh\nprintf "diff-cover 9.9.9\\n"\n' >"$DIFF_COVER_PATH"
+  chmod +x "$DIFF_COVER_PATH" || return 1
+  printf '#!/bin/sh\nprintf "diff-cover 9.9.9\\n"\n' >"$DIFF_COVER_PATH" || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "unsupported-diff-cover" || return 1
 }
 
-@test "rejects empty and unmatched source pathspecs" {
+@test "rejects empty unmatched and negative source pathspecs" {
   COVERAGE_SOURCE_PATHS=$'\n'
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "invalid-source-pathspecs" || return 1
   COVERAGE_SOURCE_PATHS='missing/'
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "empty-production-scope" || return 1
+  COVERAGE_SOURCE_PATHS=':(top,exclude)src/app.py'
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "invalid-source-pathspecs" || return 1
+}
+
+@test "rejects negative exclusion pathspecs" {
+  COVERAGE_EXCLUDE_PATHS=':(top,exclude)src/app.py'
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "invalid-exclude-pathspecs" || return 1
 }
 
 @test "rejects unreadable, empty, unsupported, and malformed reports" {
   run_coverage_evaluator "$BATS_TEST_TMPDIR/missing.xml"
   assert_input_error "invalid-report" || return 1
-  : >"$BATS_TEST_TMPDIR/empty.xml"
+  : >"$BATS_TEST_TMPDIR/empty.xml" || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/empty.xml"
   assert_input_error "invalid-report" || return 1
-  printf 'x' >"$BATS_TEST_TMPDIR/report.txt"
+  printf 'x' >"$BATS_TEST_TMPDIR/report.txt" || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.txt"
   assert_input_error "unsupported-report" || return 1
-  printf '<coverage><class filename="src/app.py"></coverage>' >"$BATS_TEST_TMPDIR/bad.xml"
+  printf '<coverage><class filename="src/app.py"></coverage>' >"$BATS_TEST_TMPDIR/bad.xml" || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/bad.xml"
   assert_input_error "malformed-cobertura" || return 1
-  coverage_write_cobertura "$BATS_TEST_TMPDIR/negative-hits.xml" src/app.py 1 -1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/negative-hits.xml" src/app.py 1 -1 || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/negative-hits.xml"
   assert_input_error "malformed-cobertura" || return 1
-  printf 'SF:src/app.py\nDA:1,1\n' >"$BATS_TEST_TMPDIR/bad.info"
+  printf 'SF:src/app.py\nDA:1,1\n' >"$BATS_TEST_TMPDIR/bad.info" || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/bad.info"
   assert_input_error "malformed-lcov" || return 1
-  printf 'SF:src/app.py\nBRDA:1,0,0,x\nend_of_record\n' >"$BATS_TEST_TMPDIR/bad-branch.info"
+  printf 'SF:src/app.py\nBRDA:1,0,0,x\nend_of_record\n' >"$BATS_TEST_TMPDIR/bad-branch.info" || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/bad-branch.info"
   assert_input_error "malformed-lcov" || return 1
 }
@@ -113,24 +124,24 @@ assert_input_error() {
   run_coverage_evaluator "$COVERAGE_REPORT_PATH"
   assert_input_error "invalid-source-pathspecs" || return 1
   COVERAGE_SOURCE_PATHS=src/
-  printf '%s\n' '<?xml version="1.0"?>' '<coverage><sources><source>src&#13;</source></sources><packages><package name=""><classes>' '<class name="fixture" filename="app.py"><lines><line number="1" hits="1"/></lines></class>' '</classes></package></packages></coverage>' >"$COVERAGE_REPORT_PATH"
+  printf '%s\n' '<?xml version="1.0"?>' '<coverage><sources><source>src&#13;</source></sources><packages><package name=""><classes>' '<class name="fixture" filename="app.py"><lines><line number="1" hits="1"/></lines></class>' '</classes></package></packages></coverage>' >"$COVERAGE_REPORT_PATH" || return 1
   run_coverage_evaluator "$COVERAGE_REPORT_PATH"
   assert_input_error "invalid-report-path" || return 1
 }
 
 @test "rejects foreign and ambiguous report identities" {
-  coverage_write_lcov "$BATS_TEST_TMPDIR/foreign.info" /tmp/app.py 1 1
+  coverage_write_lcov "$BATS_TEST_TMPDIR/foreign.info" /tmp/app.py 1 1 || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/foreign.info"
   assert_input_error "invalid-report-path" || return 1
-  coverage_write_lcov "$BATS_TEST_TMPDIR/escape.info" ../outside.py 1 1
+  coverage_write_lcov "$BATS_TEST_TMPDIR/escape.info" ../outside.py 1 1 || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/escape.info"
   assert_input_error "invalid-report-path" || return 1
-  mkdir -p "$COVERAGE_FIXTURE_ROOT/src/a" "$COVERAGE_FIXTURE_ROOT/src/b"
-  printf 'def first():\n    return 1\n' >"$COVERAGE_FIXTURE_ROOT/src/a/app.py"
-  printf 'def second():\n    return 1\n' >"$COVERAGE_FIXTURE_ROOT/src/b/app.py"
-  git -C "$COVERAGE_FIXTURE_ROOT" add src/a/app.py src/b/app.py
-  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm ambiguous-files
-  printf '%s\n' '<?xml version="1.0"?>' '<coverage><sources><source>src/a</source><source>src/b</source></sources><packages><package name=""><classes>' '<class name="fixture" filename="app.py"><lines><line number="1" hits="1"/></lines></class>' '</classes></package></packages></coverage>' >"$BATS_TEST_TMPDIR/ambiguous.xml"
+  mkdir -p "$COVERAGE_FIXTURE_ROOT/src/a" "$COVERAGE_FIXTURE_ROOT/src/b" || return 1
+  printf 'def first():\n    return 1\n' >"$COVERAGE_FIXTURE_ROOT/src/a/app.py" || return 1
+  printf 'def second():\n    return 1\n' >"$COVERAGE_FIXTURE_ROOT/src/b/app.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/a/app.py src/b/app.py || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm ambiguous-files || return 1
+  printf '%s\n' '<?xml version="1.0"?>' '<coverage><sources><source>src/a</source><source>src/b</source></sources><packages><package name=""><classes>' '<class name="fixture" filename="app.py"><lines><line number="1" hits="1"/></lines></class>' '</classes></package></packages></coverage>' >"$BATS_TEST_TMPDIR/ambiguous.xml" || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/ambiguous.xml"
   assert_input_error "ambiguous-report-path" || return 1
 }
@@ -211,17 +222,152 @@ PY
 }
 
 @test "inventories Nexus-style relative Cobertura records" {
-  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1 || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
-  [ "$status" -eq 0 ]
-  grep -Fq 'src/app.py' "$COVERAGE_OUTPUT_DIRECTORY/metadata.json"
+  [ "$status" -eq 0 ] || return 1
+  grep -Fq 'src/app.py' "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" || return 1
 }
 
 @test "inventories relative and checkout-absolute LCOV records" {
-  coverage_write_lcov "$BATS_TEST_TMPDIR/relative.info" src/app.py 1 1
+  coverage_write_lcov "$BATS_TEST_TMPDIR/relative.info" src/app.py 1 1 || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/relative.info"
-  [ "$status" -eq 0 ]
-  coverage_write_lcov "$BATS_TEST_TMPDIR/absolute.info" "$COVERAGE_FIXTURE_ROOT/src/app.py" 1 1
+  [ "$status" -eq 0 ] || return 1
+  coverage_write_lcov "$BATS_TEST_TMPDIR/absolute.info" "$COVERAGE_FIXTURE_ROOT/src/app.py" 1 1 || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/absolute.info"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "comparison freezes a linear committed HEAD and its scoped patch" {
+  coverage_fixture_commit_change || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1 || return 1
+  tested_sha=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 0 ] || return 1
+  python3 - "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" "$COVERAGE_BASE_SHA" "$tested_sha" <<'PY'
+import json
+import sys
+metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+comparison = metadata["comparison"]
+assert comparison["base_sha"] == sys.argv[2]
+assert comparison["merge_base_sha"] == sys.argv[2]
+assert comparison["tested_sha"] == sys.argv[3]
+assert metadata["changed_paths"] == ["src/app.py"]
+PY
+  [ "$?" -eq 0 ] || return 1
+  grep -Fq '+def changed():' "$COVERAGE_OUTPUT_DIRECTORY/scoped.diff" || return 1
+}
+
+@test "comparison uses the merge-base for diverged histories and merge checkouts" {
+  git -C "$COVERAGE_FIXTURE_ROOT" checkout -qb feature || return 1
+  coverage_fixture_commit_file src/feature.py $'def feature():\n    return 1\n' || return 1
+  feature_sha=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" checkout -q "$COVERAGE_DEFAULT_BRANCH" || return 1
+  coverage_fixture_commit_file src/main.py $'def main():\n    return 1\n' || return 1
+  main_sha=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false merge --no-ff -qm fixture-merge "$feature_sha" || return 1
+  merge_sha=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/feature.py 1 1 || return 1
+  COVERAGE_BASE_SHA=$main_sha
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 0 ] || return 1
+  python3 - "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" "$main_sha" "$merge_sha" <<'PY'
+import json
+import sys
+metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+assert metadata["comparison"]["base_sha"] == sys.argv[2]
+assert metadata["comparison"]["tested_sha"] == sys.argv[3]
+assert metadata["comparison"]["merge_base_sha"] == sys.argv[2]
+assert metadata["changed_paths"] == ["src/feature.py"]
+PY
+  [ "$?" -eq 0 ] || return 1
+}
+
+@test "scope applies Git glob selectors and exclusions before report requirements" {
+  coverage_fixture_commit_file src/nested/keep.py $'def keep():\n    return 1\n' || return 1
+  coverage_fixture_commit_file src/nested/skip.py $'def skip():\n    return 1\n' || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/nested/keep.py 1 1 || return 1
+  COVERAGE_SOURCE_PATHS=':(glob)src/**/*.py'
+  COVERAGE_EXCLUDE_PATHS='src/nested/skip.py'
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 0 ] || return 1
+  python3 - "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" <<'PY'
+import json
+import sys
+metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+assert metadata["effective_paths"] == ["src/app.py", "src/nested/keep.py"]
+assert metadata["changed_paths"] == ["src/nested/keep.py"]
+PY
+  [ "$?" -eq 0 ] || return 1
+}
+
+@test "scope requires changed present production files in the report" {
+  coverage_fixture_commit_file src/missing.py $'def missing():\n    return 1\n' || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "missing-changed-report-path" || return 1
+}
+
+@test "scope ignores staged unstaged and untracked changes" {
+  coverage_fixture_commit_change || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1 || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 0 ] || return 1
+  cp "$COVERAGE_OUTPUT_DIRECTORY/scoped.diff" "$BATS_TEST_TMPDIR/clean.diff" || return 1
+  cp "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" "$BATS_TEST_TMPDIR/clean.json" || return 1
+  printf '# staged\n' >>"$COVERAGE_FIXTURE_ROOT/src/app.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py || return 1
+  printf '# staged new\n' >"$COVERAGE_FIXTURE_ROOT/src/staged.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/staged.py || return 1
+  printf '# unstaged\n' >>"$COVERAGE_FIXTURE_ROOT/src/app.py" || return 1
+  printf '# untracked\n' >"$COVERAGE_FIXTURE_ROOT/src/untracked.py" || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 0 ] || return 1
+  cmp "$BATS_TEST_TMPDIR/clean.diff" "$COVERAGE_OUTPUT_DIRECTORY/scoped.diff" || return 1
+  cmp "$BATS_TEST_TMPDIR/clean.json" "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" || return 1
+}
+
+@test "scope preserves modified rename headers and validates only the post-image" {
+  git -C "$COVERAGE_FIXTURE_ROOT" mv src/app.py 'src/renamed app.py' || return 1
+  printf '# renamed\n' >>"$COVERAGE_FIXTURE_ROOT/src/renamed app.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add -- 'src/renamed app.py' || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm renamed || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" 'src/renamed app.py' 1 1 || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 0 ] || return 1
+  grep -Fq 'rename from src/app.py' "$COVERAGE_OUTPUT_DIRECTORY/scoped.diff" || return 1
+  grep -Fq 'rename to src/renamed app.py' "$COVERAGE_OUTPUT_DIRECTORY/scoped.diff" || return 1
+  grep -Fq '+# renamed' "$COVERAGE_OUTPUT_DIRECTORY/scoped.diff" || return 1
+  ! grep -Fq '+def base():' "$COVERAGE_OUTPUT_DIRECTORY/scoped.diff" || return 1
+}
+
+@test "scope handles additions deletions nested paths and names containing spaces" {
+  coverage_fixture_commit_file 'src/nested/new file.py' $'def added():\n    return 1\n' || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" rm -q src/app.py || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm deleted || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" 'src/nested/new file.py' 1 1 || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 0 ] || return 1
+  grep -Fq 'src/nested/new file.py' "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" || return 1
+  ! grep -Fq 'src/app.py' "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" || return 1
+  python3 - "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1], encoding="utf-8"))["changed_paths"] == ["src/nested/new file.py"]
+PY
+  [ "$?" -eq 0 ] || return 1
+}
+
+@test "comparison rejects unavailable merge-base history" {
+  git -C "$COVERAGE_FIXTURE_ROOT" checkout --orphan unrelated >/dev/null 2>&1 || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit --allow-empty -qm unrelated || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1 || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "invalid-comparison" || return 1
+}
+
+@test "comparison rejects an evaluator that changes tested HEAD" {
+  coverage_fixture_commit_change || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1 || return 1
+  COVERAGE_FAKE_EVALUATOR_ACTION=commit
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "tested-head-changed" || return 1
 }

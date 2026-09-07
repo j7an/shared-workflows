@@ -1,36 +1,74 @@
 coverage_fixture_init() {
   COVERAGE_FIXTURE_ROOT="$BATS_TEST_TMPDIR/repo"
-  mkdir -p "$COVERAGE_FIXTURE_ROOT/src"
-  git -C "$COVERAGE_FIXTURE_ROOT" init -q
-  git -C "$COVERAGE_FIXTURE_ROOT" config user.email coverage@example.invalid
-  git -C "$COVERAGE_FIXTURE_ROOT" config user.name "Coverage Fixture"
-  printf 'def base():\n    return 1\n' >"$COVERAGE_FIXTURE_ROOT/src/app.py"
-  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py
-  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm base
-  COVERAGE_BASE_SHA=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD)
+  mkdir -p "$COVERAGE_FIXTURE_ROOT/src" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" init -q || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" config user.email coverage@example.invalid || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" config user.name "Coverage Fixture" || return 1
+  printf 'def base():\n    return 1\n' >"$COVERAGE_FIXTURE_ROOT/src/app.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm base || return 1
+  COVERAGE_BASE_SHA=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
+  COVERAGE_DEFAULT_BRANCH=$(git -C "$COVERAGE_FIXTURE_ROOT" branch --show-current) || return 1
   COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/output"
   GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/step-summary.md"
   DIFF_COVER_PATH="$BATS_TEST_TMPDIR/diff-cover"
-  printf '#!/bin/sh\nprintf "diff-cover 10.2.0\\n"\n' >"$DIFF_COVER_PATH"
-  chmod +x "$DIFF_COVER_PATH"
+  coverage_fixture_write_fake_evaluator || return 1
 }
 
 coverage_fixture_commit_change() {
-  printf 'def changed():\n    return 2\n' >>"$COVERAGE_FIXTURE_ROOT/src/app.py"
-  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py
-  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm change
+  printf 'def changed():\n    return 2\n' >>"$COVERAGE_FIXTURE_ROOT/src/app.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm change || return 1
+}
+
+coverage_fixture_commit_file() {
+  local repository_path=$1 content=$2
+  mkdir -p "$(dirname "$COVERAGE_FIXTURE_ROOT/$repository_path")" || return 1
+  printf '%s' "$content" >"$COVERAGE_FIXTURE_ROOT/$repository_path" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add -- "$repository_path" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm "change $repository_path" || return 1
+}
+
+coverage_fixture_write_fake_evaluator() {
+  cat >"$DIFF_COVER_PATH" <<'SH' || return 1
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'diff-cover 10.2.0'
+  exit 0
+fi
+formats=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--format" ]; then
+    formats=$2
+    break
+  fi
+  shift
+done
+json_path=${formats#json:}
+json_path=${json_path%%,markdown:*}
+markdown_path=${formats#*,markdown:}
+printf '%s' '{"report_name":"Diff Coverage","diff_name":"fixture","src_stats":{},"total_num_lines":0,"total_num_violations":0,"total_percent_covered":100,"num_changed_lines":0}' >"$json_path"
+printf '%s\n' '# Diff Coverage' >"$markdown_path"
+if [ "${COVERAGE_FAKE_EVALUATOR_ACTION:-}" = commit ]; then
+  printf '%s\n' 'tool changed HEAD' > tool-created.txt
+  git add tool-created.txt
+  git -c commit.gpgsign=false commit -qm tool-created-head
+fi
+exit 0
+SH
+  chmod +x "$DIFF_COVER_PATH" || return 1
 }
 
 coverage_write_cobertura() {
   local report=$1 repository_path=$2 line=$3 hits=$4
-  mkdir -p "$(dirname "$report")"
-  printf '%s\n' '<?xml version="1.0"?>' '<coverage><sources><source></source></sources><packages><package name=""><classes>' "<class name=\"fixture\" filename=\"$repository_path\"><lines><line number=\"$line\" hits=\"$hits\"/></lines></class>" '</classes></package></packages></coverage>' >"$report"
+  mkdir -p "$(dirname "$report")" || return 1
+  printf '%s\n' '<?xml version="1.0"?>' '<coverage><sources><source></source></sources><packages><package name=""><classes>' "<class name=\"fixture\" filename=\"$repository_path\"><lines><line number=\"$line\" hits=\"$hits\"/></lines></class>" '</classes></package></packages></coverage>' >"$report" || return 1
 }
 
 coverage_write_lcov() {
   local report=$1 repository_path=$2 line=$3 hits=$4
-  mkdir -p "$(dirname "$report")"
-  printf 'SF:%s\nDA:%s,%s\nend_of_record\n' "$repository_path" "$line" "$hits" >"$report"
+  mkdir -p "$(dirname "$report")" || return 1
+  printf 'SF:%s\nDA:%s,%s\nend_of_record\n' "$repository_path" "$line" "$hits" >"$report" || return 1
 }
 
 run_coverage_evaluator() {
@@ -44,9 +82,10 @@ run_coverage_evaluator() {
     COVERAGE_WORKING_DIRECTORY="${COVERAGE_WORKING_DIRECTORY:-$COVERAGE_FIXTURE_ROOT}" \
     COVERAGE_OUTPUT_DIRECTORY="$COVERAGE_OUTPUT_DIRECTORY" \
     COVERAGE_RUNNER_OS="${COVERAGE_RUNNER_OS:-Linux}" \
+    COVERAGE_FAKE_EVALUATOR_ACTION="${COVERAGE_FAKE_EVALUATOR_ACTION:-}" \
     GITHUB_WORKSPACE="$BATS_TEST_TMPDIR" \
     GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
-    python3 "$BATS_TEST_DIRNAME/../actions/coverage/evaluate.py"
+    python3 "$BATS_TEST_DIRNAME/../actions/coverage/evaluate.py" || return 1
 }
 
 run_coverage_evaluator_without() {
@@ -68,5 +107,5 @@ run_coverage_evaluator_without() {
     name=${pair%%=*}
     [ "$name" = "$missing" ] || args+=("$pair")
   done
-  run "${args[@]}" python3 "$BATS_TEST_DIRNAME/../actions/coverage/evaluate.py"
+  run "${args[@]}" python3 "$BATS_TEST_DIRNAME/../actions/coverage/evaluate.py" || return 1
 }

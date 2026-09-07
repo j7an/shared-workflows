@@ -9,6 +9,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from typing import Mapping, NoReturn
 import xml.etree.ElementTree as ElementTree
 
@@ -39,6 +40,13 @@ class GateInputs:
 class ReportInventory:
     format: str
     repository_paths: frozenset[str]
+
+
+@dataclass(frozen=True)
+class Comparison:
+    base_sha: str
+    merge_base_sha: str
+    tested_sha: str
 
 
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -83,11 +91,41 @@ def command(args: list[str], category: str, cwd: Path) -> str:
     return result.stdout.strip()
 
 
+def git(checkout: Path, *args: str, check: bool = True,
+        environment: Mapping[str, str] | None = None) -> bytes:
+    try:
+        result = subprocess.run(["git", "-c", "core.quotepath=false", *args], cwd=checkout,
+                                check=False, shell=False, capture_output=True, env=environment)
+    except OSError:
+        fail("git-unavailable")
+    if check and result.returncode != 0:
+        fail("git-command-failed")
+    return result.stdout
+
+
+def git_text(checkout: Path, *args: str, category: str) -> str:
+    try:
+        return git(checkout, *args).decode("utf-8").strip()
+    except (GateError, UnicodeError):
+        fail(category)
+
+
 def pathspec_list(value: str, category: str) -> tuple[str, ...]:
     items = tuple(item for item in value.split("\n") if item)
-    if not items or any(CONTROL.search(item) for item in items):
+    if not items or any(CONTROL.search(item) or negative_pathspec(item) for item in items):
         fail(category)
     return items
+
+
+def negative_pathspec(value: str) -> bool:
+    if value.startswith((":!", ":^")):
+        return True
+    if not value.startswith(":("):
+        return False
+    close = value.find(")")
+    if close < 0:
+        return False
+    return "exclude" in value[2:close].split(",")
 
 
 def output_directory(env: Mapping[str, str]) -> Path:
@@ -106,14 +144,14 @@ def parse_inputs(env: Mapping[str, str]) -> GateInputs:
     checkout = (workspace / working).resolve() if not working.is_absolute() else working.resolve()
     if workspace not in (checkout, *checkout.parents):
         fail("invalid-working-directory")
-    top = command(["git", "rev-parse", "--show-toplevel"], "invalid-working-directory", checkout)
+    top = git_text(checkout, "rev-parse", "--show-toplevel", category="invalid-working-directory")
     if Path(top).resolve() != checkout:
         fail("invalid-working-directory")
 
     base = required(env, "COVERAGE_BASE_SHA")
     if not SHA.fullmatch(base):
         fail("invalid-base-sha")
-    command(["git", "cat-file", "-e", base + "^{commit}"], "invalid-base-sha", checkout)
+    git_text(checkout, "cat-file", "-e", base + "^{commit}", category="invalid-base-sha")
 
     minimum_text = required(env, "COVERAGE_MINIMUM")
     try:
@@ -142,27 +180,131 @@ def parse_inputs(env: Mapping[str, str]) -> GateInputs:
         fail("invalid-report")
     sources = pathspec_list(required(env, "COVERAGE_SOURCE_PATHS"), "invalid-source-pathspecs")
     excludes_text = env.get("COVERAGE_EXCLUDE_PATHS", "")
-    excludes = tuple(item for item in excludes_text.split("\n") if item)
-    if any(CONTROL.search(item) for item in excludes):
-        fail("invalid-exclude-pathspecs")
+    excludes = pathspec_list(excludes_text, "invalid-exclude-pathspecs") if excludes_text else ()
     step_summary = Path(no_controls(required(env, "GITHUB_STEP_SUMMARY"),
                                     "invalid-step-summary")).resolve()
     return GateInputs(report, diff, base, minimum_text, minimum, sources, excludes,
                       checkout, output, step_summary)
 
 
-def tracked_paths(inputs: GateInputs) -> frozenset[str]:
-    included = command(["git", "ls-files", "-z", "--", *inputs.source_pathspecs],
-                       "invalid-source-pathspecs", inputs.checkout)
-    paths = frozenset(item for item in included.split("\0") if item)
-    if inputs.exclude_pathspecs:
-        excluded = frozenset(item for item in command(
-            ["git", "ls-files", "-z", "--", *inputs.exclude_pathspecs],
-            "invalid-exclude-pathspecs", inputs.checkout).split("\0") if item)
-        paths = paths - excluded
+def list_tracked(checkout: Path, pathspecs: tuple[str, ...], treeish: str = "HEAD") -> frozenset[str]:
+    try:
+        with tempfile.TemporaryDirectory(prefix="coverage-git-index-") as temporary:
+            environment = dict(os.environ, GIT_INDEX_FILE=str(Path(temporary) / "index"))
+            git(checkout, "read-tree", treeish, environment=environment)
+            output = git(checkout, "ls-files", "-z", "--", *pathspecs, environment=environment)
+        return frozenset(item.decode("utf-8", "surrogateescape") for item in output.split(b"\0") if item)
+    except GateError:
+        fail("invalid-source-pathspecs")
+
+
+def select_effective_files(inputs: GateInputs,
+                           comparison: Comparison | None = None) -> frozenset[str]:
+    treeish = comparison.tested_sha if comparison else "HEAD"
+    included = list_tracked(inputs.checkout, inputs.source_pathspecs, treeish)
+    excluded = list_tracked(inputs.checkout, inputs.exclude_pathspecs, treeish) if inputs.exclude_pathspecs else frozenset()
+    paths = included - excluded
     if not paths:
         fail("empty-production-scope")
     return paths
+
+
+def capture_comparison(inputs: GateInputs) -> Comparison:
+    try:
+        base = git_text(inputs.checkout, "rev-parse", inputs.base_sha + "^{commit}",
+                        category="invalid-comparison")
+        tested = git_text(inputs.checkout, "rev-parse", "HEAD^{commit}", category="invalid-comparison")
+        merge = git(inputs.checkout, "merge-base", base, tested, check=False)
+        if not merge:
+            fail("invalid-comparison")
+        merge_base = merge.decode("utf-8").strip()
+    except (GateError, UnicodeError):
+        fail("invalid-comparison")
+    if not all(SHA.fullmatch(value) for value in (base, merge_base, tested)):
+        fail("invalid-comparison")
+    return Comparison(base, merge_base, tested)
+
+
+def name_status_records(inputs: GateInputs, comparison: Comparison) -> tuple[tuple[str, str | None, str], ...]:
+    try:
+        output = git(inputs.checkout, "diff", "--name-status", "-z", "--find-renames",
+                     comparison.merge_base_sha, comparison.tested_sha)
+        values = [value.decode("utf-8", "surrogateescape") for value in output.split(b"\0") if value]
+    except (GateError, UnicodeError):
+        fail("invalid-comparison")
+    records: list[tuple[str, str | None, str]] = []
+    index = 0
+    while index < len(values):
+        status = values[index]
+        index += 1
+        if not status:
+            fail("invalid-comparison")
+        if status[0] in ("R", "C"):
+            if index + 1 >= len(values):
+                fail("invalid-comparison")
+            old, new = values[index], values[index + 1]
+            index += 2
+            records.append((status[0], old, new))
+        else:
+            if index >= len(values):
+                fail("invalid-comparison")
+            path = values[index]
+            index += 1
+            records.append((status[0], None, path))
+    return tuple(records)
+
+
+def select_changed_files(inputs: GateInputs, comparison: Comparison,
+                         effective: frozenset[str]) -> tuple[str, ...]:
+    changed = {post for status, _pre, post in name_status_records(inputs, comparison)
+               if status != "D" and post in effective}
+    return tuple(sorted(changed))
+
+
+def literal_selector(path: str) -> str:
+    return ":(literal)" + path
+
+
+def write_scoped_patch(inputs: GateInputs, comparison: Comparison,
+                       changed: tuple[str, ...]) -> Path:
+    patch = inputs.output_directory / "scoped.diff"
+    selectors = set(changed)
+    for status, pre_image, post_image in name_status_records(inputs, comparison):
+        if status == "R" and post_image in selectors and pre_image is not None:
+            selectors.add(pre_image)
+    if not changed:
+        patch.write_bytes(b"")
+        return patch
+    try:
+        output = git(inputs.checkout, "diff", "--unified=0", "--no-ext-diff", "--no-color",
+                     "--find-renames", comparison.merge_base_sha, comparison.tested_sha, "--",
+                     *(literal_selector(path) for path in sorted(selectors)))
+    except GateError:
+        fail("invalid-comparison")
+    patch.write_bytes(output)
+    return patch
+
+
+def assert_tested_head(inputs: GateInputs, comparison: Comparison) -> None:
+    current = git_text(inputs.checkout, "rev-parse", "HEAD^{commit}", category="tested-head-changed")
+    if current != comparison.tested_sha:
+        fail("tested-head-changed")
+
+
+def invoke_evaluator(inputs: GateInputs, patch: Path) -> None:
+    json_report = inputs.output_directory / "diff-cover.json"
+    markdown_report = inputs.output_directory / "diff-cover.md"
+    try:
+        result = subprocess.run(
+            [str(inputs.diff_cover_path), str(inputs.report_path), "--diff-file", str(patch),
+             "--fail-under", inputs.minimum_text, "--format",
+             "json:" + str(json_report) + ",markdown:" + str(markdown_report)],
+            cwd=inputs.checkout, check=False, shell=False, capture_output=True, text=True,
+        )
+    except OSError:
+        fail("evaluator-failed")
+    if result.returncode != 0:
+        fail("evaluator-failed")
 
 
 def report_path(value: str, roots: tuple[Path, ...], checkout: Path,
@@ -310,10 +452,22 @@ def main(env: Mapping[str, str]) -> int:
         output = output_directory(env)
         output.mkdir(parents=True, exist_ok=True)
         inputs = parse_inputs(env)
-        inventory = inventory_report(inputs, tracked_paths(inputs))
+        comparison = capture_comparison(inputs)
+        effective = select_effective_files(inputs, comparison)
+        inventory = inventory_report(inputs, effective)
+        changed = select_changed_files(inputs, comparison, effective)
+        missing = sorted(set(changed) - inventory.repository_paths)
+        if missing:
+            fail("missing-changed-report-path")
+        patch = write_scoped_patch(inputs, comparison, changed)
+        assert_tested_head(inputs, comparison)
+        invoke_evaluator(inputs, patch)
+        assert_tested_head(inputs, comparison)
         write_outputs(inputs.output_directory, PASS, "validated", {
             "inputs": asdict(inputs), "inventory": {"format": inventory.format,
-            "repository_paths": sorted(inventory.repository_paths)}})
+            "repository_paths": sorted(inventory.repository_paths)},
+            "comparison": asdict(comparison), "effective_paths": sorted(effective),
+            "changed_paths": list(changed)})
         return PASS
     except GateError as error:
         finish_error(inputs, output, str(error))
