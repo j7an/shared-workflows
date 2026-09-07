@@ -203,8 +203,9 @@ spec.loader.exec_module(evaluate)
 pathspecs = ["x" * 512 for _ in range(32)]
 evaluate.write_outputs(evaluate.Path(sys.argv[2]), 0, "validated", {"inputs": {"source_pathspecs": pathspecs}})
 payload = (evaluate.Path(sys.argv[2]) / "metadata.json").read_text(encoding="utf-8")
-json.loads(payload)
-sys.exit(0 if len(payload.encode("utf-8")) < 4096 else 1)
+metadata = json.loads(payload)
+stored_status = (evaluate.Path(sys.argv[2]) / "status").read_text(encoding="utf-8").strip()
+sys.exit(0 if len(payload.encode("utf-8")) < 4096 and str(metadata["status"]) == stored_status else 1)
 PY
   [ "$status" -eq 0 ] || return 1
 }

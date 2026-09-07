@@ -266,7 +266,7 @@ def write_outputs(output: Path, status: int, message: str, metadata: object) -> 
     (output / "status").write_text(str(status) + "\n", encoding="utf-8")
     (output / "diagnostics.txt").write_text(message[:1024] + "\n", encoding="utf-8")
     (output / "summary.md").write_text("Coverage gate: " + message[:1024] + "\n", encoding="utf-8")
-    (output / "metadata.json").write_text(metadata_json(metadata) + "\n", encoding="utf-8")
+    (output / "metadata.json").write_text(metadata_json(metadata, status) + "\n", encoding="utf-8")
 
 
 def bounded_metadata(value: object) -> object:
@@ -282,11 +282,11 @@ def bounded_metadata(value: object) -> object:
     return str(value)[:512]
 
 
-def metadata_json(metadata: object) -> str:
+def metadata_json(metadata: object, status: int) -> str:
     encoded = json.dumps(bounded_metadata(metadata), default=str, sort_keys=True)
     if len(encoded.encode("utf-8")) < 4095:
         return encoded
-    essential: dict[str, object] = {"status": ERROR, "truncated": True}
+    essential: dict[str, object] = {"status": status, "truncated": True}
     if isinstance(metadata, dict) and isinstance(metadata.get("error"), str):
         essential["error"] = metadata["error"][:512]
     return json.dumps(essential, sort_keys=True)
