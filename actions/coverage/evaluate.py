@@ -91,11 +91,14 @@ def pathspec_list(value: str, category: str) -> tuple[str, ...]:
 
 
 def parse_inputs(env: Mapping[str, str]) -> GateInputs:
-    output = Path(required(env, "COVERAGE_OUTPUT_DIRECTORY")).resolve()
+    output = Path(no_controls(required(env, "COVERAGE_OUTPUT_DIRECTORY"),
+                              "invalid-output-directory")).resolve()
     if env.get("COVERAGE_RUNNER_OS") != "Linux":
         fail("unsupported-runner")
-    workspace = Path(required(env, "GITHUB_WORKSPACE")).resolve()
-    working = Path(env.get("COVERAGE_WORKING_DIRECTORY", "."))
+    workspace = Path(no_controls(required(env, "GITHUB_WORKSPACE"),
+                                 "invalid-working-directory")).resolve()
+    working = Path(no_controls(env.get("COVERAGE_WORKING_DIRECTORY", "."),
+                               "invalid-working-directory"))
     checkout = (workspace / working).resolve() if not working.is_absolute() else working.resolve()
     if workspace not in (checkout, *checkout.parents):
         fail("invalid-working-directory")
@@ -138,7 +141,8 @@ def parse_inputs(env: Mapping[str, str]) -> GateInputs:
     excludes = tuple(item for item in excludes_text.split("\n") if item)
     if any(CONTROL.search(item) for item in excludes):
         fail("invalid-exclude-pathspecs")
-    step_summary = Path(required(env, "GITHUB_STEP_SUMMARY")).resolve()
+    step_summary = Path(no_controls(required(env, "GITHUB_STEP_SUMMARY"),
+                                    "invalid-step-summary")).resolve()
     return GateInputs(report, diff, base, minimum_text, minimum, sources, excludes,
                       checkout, output, step_summary)
 
@@ -185,8 +189,10 @@ def inventory_cobertura(inputs: GateInputs, tracked: frozenset[str]) -> ReportIn
     if root.tag.rsplit("}", 1)[-1] != "coverage":
         fail("malformed-cobertura")
     source_values = [node.text or "" for node in root.findall(".//{*}source")]
-    roots = tuple((inputs.checkout / value).resolve() if not Path(value).is_absolute()
-                  else Path(value).resolve() for value in (source_values or [""]))
+    roots = tuple((inputs.checkout / no_controls(value, "invalid-report-path")).resolve()
+                  if not Path(no_controls(value, "invalid-report-path")).is_absolute()
+                  else Path(no_controls(value, "invalid-report-path")).resolve()
+                  for value in (source_values or [""]))
     paths: set[str] = set()
     classes = root.findall(".//{*}class")
     if not classes:
@@ -233,6 +239,11 @@ def inventory_lcov(inputs: GateInputs, tracked: frozenset[str]) -> ReportInvento
                 fail("malformed-lcov")
             if row.startswith("DA:") and (len(fields) != 2 or not fields[1].isdigit()):
                 fail("malformed-lcov")
+            if row.startswith("BRDA:") and (
+                len(fields) != 4 or not fields[1].isdigit() or not fields[2].isdigit()
+                or (fields[3] != "-" and not fields[3].isdigit())
+            ):
+                fail("malformed-lcov")
         paths.add(report_path(source[0], (inputs.checkout,), inputs.checkout, tracked))
     return ReportInventory("lcov", frozenset(paths))
 
@@ -251,7 +262,22 @@ def write_outputs(output: Path, status: int, message: str, metadata: object) -> 
     (output / "status").write_text(str(status) + "\n", encoding="utf-8")
     (output / "diagnostics.txt").write_text(message[:1024] + "\n", encoding="utf-8")
     (output / "summary.md").write_text("Coverage gate: " + message[:1024] + "\n", encoding="utf-8")
-    (output / "metadata.json").write_text(json.dumps(metadata, default=str, sort_keys=True)[:4096] + "\n", encoding="utf-8")
+    (output / "metadata.json").write_text(
+        json.dumps(bounded_metadata(metadata), default=str, sort_keys=True) + "\n",
+        encoding="utf-8")
+
+
+def bounded_metadata(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key)[:128]: bounded_metadata(item)
+                for key, item in list(value.items())[:32]}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [bounded_metadata(item) for item in list(value)[:32]]
+    if isinstance(value, str):
+        return value[:512]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)[:512]
 
 
 def finish_error(inputs: GateInputs | None, message: str) -> NoReturn:

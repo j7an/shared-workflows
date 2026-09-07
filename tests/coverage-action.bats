@@ -4,18 +4,21 @@ load 'helpers/coverage-action-fixture'
 
 setup() {
   coverage_fixture_init
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1
 }
 
 assert_input_error() {
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"$1"* ]]
-  [ "$(cat "$COVERAGE_OUTPUT_DIRECTORY/status")" = 2 ]
-  [ "$(wc -c < "$COVERAGE_OUTPUT_DIRECTORY/metadata.json")" -lt 4096 ]
+  [ "$status" -eq 2 ] || return 1
+  grep -Fq -- "$1" "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
+  [ "$(cat "$COVERAGE_OUTPUT_DIRECTORY/status")" = 2 ] || return 1
+  [ "$(wc -c < "$COVERAGE_OUTPUT_DIRECTORY/metadata.json")" -lt 4096 ] || return 1
 }
 
-@test "rejects a missing required report path" {
-  run_coverage_evaluator ""
-  assert_input_error "required-input"
+@test "rejects every absent required action input" {
+  for variable in COVERAGE_REPORT_PATH COVERAGE_DIFF_COVER_PATH COVERAGE_BASE_SHA COVERAGE_MINIMUM COVERAGE_SOURCE_PATHS; do
+    run_coverage_evaluator_without "$variable"
+    assert_input_error "required-input" || return 1
+  done
 }
 
 @test "rejects non-Linux runners" {
@@ -38,8 +41,17 @@ assert_input_error() {
   assert_input_error "invalid-working-directory"
 }
 
+@test "rejects a working directory outside GITHUB_WORKSPACE" {
+  COVERAGE_FIXTURE_ROOT=/private/tmp
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "invalid-working-directory"
+}
+
 @test "rejects invalid base SHA and unusable diff-cover path" {
   COVERAGE_BASE_SHA=abcd
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "invalid-base-sha"
+  COVERAGE_BASE_SHA=0000000000000000000000000000000000000000
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "invalid-base-sha"
   COVERAGE_BASE_SHA=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD)
@@ -57,7 +69,7 @@ assert_input_error() {
 }
 
 @test "rejects empty and unmatched source pathspecs" {
-  COVERAGE_SOURCE_PATHS=''
+  COVERAGE_SOURCE_PATHS=$'\n'
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "invalid-source-pathspecs"
   COVERAGE_SOURCE_PATHS='missing/'
@@ -68,6 +80,9 @@ assert_input_error() {
 @test "rejects unreadable, empty, unsupported, and malformed reports" {
   run_coverage_evaluator "$BATS_TEST_TMPDIR/missing.xml"
   assert_input_error "invalid-report"
+  mkdir "$BATS_TEST_TMPDIR/unreadable.xml"
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/unreadable.xml"
+  assert_input_error "invalid-report"
   : >"$BATS_TEST_TMPDIR/empty.xml"
   run_coverage_evaluator "$BATS_TEST_TMPDIR/empty.xml"
   assert_input_error "invalid-report"
@@ -77,9 +92,33 @@ assert_input_error() {
   printf '<coverage><class filename="src/app.py"></coverage>' >"$BATS_TEST_TMPDIR/bad.xml"
   run_coverage_evaluator "$BATS_TEST_TMPDIR/bad.xml"
   assert_input_error "malformed-cobertura"
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/negative-hits.xml" src/app.py 1 -1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/negative-hits.xml"
+  assert_input_error "malformed-cobertura"
   printf 'SF:src/app.py\nDA:1,1\n' >"$BATS_TEST_TMPDIR/bad.info"
   run_coverage_evaluator "$BATS_TEST_TMPDIR/bad.info"
   assert_input_error "malformed-lcov"
+  printf 'SF:src/app.py\nBRDA:1,0,0,x\nend_of_record\n' >"$BATS_TEST_TMPDIR/bad-branch.info"
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/bad-branch.info"
+  assert_input_error "malformed-lcov"
+}
+
+@test "rejects control characters in path-bearing action inputs and Cobertura roots" {
+  COVERAGE_REPORT_PATH=$'bad\r.xml'
+  run_coverage_evaluator "$COVERAGE_REPORT_PATH"
+  assert_input_error "invalid-report"
+  COVERAGE_REPORT_PATH="$BATS_TEST_TMPDIR/report.xml"
+  COVERAGE_WORKING_DIRECTORY=$'repo\r'
+  run_coverage_evaluator "$COVERAGE_REPORT_PATH"
+  assert_input_error "invalid-working-directory"
+  COVERAGE_WORKING_DIRECTORY="$COVERAGE_FIXTURE_ROOT"
+  COVERAGE_SOURCE_PATHS=$'src/\r'
+  run_coverage_evaluator "$COVERAGE_REPORT_PATH"
+  assert_input_error "invalid-source-pathspecs"
+  COVERAGE_SOURCE_PATHS=src/
+  printf '%s\n' '<?xml version="1.0"?>' '<coverage><sources><source>src&#13;</source></sources><packages><package name=""><classes>' '<class name="fixture" filename="app.py"><lines><line number="1" hits="1"/></lines></class>' '</classes></package></packages></coverage>' >"$COVERAGE_REPORT_PATH"
+  run_coverage_evaluator "$COVERAGE_REPORT_PATH"
+  assert_input_error "invalid-report-path"
 }
 
 @test "rejects foreign and ambiguous report identities" {
