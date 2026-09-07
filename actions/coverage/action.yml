@@ -40,6 +40,7 @@ runs:
         COVERAGE_OUTPUT_DIRECTORY: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ github.action }}
         COVERAGE_RUNNER_OS: ${{ runner.os }}
       run: python3 "$GITHUB_ACTION_PATH/evaluate.py"
+      shell: bash
       continue-on-error: true
     - id: upload
       if: always()
@@ -55,3 +56,4 @@ runs:
         COVERAGE_EVALUATE_OUTCOME: ${{ steps.evaluate.outcome }}
         COVERAGE_UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
       run: python3 "$GITHUB_ACTION_PATH/finalize.py"
+      shell: bash

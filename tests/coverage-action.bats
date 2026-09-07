@@ -72,10 +72,12 @@ run_coverage_finalizer() {
 }
 
 @test "finalizer returns each valid stored evaluation status" {
-  local expected
+  local expected outcome
   for expected in 0 1 2; do
+    outcome=failure
+    [ "$expected" -eq 0 ] && outcome=success
     COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/finalize-$expected"
-    run_coverage_finalizer failure success "$expected"$'\n'
+    run_coverage_finalizer "$outcome" success "$expected"$'\n'
     [ "$status" -eq "$expected" ] || return 1
     [ "$(cat "$GITHUB_STEP_SUMMARY")" = 'Original bounded coverage diagnosis.' ] || return 1
   done
@@ -115,6 +117,23 @@ run_coverage_finalizer() {
   run_coverage_finalizer failure success $'1\n'
   [ "$status" -eq 1 ] || return 1
   [ "$(cat "$GITHUB_STEP_SUMMARY")" = 'Original bounded coverage diagnosis.' ] || return 1
+}
+
+@test "finalizer rejects mismatched or incomplete evaluation outcomes" {
+  local evaluation
+  for evaluation in success skipped cancelled '' ; do
+    COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/finalize-outcome-${evaluation:-missing}"
+    run_coverage_finalizer "$evaluation" success $'1\n'
+    [ "$status" -eq 2 ] || return 1
+    grep -Fq 'Coverage reporting error' "$GITHUB_STEP_SUMMARY" || return 1
+    grep -Fq 'Original bounded coverage diagnosis.' "$GITHUB_STEP_SUMMARY" || return 1
+  done
+
+  COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/finalize-failure-zero"
+  run_coverage_finalizer failure success $'0\n'
+  [ "$status" -eq 2 ] || return 1
+  grep -Fq 'Coverage reporting error' "$GITHUB_STEP_SUMMARY" || return 1
+  grep -Fq 'Original bounded coverage diagnosis.' "$GITHUB_STEP_SUMMARY" || return 1
 }
 
 @test "rejects every absent required action input" {

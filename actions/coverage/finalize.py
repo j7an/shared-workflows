@@ -30,8 +30,11 @@ def stored_status() -> int | None:
 
 def main() -> int:
     status = stored_status()
+    evaluation_outcome = os.environ.get("COVERAGE_EVALUATE_OUTCOME")
     upload_succeeded = os.environ.get("COVERAGE_UPLOAD_OUTCOME") == "success"
-    if status is not None and upload_succeeded:
+    evaluation_completed = ((evaluation_outcome == "success" and status == 0)
+                            or (evaluation_outcome == "failure" and status in (1, 2)))
+    if evaluation_completed and upload_succeeded:
         return status
     try:
         append_reporting_error()

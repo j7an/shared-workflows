@@ -61,10 +61,12 @@ assert_lacks() {
   upload="$(step_block upload)"
   finalize="$(step_block finalize)"
   assert_contains "$evaluate" 'continue-on-error: true' || return 1
+  assert_contains "$evaluate" 'shell: bash' || return 1
   assert_contains "$evaluate" 'python3 "$GITHUB_ACTION_PATH/evaluate.py"' || return 1
   assert_contains "$upload" 'if: always()' || return 1
   assert_contains "$upload" 'if-no-files-found: error' || return 1
   assert_contains "$finalize" 'if: always()' || return 1
+  assert_contains "$finalize" 'shell: bash' || return 1
   assert_contains "$finalize" 'python3 "$GITHUB_ACTION_PATH/finalize.py"' || return 1
 }
 
