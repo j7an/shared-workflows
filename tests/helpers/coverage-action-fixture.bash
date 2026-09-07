@@ -67,6 +67,18 @@ case ${COVERAGE_FAKE_EVALUATOR_ACTION:-valid} in
   inconsistent-percent)
     printf '%s' '{"report_name":"Diff Coverage","diff_name":"fixture","src_stats":{"src/app.py":{"percent_covered":99,"violation_lines":[3],"covered_lines":[],"violations":[[3,null]]}},"total_num_lines":1,"total_num_violations":1,"total_percent_covered":99,"num_changed_lines":1}' >"$json_path"
     ;;
+  nonfinite-source-percent)
+    printf '%s' '{"report_name":"Diff Coverage","diff_name":"fixture","src_stats":{"src/app.py":{"percent_covered":NaN,"violation_lines":[3],"covered_lines":[],"violations":[[3,null]]}},"total_num_lines":1,"total_num_violations":1,"total_percent_covered":0,"num_changed_lines":1}' >"$json_path"
+    ;;
+  duplicate-lines)
+    printf '%s' '{"report_name":"Diff Coverage","diff_name":"fixture","src_stats":{"src/app.py":{"percent_covered":0,"violation_lines":[3,3],"covered_lines":[],"violations":[[3,null],[3,null]]}},"total_num_lines":2,"total_num_violations":2,"total_percent_covered":0,"num_changed_lines":2}' >"$json_path"
+    ;;
+  mismatched-violations)
+    printf '%s' '{"report_name":"Diff Coverage","diff_name":"fixture","src_stats":{"src/app.py":{"percent_covered":0,"violation_lines":[3],"covered_lines":[],"violations":[[4,null]]}},"total_num_lines":1,"total_num_violations":1,"total_percent_covered":0,"num_changed_lines":1}' >"$json_path"
+    ;;
+  inconsistent-source-percent)
+    printf '%s' '{"report_name":"Diff Coverage","diff_name":"fixture","src_stats":{"src/app.py":{"percent_covered":99,"violation_lines":[3],"covered_lines":[],"violations":[[3,null]]}},"total_num_lines":1,"total_num_violations":1,"total_percent_covered":0,"num_changed_lines":1}' >"$json_path"
+    ;;
   mismatch|below)
     printf '%s' '{"report_name":"Diff Coverage","diff_name":"fixture","src_stats":{"src/app.py":{"percent_covered":0,"violation_lines":[3],"covered_lines":[],"violations":[[3,null]]}},"total_num_lines":1,"total_num_violations":1,"total_percent_covered":0,"num_changed_lines":1}' >"$json_path"
     ;;
@@ -83,7 +95,7 @@ if [ "${COVERAGE_FAKE_EVALUATOR_ACTION:-}" = commit ]; then
   git -c commit.gpgsign=false commit -qm tool-created-head
 fi
 case ${COVERAGE_FAKE_EVALUATOR_ACTION:-} in
-  incomplete|exit-one|below) exit 1 ;;
+  incomplete|exit-one|below|nonfinite-source-percent|duplicate-lines|mismatched-violations|inconsistent-source-percent) exit 1 ;;
   exit-two) exit 2 ;;
   *) exit 0 ;;
 esac

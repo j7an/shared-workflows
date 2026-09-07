@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from html import escape
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -345,13 +346,19 @@ def plain_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def reject_json_constant(value: str) -> NoReturn:
+    del value
+    raise ValueError("nonfinite-json-number")
+
+
 def result_payload(result_path: Path, markdown_path: Path) -> dict[str, object] | None:
     try:
         if (not result_path.is_file() or not markdown_path.is_file()
                 or result_path.stat().st_size == 0 or markdown_path.stat().st_size == 0):
             return None
-        payload = json.loads(result_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        payload = json.loads(result_path.read_text(encoding="utf-8"),
+                             parse_constant=reject_json_constant)
+    except (OSError, UnicodeError, ValueError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -386,6 +393,7 @@ def result_payload(result_path: Path, markdown_path: Path) -> dict[str, object] 
             return None
         source_percent = stats["percent_covered"]
         if (not isinstance(source_percent, (int, float)) or isinstance(source_percent, bool)
+                or not math.isfinite(source_percent)
                 or source_percent < 0 or source_percent > 100):
             return None
         line_groups = [stats[name] for name in ("violation_lines", "covered_lines")]
@@ -400,10 +408,21 @@ def result_payload(result_path: Path, markdown_path: Path) -> dict[str, object] 
                        or (item[1] is not None and not isinstance(item[1], str))
                        for item in reported_violations)):
             return None
-        if set(stats["violation_lines"]) & set(stats["covered_lines"]):
+        violation_lines = stats["violation_lines"]
+        covered_lines = stats["covered_lines"]
+        if (len(set(violation_lines)) != len(violation_lines)
+                or len(set(covered_lines)) != len(covered_lines)
+                or set(violation_lines) & set(covered_lines)
+                or [item[0] for item in reported_violations] != violation_lines):
             return None
-        measured += len(stats["violation_lines"]) + len(stats["covered_lines"])
-        violations += len(stats["violation_lines"])
+        source_lines = len(violation_lines) + len(covered_lines)
+        if source_lines == 0:
+            return None
+        expected_source_percent = 100 - float(len(violation_lines)) / source_lines * 100
+        if source_percent != expected_source_percent:
+            return None
+        measured += source_lines
+        violations += len(violation_lines)
     expected_percent = ((total_lines - total_violations) * 100 // total_lines
                         if total_lines else 100)
     if measured != total_lines or violations != total_violations or percent != expected_percent:
@@ -560,7 +579,9 @@ def write_diagnostics(inputs: GateInputs, comparison: Comparison,
     (inputs.output_directory / "metadata.json").write_text(
         metadata_json(metadata, evaluation.status) + "\n", encoding="utf-8")
 
-    diagnostic = "evaluator-failed" if evaluation.outcome == "error" else evaluation.outcome
+    diagnostic = ("evaluator-failed: verify diff-cover completed and inspect retained "
+                  "JSON, Markdown, stdout, and stderr"
+                  if evaluation.outcome == "error" else evaluation.outcome)
     (inputs.output_directory / "diagnostics.txt").write_text(diagnostic + "\n", encoding="utf-8")
     stdout = (inputs.output_directory / "stdout.txt").read_text(
         encoding="utf-8", errors="replace")[:16384]
@@ -571,8 +592,10 @@ def write_diagnostics(inputs: GateInputs, comparison: Comparison,
         "<ul>",
         f"<li>Outcome: <code>{escape(evaluation.outcome)}</code></li>",
         f"<li>Report: <code>{escape(inputs.report_path.name)}</code></li>",
+        f"<li>Base commit: <code>{escape(comparison.base_sha)}</code></li>",
         f"<li>Tested commit: <code>{escape(comparison.tested_sha)}</code></li>",
         f"<li>Merge base: <code>{escape(comparison.merge_base_sha)}</code></li>",
+        f"<li>Minimum: <code>{escape(inputs.minimum_text)}</code></li>",
     ]
     if evaluation.total_num_lines is not None:
         rows.extend([
@@ -582,6 +605,13 @@ def write_diagnostics(inputs: GateInputs, comparison: Comparison,
     if evaluation.total_percent_covered is not None:
         rows.append(f"<li>Changed-line coverage: {evaluation.total_percent_covered}%</li>")
     rows.append("</ul>")
+    if evaluation.outcome == "error":
+        rows.extend([
+            "<h3>Evaluator error</h3>",
+            "<p>Evaluator failed or returned incomplete or inconsistent output. "
+            "Inspect diff-cover.json, diff-cover.md, stdout.txt, and stderr.txt; "
+            "then verify the supplied tool and report.</p>",
+        ])
     payload = result_payload(inputs.output_directory / "diff-cover.json",
                              inputs.output_directory / "diff-cover.md")
     if payload is not None:
@@ -637,6 +667,36 @@ def finish_error(inputs: GateInputs | None, output: Path | None, message: str) -
     raise SystemExit(ERROR)
 
 
+def finish_publication_error(inputs: GateInputs, evaluation: Evaluation) -> NoReturn:
+    message = "diagnostic-publication-failed"
+    try:
+        with (inputs.output_directory / "diagnostics.txt").open("a", encoding="utf-8") as output:
+            output.write(message + "\n")
+    except OSError:
+        pass
+    try:
+        with (inputs.output_directory / "summary.md").open("a", encoding="utf-8") as output:
+            output.write(f"<p>Reporting error: <code>{message}</code></p>\n")
+    except OSError:
+        pass
+    try:
+        metadata_path = inputs.output_directory / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            metadata = {"evaluation": asdict(evaluation)}
+        metadata["publication_error"] = message
+        metadata["status"] = ERROR
+        metadata_path.write_text(metadata_json(metadata, ERROR) + "\n", encoding="utf-8")
+    except (OSError, UnicodeError, ValueError):
+        pass
+    try:
+        atomic_status(inputs.output_directory, ERROR)
+    except OSError:
+        pass
+    sys.stderr.write(message + ": original-outcome=" + evaluation.outcome + "\n")
+    raise SystemExit(ERROR)
+
+
 def main(env: Mapping[str, str]) -> int:
     inputs: GateInputs | None = None
     output: Path | None = None
@@ -659,8 +719,7 @@ def main(env: Mapping[str, str]) -> int:
         try:
             write_diagnostics(inputs, comparison, inventory, evaluation)
         except OSError:
-            finish_error(inputs, output,
-                         "diagnostic-publication-failed: original-outcome=" + evaluation.outcome)
+            finish_publication_error(inputs, evaluation)
         return evaluation.status
     except GateError as error:
         finish_error(inputs, output, str(error))

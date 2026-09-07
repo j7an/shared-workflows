@@ -514,7 +514,7 @@ PY
 @test "tool result failures and inconsistent structured output fail closed" {
   local mode index=0
   coverage_fixture_commit_change || return 1
-  for mode in launch-failure exit-one exit-two missing-json malformed-json incomplete inconsistent-totals inconsistent-percent mismatch; do
+  for mode in launch-failure exit-one exit-two missing-json malformed-json incomplete inconsistent-totals inconsistent-percent mismatch nonfinite-source-percent duplicate-lines mismatched-violations inconsistent-source-percent; do
     index=$((index + 1))
     COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/output-failure-$index"
     COVERAGE_FAKE_EVALUATOR_ACTION=$mode
@@ -522,6 +522,8 @@ PY
     assert_input_error evaluator-failed || return 1
     coverage_fixture_write_fake_evaluator || return 1
   done
+  grep -Fq 'Evaluator failed or returned incomplete or inconsistent output.' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  grep -Fq 'Inspect diff-cover.json, diff-cover.md, stdout.txt, and stderr.txt' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
 }
 
 @test "tool result diagnostics escape display data and retain upstream artifacts" {
@@ -537,6 +539,8 @@ PY
   ! grep -Fq 'report <unsafe>&.xml' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
   grep -Fq 'fake stdout &lt;unsafe&gt;' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
   grep -Fq 'fake stderr &amp; unsafe' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  grep -Fq "Base commit: <code>$COVERAGE_BASE_SHA</code>" "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  grep -Fq 'Minimum: <code>1</code>' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
   grep -Fq '# Diff Coverage' "$COVERAGE_OUTPUT_DIRECTORY/diff-cover.md" || return 1
 }
 
@@ -563,4 +567,31 @@ PY
   [ "$?" -eq 0 ] || return 1
   printf '<!-- changed after evaluation -->\n' >>"$report" || return 1
   ! cmp "$report" "$COVERAGE_OUTPUT_DIRECTORY/coverage-report.xml" >/dev/null 2>&1 || return 1
+}
+
+@test "summary publication failure retains the completed coverage diagnosis" {
+  coverage_fixture_commit_change || return 1
+  coverage_write_cobertura_lines "$BATS_TEST_TMPDIR/report.xml" src/app.py 3 1 4 0 || return 1
+  COVERAGE_FAKE_EVALUATOR_ACTION=below
+  COVERAGE_MINIMUM=1
+  GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary-directory"
+  mkdir "$GITHUB_STEP_SUMMARY" || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 2 ] || return 1
+  [ "$(cat "$COVERAGE_OUTPUT_DIRECTORY/status")" = 2 ] || return 1
+  grep -Fq 'below-threshold' "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
+  grep -Fq 'diagnostic-publication-failed' "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
+  grep -Fq 'Measured changed lines: 1' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  grep -Fq 'Uncovered changed lines: 1' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  grep -Fq 'Changed-line coverage: 0%' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  python3 - "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" <<'PY'
+import json
+import sys
+metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+assert metadata["evaluation"]["outcome"] == "below-threshold"
+assert metadata["evaluation"]["total_num_lines"] == 1
+assert metadata["publication_error"] == "diagnostic-publication-failed"
+assert metadata["status"] == 2
+PY
+  [ "$?" -eq 0 ] || return 1
 }
