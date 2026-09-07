@@ -90,9 +90,13 @@ def pathspec_list(value: str, category: str) -> tuple[str, ...]:
     return items
 
 
+def output_directory(env: Mapping[str, str]) -> Path:
+    return Path(no_controls(required(env, "COVERAGE_OUTPUT_DIRECTORY"),
+                            "invalid-output-directory")).resolve()
+
+
 def parse_inputs(env: Mapping[str, str]) -> GateInputs:
-    output = Path(no_controls(required(env, "COVERAGE_OUTPUT_DIRECTORY"),
-                              "invalid-output-directory")).resolve()
+    output = output_directory(env)
     if env.get("COVERAGE_RUNNER_OS") != "Linux":
         fail("unsupported-runner")
     workspace = Path(no_controls(required(env, "GITHUB_WORKSPACE"),
@@ -262,9 +266,7 @@ def write_outputs(output: Path, status: int, message: str, metadata: object) -> 
     (output / "status").write_text(str(status) + "\n", encoding="utf-8")
     (output / "diagnostics.txt").write_text(message[:1024] + "\n", encoding="utf-8")
     (output / "summary.md").write_text("Coverage gate: " + message[:1024] + "\n", encoding="utf-8")
-    (output / "metadata.json").write_text(
-        json.dumps(bounded_metadata(metadata), default=str, sort_keys=True) + "\n",
-        encoding="utf-8")
+    (output / "metadata.json").write_text(metadata_json(metadata) + "\n", encoding="utf-8")
 
 
 def bounded_metadata(value: object) -> object:
@@ -280,18 +282,33 @@ def bounded_metadata(value: object) -> object:
     return str(value)[:512]
 
 
-def finish_error(inputs: GateInputs | None, message: str) -> NoReturn:
-    output = inputs.output_directory if inputs else Path(os.environ.get("COVERAGE_OUTPUT_DIRECTORY", "."))
-    write_outputs(output, ERROR, message, {"status": ERROR, "error": message})
+def metadata_json(metadata: object) -> str:
+    encoded = json.dumps(bounded_metadata(metadata), default=str, sort_keys=True)
+    if len(encoded.encode("utf-8")) < 4095:
+        return encoded
+    essential: dict[str, object] = {"status": ERROR, "truncated": True}
+    if isinstance(metadata, dict) and isinstance(metadata.get("error"), str):
+        essential["error"] = metadata["error"][:512]
+    return json.dumps(essential, sort_keys=True)
+
+
+def finish_error(inputs: GateInputs | None, output: Path | None, message: str) -> NoReturn:
+    destination = inputs.output_directory if inputs else output
+    if destination is not None:
+        try:
+            write_outputs(destination, ERROR, message, {"status": ERROR, "error": message})
+        except OSError:
+            pass
+    sys.stderr.write(message[:1024] + "\n")
     raise SystemExit(ERROR)
 
 
 def main(env: Mapping[str, str]) -> int:
     inputs: GateInputs | None = None
+    output: Path | None = None
     try:
-        output = env.get("COVERAGE_OUTPUT_DIRECTORY")
-        if output:
-            Path(output).resolve().mkdir(parents=True, exist_ok=True)
+        output = output_directory(env)
+        output.mkdir(parents=True, exist_ok=True)
         inputs = parse_inputs(env)
         inventory = inventory_report(inputs, tracked_paths(inputs))
         write_outputs(inputs.output_directory, PASS, "validated", {
@@ -299,11 +316,11 @@ def main(env: Mapping[str, str]) -> int:
             "repository_paths": sorted(inventory.repository_paths)}})
         return PASS
     except GateError as error:
-        finish_error(inputs, str(error))
+        finish_error(inputs, output, str(error))
     except SystemExit:
         raise
     except Exception:
-        finish_error(inputs, "internal-error")
+        finish_error(inputs, output, "internal-error")
     return ERROR
 
 
