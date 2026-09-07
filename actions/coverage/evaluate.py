@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
+from html import escape
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -47,6 +49,16 @@ class Comparison:
     base_sha: str
     merge_base_sha: str
     tested_sha: str
+
+
+@dataclass(frozen=True)
+class Evaluation:
+    outcome: str
+    status: int
+    total_num_lines: int | None
+    total_num_violations: int | None
+    total_percent_covered: int | None
+    num_changed_lines: int | None
 
 
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -294,20 +306,128 @@ def assert_tested_head(inputs: GateInputs, comparison: Comparison) -> None:
         fail("tested-head-changed")
 
 
-def invoke_evaluator(inputs: GateInputs, patch: Path) -> None:
+def write_bounded(path: Path, value: str) -> None:
+    path.write_text(value[:16384], encoding="utf-8")
+
+
+def invoke_diff_cover(inputs: GateInputs, comparison: Comparison,
+                      patch: Path) -> tuple[int, Path, Path]:
     json_report = inputs.output_directory / "diff-cover.json"
     markdown_report = inputs.output_directory / "diff-cover.md"
+    argv = [
+        str(inputs.diff_cover_path),
+        str(inputs.report_path),
+        "--diff-file",
+        str(patch),
+        "--compare-branch",
+        comparison.merge_base_sha,
+        "--fail-under",
+        inputs.minimum_text,
+        "--format",
+        f"json:{json_report},markdown:{markdown_report}",
+        "--quiet",
+    ]
     try:
         result = subprocess.run(
-            [str(inputs.diff_cover_path), str(inputs.report_path), "--diff-file", str(patch),
-             "--fail-under", inputs.minimum_text, "--format",
-             "json:" + str(json_report) + ",markdown:" + str(markdown_report)],
-            cwd=inputs.checkout, check=False, shell=False, capture_output=True, text=True,
+            argv, cwd=inputs.checkout, check=False, shell=False, capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
         )
     except OSError:
-        fail("evaluator-failed")
-    if result.returncode != 0:
-        fail("evaluator-failed")
+        write_bounded(inputs.output_directory / "stdout.txt", "")
+        write_bounded(inputs.output_directory / "stderr.txt", "tool-launch-failed\n")
+        return -1, json_report, markdown_report
+    write_bounded(inputs.output_directory / "stdout.txt", result.stdout)
+    write_bounded(inputs.output_directory / "stderr.txt", result.stderr)
+    return result.returncode, json_report, markdown_report
+
+
+def plain_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def result_payload(result_path: Path, markdown_path: Path) -> dict[str, object] | None:
+    try:
+        if (not result_path.is_file() or not markdown_path.is_file()
+                or result_path.stat().st_size == 0 or markdown_path.stat().st_size == 0):
+            return None
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    required_keys = {
+        "report_name", "diff_name", "src_stats", "total_num_lines",
+        "total_num_violations", "total_percent_covered", "num_changed_lines",
+    }
+    if not required_keys.issubset(payload):
+        return None
+    if (not isinstance(payload["report_name"], str)
+            or not isinstance(payload["diff_name"], str)
+            or not isinstance(payload["src_stats"], dict)):
+        return None
+    totals = [payload[name] for name in (
+        "total_num_lines", "total_num_violations", "total_percent_covered",
+        "num_changed_lines",
+    )]
+    if not all(plain_int(value) for value in totals):
+        return None
+    total_lines, total_violations, percent, changed_lines = totals
+    if (total_lines < 0 or total_violations < 0 or changed_lines < 0
+            or total_violations > total_lines or total_lines > changed_lines
+            or percent < 0 or percent > 100):
+        return None
+
+    measured = 0
+    violations = 0
+    for source, stats in payload["src_stats"].items():
+        if not isinstance(source, str) or not isinstance(stats, dict):
+            return None
+        if not {"percent_covered", "violation_lines", "covered_lines", "violations"}.issubset(stats):
+            return None
+        source_percent = stats["percent_covered"]
+        if (not isinstance(source_percent, (int, float)) or isinstance(source_percent, bool)
+                or source_percent < 0 or source_percent > 100):
+            return None
+        line_groups = [stats[name] for name in ("violation_lines", "covered_lines")]
+        if any(not isinstance(lines, list) for lines in line_groups):
+            return None
+        if any(not plain_int(line) or line <= 0 for lines in line_groups for line in lines):
+            return None
+        reported_violations = stats["violations"]
+        if (not isinstance(reported_violations, list)
+                or any(not isinstance(item, list) or len(item) != 2
+                       or not plain_int(item[0]) or item[0] <= 0
+                       or (item[1] is not None and not isinstance(item[1], str))
+                       for item in reported_violations)):
+            return None
+        if set(stats["violation_lines"]) & set(stats["covered_lines"]):
+            return None
+        measured += len(stats["violation_lines"]) + len(stats["covered_lines"])
+        violations += len(stats["violation_lines"])
+    expected_percent = ((total_lines - total_violations) * 100 // total_lines
+                        if total_lines else 100)
+    if measured != total_lines or violations != total_violations or percent != expected_percent:
+        return None
+    return payload
+
+
+def classify_result(tool_status: int, result_path: Path, markdown_path: Path,
+                    minimum: Decimal) -> Evaluation:
+    payload = result_payload(result_path, markdown_path)
+    if payload is None:
+        return Evaluation("error", ERROR, None, None, None, None)
+    total_lines = int(payload["total_num_lines"])
+    total_violations = int(payload["total_num_violations"])
+    percent = int(payload["total_percent_covered"])
+    changed_lines = int(payload["num_changed_lines"])
+    if total_lines == 0 and tool_status == 0:
+        return Evaluation("not-applicable", PASS, 0, 0, None, changed_lines)
+    if total_lines > 0 and tool_status == 0 and Decimal(percent) >= minimum:
+        return Evaluation("pass", PASS, total_lines, total_violations, percent, changed_lines)
+    if total_lines > 0 and tool_status == 1 and Decimal(percent) < minimum:
+        return Evaluation("below-threshold", BELOW_THRESHOLD, total_lines,
+                          total_violations, percent, changed_lines)
+    return Evaluation("error", ERROR, total_lines, total_violations, percent, changed_lines)
 
 
 def report_path(value: str, roots: tuple[Path, ...], checkout: Path,
@@ -406,12 +526,81 @@ def inventory_report(inputs: GateInputs, tracked_files: frozenset[str]) -> Repor
     fail("unsupported-report")
 
 
+def atomic_status(output: Path, status: int) -> None:
+    temporary = output / ".status.tmp"
+    temporary.write_text(str(status) + "\n", encoding="utf-8")
+    os.replace(temporary, output / "status")
+
+
 def write_outputs(output: Path, status: int, message: str, metadata: object) -> None:
     output.mkdir(parents=True, exist_ok=True)
-    (output / "status").write_text(str(status) + "\n", encoding="utf-8")
     (output / "diagnostics.txt").write_text(message[:1024] + "\n", encoding="utf-8")
     (output / "summary.md").write_text("Coverage gate: " + message[:1024] + "\n", encoding="utf-8")
     (output / "metadata.json").write_text(metadata_json(metadata, status) + "\n", encoding="utf-8")
+    atomic_status(output, status)
+
+
+def write_diagnostics(inputs: GateInputs, comparison: Comparison,
+                      inventory: ReportInventory, evaluation: Evaluation) -> None:
+    copied_report = inputs.output_directory / ("coverage-report" + inputs.report_path.suffix.lower())
+    shutil.copyfile(inputs.report_path, copied_report)
+    effective = select_effective_files(inputs, comparison)
+    changed = select_changed_files(inputs, comparison, effective)
+    metadata = {
+        "inputs": asdict(inputs),
+        "inventory": {
+            "format": inventory.format,
+            "repository_paths": sorted(inventory.repository_paths),
+        },
+        "comparison": asdict(comparison),
+        "effective_paths": sorted(effective),
+        "changed_paths": list(changed),
+        "evaluation": asdict(evaluation),
+    }
+    (inputs.output_directory / "metadata.json").write_text(
+        metadata_json(metadata, evaluation.status) + "\n", encoding="utf-8")
+
+    diagnostic = "evaluator-failed" if evaluation.outcome == "error" else evaluation.outcome
+    (inputs.output_directory / "diagnostics.txt").write_text(diagnostic + "\n", encoding="utf-8")
+    stdout = (inputs.output_directory / "stdout.txt").read_text(
+        encoding="utf-8", errors="replace")[:16384]
+    stderr = (inputs.output_directory / "stderr.txt").read_text(
+        encoding="utf-8", errors="replace")[:16384]
+    rows = [
+        "<h2>Changed-line coverage</h2>",
+        "<ul>",
+        f"<li>Outcome: <code>{escape(evaluation.outcome)}</code></li>",
+        f"<li>Report: <code>{escape(inputs.report_path.name)}</code></li>",
+        f"<li>Tested commit: <code>{escape(comparison.tested_sha)}</code></li>",
+        f"<li>Merge base: <code>{escape(comparison.merge_base_sha)}</code></li>",
+    ]
+    if evaluation.total_num_lines is not None:
+        rows.extend([
+            f"<li>Measured changed lines: {evaluation.total_num_lines}</li>",
+            f"<li>Uncovered changed lines: {evaluation.total_num_violations}</li>",
+        ])
+    if evaluation.total_percent_covered is not None:
+        rows.append(f"<li>Changed-line coverage: {evaluation.total_percent_covered}%</li>")
+    rows.append("</ul>")
+    payload = result_payload(inputs.output_directory / "diff-cover.json",
+                             inputs.output_directory / "diff-cover.md")
+    if payload is not None:
+        uncovered = []
+        for source, stats in sorted(payload["src_stats"].items()):
+            lines = stats["violation_lines"]
+            if lines:
+                uncovered.append(f"<li><code>{escape(source)}</code>: {', '.join(map(str, lines))}</li>")
+        if uncovered:
+            rows.extend(["<h3>Uncovered changed lines</h3>", "<ul>", *uncovered, "</ul>"])
+    if stdout:
+        rows.extend(["<h3>Evaluator stdout</h3>", f"<pre>{escape(stdout)}</pre>"])
+    if stderr:
+        rows.extend(["<h3>Evaluator stderr</h3>", f"<pre>{escape(stderr)}</pre>"])
+    summary = "\n".join(rows) + "\n"
+    (inputs.output_directory / "summary.md").write_text(summary, encoding="utf-8")
+    with inputs.step_summary.open("a", encoding="utf-8") as step_summary:
+        step_summary.write(summary)
+    atomic_status(inputs.output_directory, evaluation.status)
 
 
 def bounded_metadata(value: object) -> object:
@@ -464,14 +653,15 @@ def main(env: Mapping[str, str]) -> int:
             fail("missing-changed-report-path")
         patch = write_scoped_patch(inputs, comparison, changed)
         assert_tested_head(inputs, comparison)
-        invoke_evaluator(inputs, patch)
+        tool_status, result_path, markdown_path = invoke_diff_cover(inputs, comparison, patch)
         assert_tested_head(inputs, comparison)
-        write_outputs(inputs.output_directory, PASS, "validated", {
-            "inputs": asdict(inputs), "inventory": {"format": inventory.format,
-            "repository_paths": sorted(inventory.repository_paths)},
-            "comparison": asdict(comparison), "effective_paths": sorted(effective),
-            "changed_paths": list(changed)})
-        return PASS
+        evaluation = classify_result(tool_status, result_path, markdown_path, inputs.minimum)
+        try:
+            write_diagnostics(inputs, comparison, inventory, evaluation)
+        except OSError:
+            finish_error(inputs, output,
+                         "diagnostic-publication-failed: original-outcome=" + evaluation.outcome)
+        return evaluation.status
     except GateError as error:
         finish_error(inputs, output, str(error))
     except SystemExit:

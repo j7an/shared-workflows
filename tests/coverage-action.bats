@@ -3,9 +3,49 @@
 load 'helpers/coverage-action-fixture'
 
 setup() {
+  if [ -z "${DIFF_COVER_PATH:-}" ] || [ ! -x "$DIFF_COVER_PATH" ]; then
+    printf 'DIFF_COVER_PATH must name an executable diff-cover 10.x test tool\n' >&2
+    return 1
+  fi
   coverage_fixture_init || return 1
   coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1 || return 1
   return 0
+}
+
+assert_evaluation() {
+  local expected_status=$1 expected_outcome=$2 expected_lines=$3 expected_violations=$4 expected_percent=$5 expected_changed=$6
+  if [ "$status" -ne "$expected_status" ]; then
+    printf 'expected status %s, got %s; output: %s\n' "$expected_status" "$status" "$output" >&2
+    [ ! -f "$COVERAGE_OUTPUT_DIRECTORY/diff-cover.json" ] || cat "$COVERAGE_OUTPUT_DIRECTORY/diff-cover.json" >&2
+    [ ! -f "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" ] || cat "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" >&2
+    return 1
+  fi
+  python3 - "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" "$expected_outcome" "$expected_lines" "$expected_violations" "$expected_percent" "$expected_changed" <<'PY'
+import json
+import sys
+metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+evaluation = metadata["evaluation"]
+assert evaluation["outcome"] == sys.argv[2]
+assert evaluation["total_num_lines"] == int(sys.argv[3])
+assert evaluation["total_num_violations"] == int(sys.argv[4])
+expected = None if sys.argv[5] == "none" else int(sys.argv[5])
+assert evaluation["total_percent_covered"] == expected
+assert evaluation["num_changed_lines"] == int(sys.argv[6])
+PY
+  [ "$?" -eq 0 ] || return 1
+  [ "$(cat "$COVERAGE_OUTPUT_DIRECTORY/status")" = "$expected_status" ] || return 1
+}
+
+assert_diagnostic_bundle() {
+  local report=$1
+  [ -f "$COVERAGE_OUTPUT_DIRECTORY/scoped.diff" ] || return 1
+  [ -f "$COVERAGE_OUTPUT_DIRECTORY/diff-cover.json" ] || return 1
+  [ -f "$COVERAGE_OUTPUT_DIRECTORY/diff-cover.md" ] || return 1
+  [ -f "$COVERAGE_OUTPUT_DIRECTORY/stdout.txt" ] || return 1
+  [ -f "$COVERAGE_OUTPUT_DIRECTORY/stderr.txt" ] || return 1
+  [ -f "$COVERAGE_OUTPUT_DIRECTORY/summary.md" ] || return 1
+  cmp "$report" "$COVERAGE_OUTPUT_DIRECTORY/coverage-report.${report##*.}" || return 1
+  cmp "$COVERAGE_OUTPUT_DIRECTORY/summary.md" "$GITHUB_STEP_SUMMARY" || return 1
 }
 
 assert_input_error() {
@@ -394,4 +434,133 @@ PY
   COVERAGE_FAKE_EVALUATOR_ACTION=commit
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "tested-head-changed" || return 1
+}
+
+@test "XML and LCOV pass above the threshold with matching arithmetic" {
+  coverage_fixture_commit_change || return 1
+  coverage_run_real_pair src/app.py 0 pass 2 0 100 2 3 1 4 1 || return 1
+}
+
+@test "XML and LCOV pass exactly at the threshold with matching arithmetic" {
+  coverage_fixture_commit_change || return 1
+  COVERAGE_MINIMUM=50
+  coverage_run_real_pair src/app.py 0 pass 2 1 50 2 3 1 4 0 || return 1
+}
+
+@test "XML and LCOV fail below the threshold with matching arithmetic" {
+  coverage_fixture_commit_change || return 1
+  COVERAGE_MINIMUM=51
+  coverage_run_real_pair src/app.py 1 below-threshold 2 1 50 2 3 1 4 0 || return 1
+  grep -Fq 'Uncovered changed lines' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  grep -Fq '4' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+}
+
+@test "XML and LCOV preserve fractional threshold integer semantics" {
+  printf 'first = 1\nsecond = 2\nthird = 3\n' >>"$COVERAGE_FIXTURE_ROOT/src/app.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm fractional || return 1
+  COVERAGE_MINIMUM=66.5
+  coverage_run_real_pair src/app.py 1 below-threshold 3 1 66 3 3 1 4 1 5 0 || return 1
+}
+
+@test "XML and LCOV classify documentation-only changes as not applicable" {
+  coverage_fixture_commit_file docs/readme.md $'documentation\n' || return 1
+  coverage_run_real_pair src/app.py 0 not-applicable 0 0 none 0 1 1 || return 1
+  ! grep -Eq '[0-9]+%' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+}
+
+@test "XML and LCOV classify nonexecutable source changes as not applicable" {
+  printf '# comment only\n' >>"$COVERAGE_FIXTURE_ROOT/src/app.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm comment || return 1
+  coverage_run_real_pair src/app.py 0 not-applicable 0 0 none 1 1 1 || return 1
+  ! grep -Eq '[0-9]+%' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+}
+
+@test "XML and LCOV classify represented unloaded source as below threshold" {
+  coverage_fixture_commit_file src/unloaded.py $'unloaded = 1\n' || return 1
+  COVERAGE_MINIMUM=1
+  coverage_run_real_pair src/unloaded.py 1 below-threshold 1 1 0 1 1 0 || return 1
+}
+
+@test "tool result invocation uses only the approved explicit arguments" {
+  coverage_fixture_commit_change || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 0 ] || return 1
+  python3 - "$BATS_TEST_TMPDIR/fake-argv.log" "$COVERAGE_OUTPUT_DIRECTORY" "$COVERAGE_BASE_SHA" <<'PY'
+import os
+import sys
+args = open(sys.argv[1], encoding="utf-8").read().splitlines()
+output = os.path.realpath(sys.argv[2])
+assert "--diff-file" in args
+assert "--compare-branch" in args
+assert args[args.index("--compare-branch") + 1] == sys.argv[3]
+assert "--quiet" in args
+assert args[args.index("--format") + 1] == f"json:{output}/diff-cover.json,markdown:{output}/diff-cover.md"
+for forbidden in ("--config-file", "--total-percent-float", "--include", "--exclude", "--expand-coverage-report"):
+    assert forbidden not in args
+PY
+  [ "$?" -eq 0 ] || return 1
+}
+
+@test "tool result classifies only a complete proved threshold miss" {
+  coverage_fixture_commit_change || return 1
+  COVERAGE_FAKE_EVALUATOR_ACTION=below
+  COVERAGE_MINIMUM=1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_evaluation 1 below-threshold 1 1 0 1 || return 1
+}
+
+@test "tool result failures and inconsistent structured output fail closed" {
+  local mode index=0
+  coverage_fixture_commit_change || return 1
+  for mode in launch-failure exit-one exit-two missing-json malformed-json incomplete inconsistent-totals inconsistent-percent mismatch; do
+    index=$((index + 1))
+    COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/output-failure-$index"
+    COVERAGE_FAKE_EVALUATOR_ACTION=$mode
+    run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+    assert_input_error evaluator-failed || return 1
+    coverage_fixture_write_fake_evaluator || return 1
+  done
+}
+
+@test "tool result diagnostics escape display data and retain upstream artifacts" {
+  coverage_fixture_commit_change || return 1
+  local report="$BATS_TEST_TMPDIR/report <unsafe>&.xml"
+  coverage_write_cobertura_lines "$report" src/app.py 3 1 4 0 || return 1
+  COVERAGE_FAKE_EVALUATOR_ACTION=below
+  COVERAGE_MINIMUM=1
+  run_coverage_evaluator "$report"
+  assert_evaluation 1 below-threshold 1 1 0 1 || return 1
+  assert_diagnostic_bundle "$report" || return 1
+  grep -Fq 'report &lt;unsafe&gt;&amp;.xml' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  ! grep -Fq 'report <unsafe>&.xml' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  grep -Fq 'fake stdout &lt;unsafe&gt;' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  grep -Fq 'fake stderr &amp; unsafe' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+  grep -Fq '# Diff Coverage' "$COVERAGE_OUTPUT_DIRECTORY/diff-cover.md" || return 1
+}
+
+@test "tool result writes an immutable diagnostic snapshot before atomic status" {
+  coverage_fixture_commit_change || return 1
+  local report="$BATS_TEST_TMPDIR/report.xml"
+  local old_inode new_inode
+  mkdir -p "$COVERAGE_OUTPUT_DIRECTORY" || return 1
+  printf '99\n' >"$COVERAGE_OUTPUT_DIRECTORY/status" || return 1
+  old_inode=$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "$COVERAGE_OUTPUT_DIRECTORY/status") || return 1
+  run_coverage_evaluator "$report"
+  [ "$status" -eq 0 ] || return 1
+  new_inode=$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "$COVERAGE_OUTPUT_DIRECTORY/status") || return 1
+  [ "$old_inode" != "$new_inode" ] || return 1
+  python3 - "$COVERAGE_OUTPUT_DIRECTORY" <<'PY'
+import pathlib
+import sys
+output = pathlib.Path(sys.argv[1])
+status_time = (output / "status").stat().st_mtime_ns
+for name in ("coverage-report.xml", "diagnostics.txt", "diff-cover.json", "diff-cover.md",
+             "metadata.json", "scoped.diff", "stderr.txt", "stdout.txt", "summary.md"):
+    assert (output / name).stat().st_mtime_ns <= status_time, name
+PY
+  [ "$?" -eq 0 ] || return 1
+  printf '<!-- changed after evaluation -->\n' >>"$report" || return 1
+  ! cmp "$report" "$COVERAGE_OUTPUT_DIRECTORY/coverage-report.xml" >/dev/null 2>&1 || return 1
 }
