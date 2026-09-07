@@ -88,6 +88,12 @@ assert_input_error() {
   assert_input_error "invalid-exclude-pathspecs" || return 1
 }
 
+@test "preserves the exclusion category for a Git-rejected pathspec" {
+  COVERAGE_EXCLUDE_PATHS=':(glob'
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "invalid-exclude-pathspecs" || return 1
+}
+
 @test "rejects unreadable, empty, unsupported, and malformed reports" {
   run_coverage_evaluator "$BATS_TEST_TMPDIR/missing.xml"
   assert_input_error "invalid-report" || return 1
@@ -258,12 +264,30 @@ PY
 }
 
 @test "comparison uses the merge-base for diverged histories and merge checkouts" {
+  common_sha=$COVERAGE_BASE_SHA
   git -C "$COVERAGE_FIXTURE_ROOT" checkout -qb feature || return 1
   coverage_fixture_commit_file src/feature.py $'def feature():\n    return 1\n' || return 1
   feature_sha=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
   git -C "$COVERAGE_FIXTURE_ROOT" checkout -q "$COVERAGE_DEFAULT_BRANCH" || return 1
   coverage_fixture_commit_file src/main.py $'def main():\n    return 1\n' || return 1
   main_sha=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" checkout -q feature || return 1
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/feature.py 1 1 || return 1
+  COVERAGE_BASE_SHA=$main_sha
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  [ "$status" -eq 0 ] || return 1
+  python3 - "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" "$main_sha" "$feature_sha" "$common_sha" <<'PY'
+import json
+import sys
+metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+assert metadata["comparison"]["base_sha"] == sys.argv[2]
+assert metadata["comparison"]["tested_sha"] == sys.argv[3]
+assert metadata["comparison"]["merge_base_sha"] == sys.argv[4]
+assert metadata["changed_paths"] == ["src/feature.py"]
+PY
+  [ "$?" -eq 0 ] || return 1
+  grep -Fq '+def feature():' "$COVERAGE_OUTPUT_DIRECTORY/scoped.diff" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" checkout -q "$COVERAGE_DEFAULT_BRANCH" || return 1
   git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false merge --no-ff -qm fixture-merge "$feature_sha" || return 1
   merge_sha=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
   coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/feature.py 1 1 || return 1

@@ -187,7 +187,8 @@ def parse_inputs(env: Mapping[str, str]) -> GateInputs:
                       checkout, output, step_summary)
 
 
-def list_tracked(checkout: Path, pathspecs: tuple[str, ...], treeish: str = "HEAD") -> frozenset[str]:
+def list_tracked(checkout: Path, pathspecs: tuple[str, ...], treeish: str = "HEAD",
+                 category: str = "invalid-source-pathspecs") -> frozenset[str]:
     try:
         with tempfile.TemporaryDirectory(prefix="coverage-git-index-") as temporary:
             environment = dict(os.environ, GIT_INDEX_FILE=str(Path(temporary) / "index"))
@@ -195,14 +196,16 @@ def list_tracked(checkout: Path, pathspecs: tuple[str, ...], treeish: str = "HEA
             output = git(checkout, "ls-files", "-z", "--", *pathspecs, environment=environment)
         return frozenset(item.decode("utf-8", "surrogateescape") for item in output.split(b"\0") if item)
     except GateError:
-        fail("invalid-source-pathspecs")
+        fail(category)
 
 
 def select_effective_files(inputs: GateInputs,
                            comparison: Comparison | None = None) -> frozenset[str]:
     treeish = comparison.tested_sha if comparison else "HEAD"
     included = list_tracked(inputs.checkout, inputs.source_pathspecs, treeish)
-    excluded = list_tracked(inputs.checkout, inputs.exclude_pathspecs, treeish) if inputs.exclude_pathspecs else frozenset()
+    excluded = (list_tracked(inputs.checkout, inputs.exclude_pathspecs, treeish,
+                             "invalid-exclude-pathspecs")
+                if inputs.exclude_pathspecs else frozenset())
     paths = included - excluded
     if not paths:
         fail("empty-production-scope")
