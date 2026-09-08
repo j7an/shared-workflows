@@ -706,17 +706,22 @@ def copy_error_report(inputs: GateInputs | None, destination: Path,
             if not value:
                 return
             report = Path(no_controls(value, "invalid-report"))
-            if not report.is_absolute():
-                workspace = no_controls(env.get("GITHUB_WORKSPACE", ""), "invalid-working-directory")
-                working = no_controls(env.get("COVERAGE_WORKING_DIRECTORY", "."),
-                                      "invalid-working-directory")
-                if not workspace:
-                    return
-                report = Path(workspace) / working / report
+            workspace_value = no_controls(env.get("GITHUB_WORKSPACE", ""), "invalid-working-directory")
+            if not workspace_value:
+                return
+            workspace = Path(workspace_value).resolve()
+            working = Path(no_controls(env.get("COVERAGE_WORKING_DIRECTORY", "."),
+                                       "invalid-working-directory"))
+            checkout = (workspace / working).resolve() if not working.is_absolute() else working.resolve()
+            if workspace not in (checkout, *checkout.parents):
+                return
+            report = (checkout / report).resolve() if not report.is_absolute() else report.resolve()
+            if workspace not in (report, *report.parents):
+                return
         regular_readable(report, "invalid-report")
         destination.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(report, destination / ("coverage-report" + report.suffix.lower()))
-    except (GateError, OSError):
+    except (GateError, OSError, RuntimeError):
         pass
 
 

@@ -267,6 +267,54 @@ run_coverage_finalizer() {
   assert_input_error "malformed-cobertura" || return 1
 }
 
+@test "pre-parse report retention rejects working directories outside the workspace" {
+  local workspace="$BATS_TEST_TMPDIR/workspace" working report
+  mkdir "$workspace" || return 1
+  printf '<coverage' >"$BATS_TEST_TMPDIR/outside.xml" || return 1
+  printf '<coverage' >"$workspace/inside.xml" || return 1
+  ln -s .. "$workspace/escape" || return 1
+  for working in .. "$BATS_TEST_TMPDIR" escape; do
+    for report in outside.xml "$workspace/inside.xml"; do
+      run env COVERAGE_RUNNER_OS=Linux \
+        GITHUB_WORKSPACE="$workspace" COVERAGE_WORKING_DIRECTORY="$working" \
+        COVERAGE_REPORT_PATH="$report" COVERAGE_OUTPUT_DIRECTORY="$COVERAGE_OUTPUT_DIRECTORY" \
+        GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
+        python3 "$BATS_TEST_DIRNAME/../actions/coverage/evaluate.py"
+      assert_input_error "invalid-working-directory" || return 1
+      ! compgen -G "$COVERAGE_OUTPUT_DIRECTORY/coverage-report*" >/dev/null || return 1
+    done
+  done
+}
+
+@test "pre-parse report retention rejects resolved reports outside the workspace" {
+  local report
+  printf '<coverage' >"$BATS_TEST_TMPDIR/outside.xml" || return 1
+  ln -s ../outside.xml "$COVERAGE_FIXTURE_ROOT/escape.xml" || return 1
+  ln -s loop.xml "$COVERAGE_FIXTURE_ROOT/loop.xml" || return 1
+  for report in ../outside.xml "$BATS_TEST_TMPDIR/outside.xml" escape.xml loop.xml; do
+    run env COVERAGE_RUNNER_OS=Linux \
+      GITHUB_WORKSPACE="$COVERAGE_FIXTURE_ROOT" COVERAGE_WORKING_DIRECTORY=. \
+      COVERAGE_BASE_SHA=abcd COVERAGE_REPORT_PATH="$report" \
+      COVERAGE_OUTPUT_DIRECTORY="$COVERAGE_OUTPUT_DIRECTORY" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
+      python3 "$BATS_TEST_DIRNAME/../actions/coverage/evaluate.py"
+    assert_input_error "invalid-base-sha" || return 1
+    ! compgen -G "$COVERAGE_OUTPUT_DIRECTORY/coverage-report*" >/dev/null || return 1
+  done
+}
+
+@test "parsed inputs retain permitted absolute reports outside the workspace" {
+  local report="$BATS_TEST_TMPDIR/outside.xml"
+  printf '<coverage' >"$report" || return 1
+  run env COVERAGE_RUNNER_OS=Linux \
+    GITHUB_WORKSPACE="$COVERAGE_FIXTURE_ROOT" COVERAGE_WORKING_DIRECTORY=. \
+    COVERAGE_BASE_SHA="$COVERAGE_BASE_SHA" COVERAGE_REPORT_PATH="$report" \
+    COVERAGE_DIFF_COVER_PATH="$DIFF_COVER_PATH" COVERAGE_MINIMUM=90 COVERAGE_SOURCE_PATHS=src/ \
+    COVERAGE_OUTPUT_DIRECTORY="$COVERAGE_OUTPUT_DIRECTORY" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
+    python3 "$BATS_TEST_DIRNAME/../actions/coverage/evaluate.py"
+  assert_input_error "malformed-cobertura" || return 1
+  cmp "$report" "$COVERAGE_OUTPUT_DIRECTORY/coverage-report.xml" || return 1
+}
+
 @test "early validation errors publish bounded escaped corrective guidance" {
   COVERAGE_BASE_SHA=abcd
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
