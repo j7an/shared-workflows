@@ -29,6 +29,72 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 >
 > [gh-cooldown-scope]: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown--
 
+## Test coverage
+
+`actions/coverage` evaluates changed-line coverage from one caller-produced
+report. It supports coverage.py-compatible Cobertura XML (`.xml`) and LCOV
+(`.info` or `.lcov`) reports on Linux. The caller checks out the tested commit
+with the full comparison history, installs Python 3.10+, Git, and a
+caller-owned `diff-cover` in the supported `>=10.2.0,<11.0` range, runs its
+tests, and creates a fresh complete report. The action installs nothing.
+
+```yaml
+- name: Check changed-line coverage
+  if: github.event_name == 'pull_request'
+  uses: j7an/shared-workflows/actions/coverage@v4
+  with:
+    report-path: coverage.xml
+    diff-cover-path: ${{ github.workspace }}/.venv/bin/diff-cover
+    base-sha: ${{ github.event.pull_request.base.sha }}
+    minimum: "90"
+    source-paths: src/example/
+```
+
+For LCOV, provide the same inputs with an LCOV file instead:
+
+```yaml
+- name: Check changed-line coverage from LCOV
+  uses: j7an/shared-workflows/actions/coverage@v4
+  with:
+    report-path: coverage/lcov.info
+    diff-cover-path: ${{ github.workspace }}/.venv/bin/diff-cover
+    base-sha: ${{ github.event.pull_request.base.sha }}
+    minimum: "90"
+    source-paths: src/example/
+    exclude-paths: |
+      src/example/generated/
+```
+
+Replace the floating `@v4` examples with the reviewed release commit SHA in
+production callers. `base-sha` must be the full base commit SHA available in
+the checkout; fetch depth must include its merge-base with the tested `HEAD`.
+`source-paths` is a required newline-separated set of positive Git pathspecs.
+`exclude-paths` is optional, uses the same syntax, and wins over source paths.
+Each invocation accepts one report and one checkout root (`working-directory`,
+default `.`); callers retain test execution, history setup, report collection,
+and overall or branch coverage policy.
+
+The `minimum` is an explicit decimal from 0 through 100. Enforcement retains
+`diff-cover` 10.x integer percentage semantics. Results are `pass`,
+`below-threshold`, `not-applicable`, or `error`. A validated report with no
+applicable changed executable lines is `not-applicable` and succeeds without
+claiming 100% coverage. Invalid inputs, missing history, malformed or
+unmapped reports, missing changed production-file entries, and evaluator
+errors produce `error`; a completed measurement below `minimum` produces
+`below-threshold`.
+
+Every completed invocation writes a job summary and uploads its report,
+structured evaluator output, and diagnostics. It attempts that upload before
+preserving a below-threshold failure; cancellation or runner termination can
+prevent publication. Report validation cannot prove collection freshness or
+that every executable production path was instrumented, so callers must keep
+those guarantees in their own test setup.
+
+The shared action is ready for XML and LCOV callers, while the separate Manager
+adoption remains outside this repository change. Reinspect its native
+TypeScript harness, report collection, and subprocess coverage before planning
+that integration.
+
 ## Quick Start
 
 ### 1. Configure Dependabot cool-down

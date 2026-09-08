@@ -42,3 +42,30 @@ step_input() {
     [ "$(step_input "$input")" = "false" ]
   done
 }
+
+@test "coverage action changes run the test workflow with the supported tool range" {
+  grep -Fq -- "- 'actions/coverage/**'" "$YAML" || return 1
+
+  block=$(step_block "Install current diff-cover")
+  [[ "$block" == *'python3 --version'* ]] || return 1
+  [[ "$block" == *'python3 -m venv "$RUNNER_TEMP/diff-cover-current"'* ]] || return 1
+  [[ "$block" == *"'diff-cover>=10.2,<11'"* ]] || return 1
+  [[ "$block" == *'DIFF_COVER_PATH='* ]] || return 1
+  [[ "$block" == *'$GITHUB_ENV'* ]] || return 1
+}
+
+@test "coverage compatibility job runs the action tests against the lower supported release" {
+  block=$(awk '
+    /^  coverage-compatibility:$/ { found = 1 }
+    found { print }
+    found && /^  [A-Za-z0-9_-]+:$/ && $0 != "  coverage-compatibility:" { exit }
+  ' "$YAML")
+  [[ "$block" == *'runs-on: ubuntu-latest'* ]] || return 1
+  assert_action_pin "$block" "step-security/harden-runner" || return 1
+  assert_action_pin "$block" "actions/checkout" || return 1
+  assert_action_pin "$block" "bats-core/bats-action" || return 1
+  [[ "$block" == *'python3 -m venv "$RUNNER_TEMP/diff-cover-10.2.0"'* ]] || return 1
+  [[ "$block" == *"'diff-cover==10.2.0'"* ]] || return 1
+  [[ "$block" == *'DIFF_COVER_PATH='* ]] || return 1
+  [[ "$block" == *'bats tests/coverage-action.bats'* ]] || return 1
+}
