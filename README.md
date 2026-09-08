@@ -83,17 +83,17 @@ unmapped reports, missing changed production-file entries, and evaluator
 errors produce `error`; a completed measurement below `minimum` produces
 `below-threshold`.
 
-Every completed invocation writes a job summary and uploads its report,
-structured evaluator output, and diagnostics. It attempts that upload before
+Every completed invocation writes a job summary and uploads readable reports,
+generated evaluator files, and diagnostics. It attempts that upload before
 preserving a below-threshold failure; cancellation or runner termination can
 prevent publication. Report validation cannot prove collection freshness or
 that every executable production path was instrumented, so callers must keep
 those guarantees in their own test setup.
 
 The shared action is ready for XML and LCOV callers, while the separate Manager
-adoption remains outside this repository change. Reinspect its native
-TypeScript harness, report collection, and subprocess coverage before planning
-that integration.
+adoption follows its native TypeScript migration (#113) and remains outside
+this repository change. Write a separate measured-coverage plan, including its
+report collection, subprocess coverage, and threshold, before that integration.
 
 ## Quick Start
 

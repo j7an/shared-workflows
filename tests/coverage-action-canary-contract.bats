@@ -4,6 +4,25 @@ load 'helpers/action-pin-assertions'
 
 YAML='.github/workflows/coverage-action-canary.yml'
 
+outcome_assertion_run_block() {
+  awk '
+    /^      - name: Assert expected coverage failure$/ { in_step = 1 }
+    in_step && /^        run: \|$/ { in_run = 1; next }
+    in_run && /^      - / { exit }
+    in_run {
+      sub(/^          /, "")
+      print
+    }
+  ' "$YAML"
+}
+
+run_outcome_assertion() {
+  local outcome=$1 block
+  block=$(outcome_assertion_run_block) || return 1
+  block=$(printf '%s\n' "$block" | sed 's/${{ steps.expected-failure.outcome }}/${EXPECTED_FAILURE_OUTCOME}/g') || return 1
+  run env EXPECTED_FAILURE_OUTCOME="$outcome" bash -c "$block"
+}
+
 @test "coverage canary is limited to coverage action changes" {
   grep -Fq -- "- 'actions/coverage/**'" "$YAML" || return 1
   grep -Fq -- "- 'tests/coverage-action*.bats'" "$YAML" || return 1
@@ -19,8 +38,16 @@ YAML='.github/workflows/coverage-action-canary.yml'
   grep -Fq 'uses: ./actions/coverage' "$YAML" || return 1
   [ "$(grep -Fc 'uses: ./actions/coverage' "$YAML")" -eq 2 ] || return 1
   grep -A18 'id: expected-failure' "$YAML" | grep -Eq '^[[:space:]]+continue-on-error: true$' || return 1
-  grep -Fq 'steps.expected-failure.outcome' "$YAML" || return 1
-  grep -Fq 'expected the coverage action to fail below threshold' "$YAML" || return 1
+  block=$(outcome_assertion_run_block)
+  [[ "$block" == *'if [ "${{ steps.expected-failure.outcome }}" != "failure" ]; then'* ]] || return 1
+  [[ "$block" == *'echo "expected the coverage action to fail below threshold" >&2'* ]] || return 1
+  [[ "$block" == *'exit 1'* ]] || return 1
+
+  run_outcome_assertion failure
+  [ "$status" -eq 0 ] || return 1
+  run_outcome_assertion success
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *'expected the coverage action to fail below threshold'* ]] || return 1
 }
 
 @test "coverage canary builds an isolated Git fixture with checked-in report writers" {
