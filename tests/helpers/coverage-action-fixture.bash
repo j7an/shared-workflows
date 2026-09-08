@@ -165,6 +165,51 @@ coverage_run_real_pair() {
   done
 }
 
+coverage_run_real_ratio() {
+  local minimum=$1 expected_status=$2 expected_outcome=$3
+  local format report line hits
+  line=3
+  while [ "$line" -le 102 ]; do
+    printf 'value_%s = %s\n' "$line" "$line" >>"$COVERAGE_FIXTURE_ROOT/src/app.py" || return 1
+    line=$((line + 1))
+  done
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm ratio || return 1
+  coverage_use_real_evaluator || return 1
+  COVERAGE_MINIMUM=$minimum
+  for format in xml lcov; do
+    report="$BATS_TEST_TMPDIR/ratio.$format"
+    if [ "$format" = xml ]; then
+      {
+        printf '%s\n' '<?xml version="1.0"?>' '<coverage><sources><source></source></sources><packages><package name=""><classes>' '<class name="fixture" filename="src/app.py"><lines>'
+        line=3
+        while [ "$line" -le 102 ]; do
+          hits=0
+          [ "$line" -le 59 ] && hits=1
+          printf '<line number="%s" hits="%s"/>\n' "$line" "$hits"
+          line=$((line + 1))
+        done
+        printf '%s\n' '</lines></class>' '</classes></package></packages></coverage>'
+      } >"$report" || return 1
+    else
+      {
+        printf 'SF:src/app.py\n'
+        line=3
+        while [ "$line" -le 102 ]; do
+          hits=0
+          [ "$line" -le 59 ] && hits=1
+          printf 'DA:%s,%s\n' "$line" "$hits"
+          line=$((line + 1))
+        done
+        printf 'end_of_record\n'
+      } >"$report" || return 1
+    fi
+    COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/ratio-output-$minimum-$format"
+    run_coverage_evaluator "$report"
+    assert_evaluation "$expected_status" "$expected_outcome" 100 43 56 100 || return 1
+  done
+}
+
 run_coverage_evaluator() {
   run env \
     COVERAGE_REPORT_PATH="$1" \

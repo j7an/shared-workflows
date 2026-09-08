@@ -179,6 +179,9 @@ run_coverage_finalizer() {
   COVERAGE_BASE_SHA=0000000000000000000000000000000000000000
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "invalid-base-sha" || return 1
+  COVERAGE_BASE_SHA=$(printf 'not a commit\n' | git -C "$COVERAGE_FIXTURE_ROOT" hash-object -w --stdin) || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "invalid-base-sha" || return 1
   COVERAGE_BASE_SHA=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
   DIFF_COVER_PATH="$BATS_TEST_TMPDIR/missing-tool"
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
@@ -191,6 +194,66 @@ run_coverage_finalizer() {
   printf '#!/bin/sh\nprintf "diff-cover 9.9.9\\n"\n' >"$DIFF_COVER_PATH" || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
   assert_input_error "unsupported-diff-cover" || return 1
+  printf '#!/bin/sh\nprintf "diff-cover 11.0.0\\n"\n' >"$DIFF_COVER_PATH" || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "unsupported-diff-cover" || return 1
+  printf '#!/bin/sh\nprintf "diff-cover 10.5.1\\n"\nexit 1\n' >"$DIFF_COVER_PATH" || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "unsupported-diff-cover" || return 1
+}
+
+@test "reports unavailable shallow base history with fetch guidance" {
+  local source="$BATS_TEST_TMPDIR/source" shallow="$BATS_TEST_TMPDIR/shallow"
+  git init -q "$source" || return 1
+  git -C "$source" config user.email coverage@example.invalid || return 1
+  git -C "$source" config user.name "Coverage Fixture" || return 1
+  mkdir -p "$source/src" || return 1
+  printf 'base = 1\n' >"$source/src/app.py" || return 1
+  git -C "$source" add src/app.py || return 1
+  git -C "$source" -c commit.gpgsign=false commit -qm base || return 1
+  local missing_base
+  missing_base=$(git -C "$source" rev-parse HEAD) || return 1
+  printf 'head = 2\n' >>"$source/src/app.py" || return 1
+  git -C "$source" add src/app.py || return 1
+  git -C "$source" -c commit.gpgsign=false commit -qm head || return 1
+  git clone -q --depth 1 "file://$source" "$shallow" || return 1
+  COVERAGE_FIXTURE_ROOT=$shallow
+  COVERAGE_BASE_SHA=$missing_base
+  coverage_write_cobertura "$BATS_TEST_TMPDIR/shallow.xml" src/app.py 2 1 || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/shallow.xml"
+  assert_input_error "base-history-unavailable" || return 1
+  grep -Fq 'fetch sufficient history' "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
+}
+
+@test "preserves an actionable Git prerequisite error through validation remappers" {
+  local python_path empty_path="$BATS_TEST_TMPDIR/no-tools"
+  python_path=$(command -v python3) || return 1
+  mkdir "$empty_path" || return 1
+  run env PATH="$empty_path" \
+    COVERAGE_OUTPUT_DIRECTORY="$COVERAGE_OUTPUT_DIRECTORY" \
+    COVERAGE_RUNNER_OS=Linux \
+    GITHUB_WORKSPACE="$BATS_TEST_TMPDIR" \
+    COVERAGE_WORKING_DIRECTORY="$COVERAGE_FIXTURE_ROOT" \
+    "$python_path" "$BATS_TEST_DIRNAME/../actions/coverage/evaluate.py"
+  assert_input_error "git-unavailable" || return 1
+  grep -Fq 'install Git' "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
+}
+
+@test "early validation errors publish bounded escaped corrective guidance" {
+  COVERAGE_BASE_SHA=abcd
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "invalid-base-sha" || return 1
+  grep -Fq 'invalid-base-sha' "$GITHUB_STEP_SUMMARY" || return 1
+  grep -Fq 'Correct the action inputs or checkout prerequisites' "$GITHUB_STEP_SUMMARY" || return 1
+}
+
+@test "early summary publication failure preserves the original diagnosis" {
+  COVERAGE_BASE_SHA=abcd
+  GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary-directory"
+  mkdir "$GITHUB_STEP_SUMMARY" || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
+  assert_input_error "invalid-base-sha" || return 1
+  grep -Fq 'diagnostic-publication-failed' "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
 }
 
 @test "rejects empty unmatched and negative source pathspecs" {
@@ -284,6 +347,7 @@ import sys
 spec = importlib.util.spec_from_file_location("evaluate", sys.argv[1])
 evaluate = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = evaluate
+sys.dont_write_bytecode = True
 spec.loader.exec_module(evaluate)
 report = os.path.realpath(sys.argv[2])
 access = evaluate.os.access
@@ -318,6 +382,7 @@ import sys
 spec = importlib.util.spec_from_file_location("evaluate", sys.argv[1])
 evaluate = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = evaluate
+sys.dont_write_bytecode = True
 spec.loader.exec_module(evaluate)
 env = dict(os.environ, COVERAGE_OUTPUT_DIRECTORY="bad\0output")
 try:
@@ -339,6 +404,7 @@ import sys
 spec = importlib.util.spec_from_file_location("evaluate", sys.argv[1])
 evaluate = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = evaluate
+sys.dont_write_bytecode = True
 spec.loader.exec_module(evaluate)
 pathspecs = ["x" * 512 for _ in range(32)]
 evaluate.write_outputs(evaluate.Path(sys.argv[2]), 0, "validated", {"inputs": {"source_pathspecs": pathspecs}})
@@ -348,6 +414,10 @@ stored_status = (evaluate.Path(sys.argv[2]) / "status").read_text(encoding="utf-
 sys.exit(0 if len(payload.encode("utf-8")) < 4096 and str(metadata["status"]) == stored_status else 1)
 PY
   [ "$status" -eq 0 ] || return 1
+}
+
+@test "direct import harnesses leave the action tree bytecode-clean" {
+  [ -z "$(find "$BATS_TEST_DIRNAME/../actions/coverage" -name '__pycache__' -o -name '*.pyc')" ] || return 1
 }
 
 @test "inventories Nexus-style relative Cobertura records" {
@@ -364,6 +434,20 @@ PY
   coverage_write_lcov "$BATS_TEST_TMPDIR/absolute.info" "$COVERAGE_FIXTURE_ROOT/src/app.py" 1 1 || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/absolute.info"
   [ "$status" -eq 0 ] || return 1
+}
+
+@test "accepts LCOV DA checksums and rejects extra DA fields" {
+  printf 'SF:src/app.py\nDA:1,1,checksum\nend_of_record\n' >"$BATS_TEST_TMPDIR/checksum.info" || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/checksum.info"
+  [ "$status" -eq 0 ] || return 1
+  printf 'SF:src/app.py\nDA:1,1,checksum,extra\nend_of_record\n' >"$BATS_TEST_TMPDIR/extra.info" || return 1
+  COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/extra-output"
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/extra.info"
+  assert_input_error "malformed-lcov" || return 1
+  printf 'SF:src/app.py\nDA:1,not-a-count,checksum\nend_of_record\n' >"$BATS_TEST_TMPDIR/bad-count.info" || return 1
+  COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/bad-count-output"
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/bad-count.info"
+  assert_input_error "malformed-lcov" || return 1
 }
 
 @test "comparison freezes a linear committed HEAD and its scoped patch" {
@@ -392,7 +476,9 @@ PY
   coverage_fixture_commit_file src/feature.py $'def feature():\n    return 1\n' || return 1
   feature_sha=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
   git -C "$COVERAGE_FIXTURE_ROOT" checkout -q "$COVERAGE_DEFAULT_BRANCH" || return 1
-  coverage_fixture_commit_file src/main.py $'def main():\n    return 1\n' || return 1
+  printf 'def main_change():\n    return 2\n' >>"$COVERAGE_FIXTURE_ROOT/src/app.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm main-change || return 1
   main_sha=$(git -C "$COVERAGE_FIXTURE_ROOT" rev-parse HEAD) || return 1
   git -C "$COVERAGE_FIXTURE_ROOT" checkout -q feature || return 1
   coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/feature.py 1 1 || return 1
@@ -508,7 +594,8 @@ PY
   git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit --allow-empty -qm unrelated || return 1
   coverage_write_cobertura "$BATS_TEST_TMPDIR/report.xml" src/app.py 1 1 || return 1
   run_coverage_evaluator "$BATS_TEST_TMPDIR/report.xml"
-  assert_input_error "invalid-comparison" || return 1
+  assert_input_error "comparison-history-unavailable" || return 1
+  grep -Fq 'fetch sufficient history' "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
 }
 
 @test "comparison rejects an evaluator that changes tested HEAD" {
@@ -544,6 +631,16 @@ PY
   git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm fractional || return 1
   COVERAGE_MINIMUM=66.5
   coverage_run_real_pair src/app.py 1 below-threshold 3 1 66 3 3 1 4 1 5 0 || return 1
+}
+
+@test "XML and LCOV match diff-cover floating arithmetic before integer truncation" {
+  coverage_run_real_ratio 50 0 pass || return 1
+}
+
+@test "XML and LCOV enforce the displayed 56 percent at the 56 and 57 boundaries" {
+  coverage_run_real_ratio 56 0 pass || return 1
+  coverage_fixture_init || return 1
+  coverage_run_real_ratio 57 1 below-threshold || return 1
 }
 
 @test "XML and LCOV classify documentation-only changes as not applicable" {

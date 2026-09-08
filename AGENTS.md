@@ -9,6 +9,9 @@ This file provides repository guidance for AI coding agents working in this repo
 ## Commands
 
 ```bash
+COVERAGE_TEST_VENV=$(mktemp -d)
+python3 -m venv "$COVERAGE_TEST_VENV" && "$COVERAGE_TEST_VENV/bin/python" -m pip install 'diff-cover>=10.2,<11'
+export DIFF_COVER_PATH="$COVERAGE_TEST_VENV/bin/diff-cover"
 bats tests/                                  # run the full test suite
 bats tests/extract-deps.bats                 # run one test file
 bats tests/extract-deps.bats --filter "name" # run tests whose name matches a substring
@@ -16,6 +19,10 @@ bats tests/extract-deps.bats --filter "name" # run tests whose name matches a su
 ./scripts/lint-workflow-call.sh              # verify workflow_call files use no caller-context refs
 ./scripts/lint-workflows.sh                  # actionlint structural lint (non-hanging mode)
 ```
+
+The coverage tests require `DIFF_COVER_PATH` to name an executable from the
+supported `diff-cover >=10.2.0,<11.0` range. Use the temporary venv setup above,
+or export the path to an existing supported installation before running Bats.
 
 The bats, inline-sync, and workflow-call checks run in `ci-scripts.yml` on every PR touching `scripts/`, `tests/`, or `.github/workflows/`. `lint-workflows.sh` is **local-only**: plain `actionlint` hangs on `dependency-safety.yml` (its large inlined `Scan and report` block × actionlint's ShellCheck orchestration), so the wrapper runs `actionlint -shellcheck= -pyflakes=`. Its bats contract test runs in CI, but actionlint itself is not installed there. ShellCheck is a **separate, optional** signal (`shellcheck scripts/*.sh`) with known info-level findings — not part of this gate. Tests are [bats](https://github.com/bats-core/bats-core); fixtures live under `tests/fixtures/<script-name>/`.
 

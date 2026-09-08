@@ -110,7 +110,7 @@ def git(checkout: Path, *args: str, check: bool = True,
         result = subprocess.run(["git", "-c", "core.quotepath=false", *args], cwd=checkout,
                                 check=False, shell=False, capture_output=True, env=environment)
     except OSError:
-        fail("git-unavailable")
+        fail("git-unavailable: install Git and ensure it is available on PATH")
     if check and result.returncode != 0:
         fail("git-command-failed")
     return result.stdout
@@ -119,8 +119,20 @@ def git(checkout: Path, *args: str, check: bool = True,
 def git_text(checkout: Path, *args: str, category: str) -> str:
     try:
         return git(checkout, *args).decode("utf-8").strip()
-    except (GateError, UnicodeError):
+    except GateError as error:
+        if str(error).startswith("git-unavailable"):
+            raise
         fail(category)
+    except UnicodeError:
+        fail(category)
+
+
+def git_object_type(checkout: Path, object_name: str) -> str | None:
+    try:
+        object_type = git(checkout, "cat-file", "-t", object_name, check=False).decode("ascii").strip()
+    except UnicodeError:
+        return None
+    return object_type or None
 
 
 def pathspec_list(value: str, category: str) -> tuple[str, ...]:
@@ -164,7 +176,12 @@ def parse_inputs(env: Mapping[str, str]) -> GateInputs:
     base = required(env, "COVERAGE_BASE_SHA")
     if not SHA.fullmatch(base):
         fail("invalid-base-sha")
-    git_text(checkout, "cat-file", "-e", base + "^{commit}", category="invalid-base-sha")
+    if base == "0" * 40:
+        fail("invalid-base-sha")
+    if git_object_type(checkout, base + "^{commit}") != "commit":
+        if git_object_type(checkout, base) is not None:
+            fail("invalid-base-sha")
+        fail("base-history-unavailable: fetch sufficient history containing the base commit")
 
     minimum_text = required(env, "COVERAGE_MINIMUM")
     try:
@@ -208,7 +225,9 @@ def list_tracked(checkout: Path, pathspecs: tuple[str, ...], treeish: str = "HEA
             git(checkout, "read-tree", treeish, environment=environment)
             output = git(checkout, "ls-files", "-z", "--", *pathspecs, environment=environment)
         return frozenset(item.decode("utf-8", "surrogateescape") for item in output.split(b"\0") if item)
-    except GateError:
+    except GateError as error:
+        if str(error).startswith("git-unavailable"):
+            raise
         fail(category)
 
 
@@ -232,9 +251,13 @@ def capture_comparison(inputs: GateInputs) -> Comparison:
         tested = git_text(inputs.checkout, "rev-parse", "HEAD^{commit}", category="invalid-comparison")
         merge = git(inputs.checkout, "merge-base", base, tested, check=False)
         if not merge:
-            fail("invalid-comparison")
+            fail("comparison-history-unavailable: fetch sufficient history containing the merge base")
         merge_base = merge.decode("utf-8").strip()
-    except (GateError, UnicodeError):
+    except GateError as error:
+        if str(error).startswith("git-unavailable") or str(error).startswith("comparison-history-unavailable"):
+            raise
+        fail("invalid-comparison")
+    except UnicodeError:
         fail("invalid-comparison")
     if not all(SHA.fullmatch(value) for value in (base, merge_base, tested)):
         fail("invalid-comparison")
@@ -246,7 +269,11 @@ def name_status_records(inputs: GateInputs, comparison: Comparison) -> tuple[tup
         output = git(inputs.checkout, "diff", "--name-status", "-z", "--find-renames",
                      comparison.merge_base_sha, comparison.tested_sha)
         values = [value.decode("utf-8", "surrogateescape") for value in output.split(b"\0") if value]
-    except (GateError, UnicodeError):
+    except GateError as error:
+        if str(error).startswith("git-unavailable"):
+            raise
+        fail("invalid-comparison")
+    except UnicodeError:
         fail("invalid-comparison")
     records: list[tuple[str, str | None, str]] = []
     index = 0
@@ -295,7 +322,9 @@ def write_scoped_patch(inputs: GateInputs, comparison: Comparison,
         output = git(inputs.checkout, "diff", "--unified=0", "--no-ext-diff", "--no-color",
                      "--find-renames", comparison.merge_base_sha, comparison.tested_sha, "--",
                      *(literal_selector(path) for path in sorted(selectors)))
-    except GateError:
+    except GateError as error:
+        if str(error).startswith("git-unavailable"):
+            raise
         fail("invalid-comparison")
     patch.write_bytes(output)
     return patch
@@ -423,7 +452,7 @@ def result_payload(result_path: Path, markdown_path: Path) -> dict[str, object] 
             return None
         measured += source_lines
         violations += len(violation_lines)
-    expected_percent = ((total_lines - total_violations) * 100 // total_lines
+    expected_percent = (int(float(total_lines - total_violations) / total_lines * 100)
                         if total_lines else 100)
     if measured != total_lines or violations != total_violations or percent != expected_percent:
         return None
@@ -523,7 +552,7 @@ def inventory_lcov(inputs: GateInputs, tracked: frozenset[str]) -> ReportInvento
             fields = row.split(":", 1)[1].split(",")
             if len(fields) < 2 or not fields[0].isdigit() or int(fields[0]) <= 0:
                 fail("malformed-lcov")
-            if row.startswith("DA:") and (len(fields) != 2 or not fields[1].isdigit()):
+            if row.startswith("DA:") and (len(fields) not in (2, 3) or not fields[1].isdigit()):
                 fail("malformed-lcov")
             if row.startswith("BRDA:") and (
                 len(fields) != 4 or not fields[1].isdigit() or not fields[2].isdigit()
@@ -549,11 +578,24 @@ def atomic_status(output: Path, status: int) -> None:
     os.replace(temporary, output / "status")
 
 
-def write_outputs(output: Path, status: int, message: str, metadata: object) -> None:
+def write_outputs(output: Path, status: int, message: str, metadata: object,
+                  *, summary: str | None = None, step_summary: Path | None = None) -> None:
     output.mkdir(parents=True, exist_ok=True)
     (output / "diagnostics.txt").write_text(message[:1024] + "\n", encoding="utf-8")
-    (output / "summary.md").write_text("Coverage gate: " + message[:1024] + "\n", encoding="utf-8")
+    rendered_summary = summary if summary is not None else "Coverage gate: " + message[:1024] + "\n"
+    (output / "summary.md").write_text(rendered_summary[:16384], encoding="utf-8")
     (output / "metadata.json").write_text(metadata_json(metadata, status) + "\n", encoding="utf-8")
+    if step_summary is not None:
+        try:
+            with step_summary.open("a", encoding="utf-8") as summary_output:
+                summary_output.write(rendered_summary[:16384])
+        except OSError:
+            with (output / "diagnostics.txt").open("a", encoding="utf-8") as diagnostic:
+                diagnostic.write("diagnostic-publication-failed\n")
+            if isinstance(metadata, dict):
+                metadata = dict(metadata, publication_error="diagnostic-publication-failed")
+                (output / "metadata.json").write_text(
+                    metadata_json(metadata, status) + "\n", encoding="utf-8")
     atomic_status(output, status)
 
 
@@ -654,11 +696,23 @@ def metadata_json(metadata: object, status: int) -> str:
     return json.dumps(essential, sort_keys=True)
 
 
-def finish_error(inputs: GateInputs | None, output: Path | None, message: str) -> NoReturn:
+def finish_error(inputs: GateInputs | None, output: Path | None, message: str,
+                 env: Mapping[str, str]) -> NoReturn:
     destination = inputs.output_directory if inputs else output
     if destination is not None:
         try:
-            write_outputs(destination, ERROR, message, {"status": ERROR, "error": message})
+            bounded_message = message[:1024]
+            summary = ("<h2>Changed-line coverage</h2>\n"
+                       f"<p>Validation error: <code>{escape(bounded_message)}</code></p>\n"
+                       "<p>Correct the action inputs or checkout prerequisites, then rerun the job.</p>\n")
+            metadata = {"status": ERROR, "error": bounded_message}
+            step_summary = inputs.step_summary if inputs else None
+            if step_summary is None:
+                raw_summary = env.get("GITHUB_STEP_SUMMARY", "")
+                if raw_summary and not CONTROL.search(raw_summary):
+                    step_summary = Path(raw_summary).resolve()
+            write_outputs(destination, ERROR, bounded_message, metadata,
+                          summary=summary, step_summary=step_summary)
         except OSError:
             pass
     sys.stderr.write(message[:1024] + "\n")
@@ -724,11 +778,11 @@ def main(env: Mapping[str, str]) -> int:
             finish_publication_error(inputs, evaluation)
         return evaluation.status
     except GateError as error:
-        finish_error(inputs, output, str(error))
+        finish_error(inputs, output, str(error), env)
     except SystemExit:
         raise
     except Exception:
-        finish_error(inputs, output, "internal-error")
+        finish_error(inputs, output, "internal-error", env)
     return ERROR
 
 
