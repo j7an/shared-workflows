@@ -4,11 +4,14 @@ This file provides repository guidance for AI coding agents working in this repo
 
 ## What this repo is
 
-`j7an/shared-workflows` publishes **reusable GitHub Actions workflows** that other repos consume via `uses: j7an/shared-workflows/.github/workflows/<file>@v4`. There is no application code — the deliverables are the workflow YAMLs in `.github/workflows/` and the bash logic in `scripts/`.
+`j7an/shared-workflows` publishes **reusable GitHub Actions workflows** that other repos consume via `uses: j7an/shared-workflows/.github/workflows/<file>@v4`, and composite actions under `actions/`. Deliverables include workflow YAMLs in `.github/workflows/`, Bash logic in `scripts/`, and the Python helpers bundled with `actions/coverage/`.
 
 ## Commands
 
 ```bash
+COVERAGE_TEST_VENV=$(mktemp -d)
+python3 -m venv "$COVERAGE_TEST_VENV" && "$COVERAGE_TEST_VENV/bin/python" -m pip install 'diff-cover>=10.2,<11'
+export DIFF_COVER_PATH="$COVERAGE_TEST_VENV/bin/diff-cover"
 bats tests/                                  # run the full test suite
 bats tests/extract-deps.bats                 # run one test file
 bats tests/extract-deps.bats --filter "name" # run tests whose name matches a substring
@@ -16,6 +19,10 @@ bats tests/extract-deps.bats --filter "name" # run tests whose name matches a su
 ./scripts/lint-workflow-call.sh              # verify workflow_call files use no caller-context refs
 ./scripts/lint-workflows.sh                  # actionlint structural lint (non-hanging mode)
 ```
+
+The coverage tests require `DIFF_COVER_PATH` to name an executable from the
+supported `diff-cover >=10.2.0,<11.0` range. Use the temporary venv setup above,
+or export the path to an existing supported installation before running Bats.
 
 The bats, inline-sync, and workflow-call checks run in `ci-scripts.yml` on every PR touching `scripts/`, `tests/`, or `.github/workflows/`. `lint-workflows.sh` is **local-only**: plain `actionlint` hangs on `dependency-safety.yml` (its large inlined `Scan and report` block × actionlint's ShellCheck orchestration), so the wrapper runs `actionlint -shellcheck= -pyflakes=`. Its bats contract test runs in CI, but actionlint itself is not installed there. ShellCheck is a **separate, optional** signal (`shellcheck scripts/*.sh`) with known info-level findings — not part of this gate. Tests are [bats](https://github.com/bats-core/bats-core); fixtures live under `tests/fixtures/<script-name>/`.
 
@@ -41,7 +48,9 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 
 ## Workflows and their roles
 
-**Consumer-facing reusable workflows:**
+**Consumer-facing workflows and actions:**
+
+- `actions/coverage/` — Linux composite action that consumes a caller-produced Cobertura XML or LCOV report and uses caller-installed `diff-cover` for changed-line coverage. Its standard-library Python helpers require Python 3.10+; callers own checkout, tool installation, and report collection.
 
 - `dependency-safety.yml` — scans each Dependabot PR for advisories; post-PR release-age verification is opt-in via `release_age_policy` (default `"off"`; `advisory` labels + suppresses auto-merge, `blocking` fails the gate), and `auto_merge` defaults to `true`. Pipeline: extract → fallback → guard → age check (policy-gated) → GHSA/OSV scan → scorecard → comment → labels; the verdict layer is deterministic: `failure` on age violation only under `blocking`, `error` on extraction/scan failure, `success` otherwise. Verdict translation lives in `safety-verdict.sh`. No rescan companion — verifier is single-shot per PR event.
 - `tag-release.yml` — computes the next semver tag from Conventional Commits, optionally runs `bump-version-files.sh` against `.version-bump.json`, creates any bump commit through the GitHub Git Data API, verifies that workflow-created bump commit before advancing `main`, then creates the release tag as a lightweight ref to the target commit. Requires a GitHub App key (`RELEASE_BOT_PRIVATE_KEY` secret, `RELEASE_BOT_APP_ID` var). Do not assume GitHub auto-signs annotated tag objects.
@@ -64,6 +73,7 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 ## Conventions
 
 - **Bash 3.2 compatible** — scripts run on macOS system bash; no associative arrays, no `mapfile`/`readarray`.
+- **Python 3.10+ compatible** — helpers in `actions/coverage/` use only the standard library.
 - **Actions are SHA-pinned** with a trailing `# vX.Y.Z` comment. When bumping, dereference the tag to the *commit* SHA, not the tag-object SHA.
 - Workflow contract tests for action pins must assert semantic policy: expected action target, full-length lowercase commit SHA, and trailing `# vX.Y.Z` comment. Never snapshot the current action SHA/version pair in Bats source. Use `tests/helpers/action-pin-assertions.bash`; `tests/action-pin-test-policy.bats` enforces this rule.
 - **Conventional Commits drive release bumps** — `tag-release.yml`'s `auto` mode infers patch/minor/major from commit subjects since the last tag. A stray `feat:` in an otherwise-`fix:` PR flips a patch release to minor.

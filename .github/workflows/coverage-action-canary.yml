@@ -1,0 +1,89 @@
+name: Changed-line coverage canary
+
+on:
+  pull_request:
+    paths:
+      - 'actions/coverage/**'
+      - 'tests/coverage-action*.bats'
+      - 'tests/helpers/coverage-action-fixture.bash'
+      - '.github/workflows/coverage-action-canary.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Canary ${{ matrix.cell }}
+    strategy:
+      matrix:
+        cell: [first, second]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install current diff-cover
+        run: |
+          python3 --version
+          python3 -m venv "$RUNNER_TEMP/diff-cover-current"
+          "$RUNNER_TEMP/diff-cover-current/bin/python" -m pip install 'diff-cover>=10.2,<11'
+          printf 'DIFF_COVER_PATH=%s\n' "$RUNNER_TEMP/diff-cover-current/bin/diff-cover" >> "$GITHUB_ENV"
+
+      - id: fixture
+        name: Create isolated coverage fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$GITHUB_WORKSPACE/.coverage-canary"
+          mkdir -p "$fixture/src"
+          git init -q "$fixture"
+          git -C "$fixture" config user.email coverage-canary@example.invalid
+          git -C "$fixture" config user.name 'Coverage Canary'
+          printf 'def base():\n    return 1\n' > "$fixture/src/app.py"
+          git -C "$fixture" add src/app.py
+          git -C "$fixture" -c commit.gpgsign=false commit -qm base
+          base_sha=$(git -C "$fixture" rev-parse HEAD)
+          printf '\ndef canary():\n    return 1\n' >> "$fixture/src/app.py"
+          git -C "$fixture" add src/app.py
+          git -C "$fixture" -c commit.gpgsign=false commit -qm canary
+          source "$GITHUB_WORKSPACE/tests/helpers/coverage-action-fixture.bash"
+          coverage_write_cobertura "$fixture/pass.xml" src/app.py 4 1
+          coverage_write_lcov "$fixture/fail.info" src/app.py 4 0
+          printf 'base-sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+
+      - id: passing
+        name: Evaluate passing Cobertura fixture
+        uses: ./actions/coverage
+        with:
+          report-path: pass.xml
+          diff-cover-path: ${{ env.DIFF_COVER_PATH }}
+          base-sha: ${{ steps.fixture.outputs.base-sha }}
+          minimum: "90"
+          source-paths: src/
+          working-directory: .coverage-canary
+
+      - id: expected-failure
+        name: Evaluate below-threshold LCOV fixture
+        uses: ./actions/coverage
+        continue-on-error: true
+        with:
+          report-path: fail.info
+          diff-cover-path: ${{ env.DIFF_COVER_PATH }}
+          base-sha: ${{ steps.fixture.outputs.base-sha }}
+          minimum: "90"
+          source-paths: src/
+          working-directory: .coverage-canary
+
+      - name: Assert expected coverage failure
+        shell: bash
+        run: |
+          if [ "${{ steps.expected-failure.outcome }}" != "failure" ]; then
+            echo "expected the coverage action to fail below threshold" >&2
+            exit 1
+          fi
