@@ -219,15 +219,21 @@ run_coverage_finalizer() {
   git clone -q --depth 1 "file://$source" "$shallow" || return 1
   COVERAGE_FIXTURE_ROOT=$shallow
   COVERAGE_BASE_SHA=$missing_base
-  coverage_write_cobertura "$BATS_TEST_TMPDIR/shallow.xml" src/app.py 2 1 || return 1
-  run_coverage_evaluator "$BATS_TEST_TMPDIR/shallow.xml"
+  coverage_write_cobertura "$shallow/shallow.xml" src/app.py 2 1 || return 1
+  run_coverage_evaluator shallow.xml
   assert_input_error "base-history-unavailable" || return 1
   grep -Fq 'fetch sufficient history' "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
+  cmp "$shallow/shallow.xml" "$COVERAGE_OUTPUT_DIRECTORY/coverage-report.xml" || return 1
 }
 
 @test "preserves an actionable Git prerequisite error through validation remappers" {
-  local python_path empty_path="$BATS_TEST_TMPDIR/no-tools"
-  python_path=$(command -v python3) || return 1
+  local python_path real_python shim_path="$BATS_TEST_TMPDIR/shims" empty_path="$BATS_TEST_TMPDIR/no-tools"
+  real_python=$(python3 -c 'import sys; print(sys.executable)') || return 1
+  mkdir "$shim_path" || return 1
+  printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$real_python" >"$shim_path/python3" || return 1
+  chmod +x "$shim_path/python3" || return 1
+  PATH="$shim_path:$PATH"
+  python_path=$(python3 -c 'import sys; print(sys.executable)') || return 1
   mkdir "$empty_path" || return 1
   run env PATH="$empty_path" \
     COVERAGE_OUTPUT_DIRECTORY="$COVERAGE_OUTPUT_DIRECTORY" \
@@ -237,6 +243,28 @@ run_coverage_finalizer() {
     "$python_path" "$BATS_TEST_DIRNAME/../actions/coverage/evaluate.py"
   assert_input_error "git-unavailable" || return 1
   grep -Fq 'install Git' "$COVERAGE_OUTPUT_DIRECTORY/diagnostics.txt" || return 1
+}
+
+@test "validation errors retain readable reports without masking the diagnosis" {
+  local report="$BATS_TEST_TMPDIR/rejected.xml"
+  printf '<coverage' >"$report" || return 1
+  run_coverage_evaluator "$report"
+  assert_input_error "malformed-cobertura" || return 1
+  cmp "$report" "$COVERAGE_OUTPUT_DIRECTORY/coverage-report.xml" || return 1
+
+  coverage_fixture_commit_file src/unreported.py $'value = 1\n' || return 1
+  coverage_write_cobertura "$report" src/app.py 1 1 || return 1
+  run_coverage_evaluator "$report"
+  assert_input_error "missing-changed-report-path" || return 1
+  cmp "$report" "$COVERAGE_OUTPUT_DIRECTORY/coverage-report.xml" || return 1
+}
+
+@test "report-copy failure preserves the original validation error and status" {
+  local report="$BATS_TEST_TMPDIR/rejected.xml"
+  mkdir -p "$COVERAGE_OUTPUT_DIRECTORY/coverage-report.xml" || return 1
+  printf '<coverage' >"$report" || return 1
+  run_coverage_evaluator "$report"
+  assert_input_error "malformed-cobertura" || return 1
 }
 
 @test "early validation errors publish bounded escaped corrective guidance" {

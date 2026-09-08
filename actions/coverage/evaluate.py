@@ -696,10 +696,35 @@ def metadata_json(metadata: object, status: int) -> str:
     return json.dumps(essential, sort_keys=True)
 
 
+def copy_error_report(inputs: GateInputs | None, destination: Path,
+                      env: Mapping[str, str]) -> None:
+    try:
+        if inputs is not None:
+            report = inputs.report_path
+        else:
+            value = env.get("COVERAGE_REPORT_PATH", "")
+            if not value:
+                return
+            report = Path(no_controls(value, "invalid-report"))
+            if not report.is_absolute():
+                workspace = no_controls(env.get("GITHUB_WORKSPACE", ""), "invalid-working-directory")
+                working = no_controls(env.get("COVERAGE_WORKING_DIRECTORY", "."),
+                                      "invalid-working-directory")
+                if not workspace:
+                    return
+                report = Path(workspace) / working / report
+        regular_readable(report, "invalid-report")
+        destination.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(report, destination / ("coverage-report" + report.suffix.lower()))
+    except (GateError, OSError):
+        pass
+
+
 def finish_error(inputs: GateInputs | None, output: Path | None, message: str,
                  env: Mapping[str, str]) -> NoReturn:
     destination = inputs.output_directory if inputs else output
     if destination is not None:
+        copy_error_report(inputs, destination, env)
         try:
             bounded_message = message[:1024]
             summary = ("<h2>Changed-line coverage</h2>\n"
