@@ -50,6 +50,13 @@ run_outcome_assertion() {
   [[ "$output" == *'expected the coverage action to fail below threshold'* ]] || return 1
 }
 
+@test "coverage canary exercises four distinct matrix action artifacts" {
+  grep -A3 '^    strategy:$' "$YAML" | grep -Fq 'cell: [first, second]' || return 1
+  [ "$(grep -Fc 'uses: ./actions/coverage' "$YAML")" -eq 2 ] || return 1
+  grep -Fq '${{ matrix.cell }}' "$YAML" || return 1
+  grep -Fq '${{ strategy.job-index || 0 }}' actions/coverage/action.yml || return 1
+}
+
 @test "coverage canary builds an isolated Git fixture with checked-in report writers" {
   grep -Fq '"$GITHUB_WORKSPACE/.coverage-canary"' "$YAML" || return 1
   grep -Fq 'tests/helpers/coverage-action-fixture.bash' "$YAML" || return 1

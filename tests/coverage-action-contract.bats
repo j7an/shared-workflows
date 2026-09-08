@@ -85,12 +85,12 @@ SOURCE_PATHS source-paths
 EXCLUDE_PATHS exclude-paths
 WORKING_DIRECTORY working-directory
 INPUTS
-  assert_contains "$evaluate" 'COVERAGE_OUTPUT_DIRECTORY: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ github.action }}' || return 1
-  assert_contains "$upload" 'name: coverage-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ github.action }}' || return 1
-  assert_contains "$upload" 'path: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ github.action }}' || return 1
+  assert_contains "$evaluate" 'COVERAGE_OUTPUT_DIRECTORY: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.action }}' || return 1
+  assert_contains "$upload" 'name: coverage-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.action }}' || return 1
+  assert_contains "$upload" 'path: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.action }}' || return 1
   assert_contains "$finalize" 'COVERAGE_EVALUATE_OUTCOME: ${{ steps.evaluate.outcome }}' || return 1
   assert_contains "$finalize" 'COVERAGE_UPLOAD_OUTCOME: ${{ steps.upload.outcome }}' || return 1
-  assert_contains "$finalize" 'COVERAGE_OUTPUT_DIRECTORY: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ github.action }}' || return 1
+  assert_contains "$finalize" 'COVERAGE_OUTPUT_DIRECTORY: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.action }}' || return 1
   ! printf '%s\n' "$evaluate" "$finalize" | grep -E '^[[:space:]]*run:.*inputs\.' || return 1
 }
 

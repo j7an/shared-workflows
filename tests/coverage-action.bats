@@ -32,7 +32,10 @@ expected = None if sys.argv[5] == "none" else int(sys.argv[5])
 assert evaluation["total_percent_covered"] == expected
 assert evaluation["num_changed_lines"] == int(sys.argv[6])
 PY
-  [ "$?" -eq 0 ] || return 1
+  if [ "$?" -ne 0 ]; then
+    cat "$COVERAGE_OUTPUT_DIRECTORY/metadata.json" >&2
+    return 1
+  fi
   [ "$(cat "$COVERAGE_OUTPUT_DIRECTORY/status")" = "$expected_status" ] || return 1
 }
 
@@ -555,6 +558,56 @@ PY
   git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm comment || return 1
   coverage_run_real_pair src/app.py 0 not-applicable 0 0 none 1 1 1 || return 1
   ! grep -Eq '[0-9]+%' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+}
+
+@test "XML and LCOV accept represented changed files with zero executable lines" {
+  printf '# comment only\n' >>"$COVERAGE_FIXTURE_ROOT/src/app.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add src/app.py || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" -c commit.gpgsign=false commit -qm empty-record || return 1
+  coverage_run_real_pair src/app.py 0 not-applicable 0 0 none 1 || return 1
+  ! grep -Eq '[0-9]+%' "$COVERAGE_OUTPUT_DIRECTORY/summary.md" || return 1
+}
+
+@test "full reports may retain excluded and out-of-scope tracked records" {
+  coverage_fixture_commit_file src/excluded.py $'excluded = 1\n' || return 1
+  coverage_fixture_commit_file tools/outside.py $'outside = 1\n' || return 1
+  coverage_fixture_commit_change || return 1
+  COVERAGE_EXCLUDE_PATHS=src/excluded.py
+  local format report
+  coverage_use_real_evaluator || return 1
+  for format in xml lcov; do
+    report="$BATS_TEST_TMPDIR/full.$format"
+    if [ "$format" = xml ]; then
+      printf '%s\n' '<?xml version="1.0"?>' '<coverage><sources><source></source></sources><packages><package name=""><classes>' \
+        '<class name="app" filename="src/app.py"><lines><line number="3" hits="1"/><line number="4" hits="1"/></lines></class>' \
+        '<class name="excluded" filename="src/excluded.py"><lines></lines></class>' \
+        '<class name="outside" filename="tools/outside.py"><lines></lines></class>' \
+        '</classes></package></packages></coverage>' >"$report" || return 1
+    else
+      printf '%s\n' 'SF:src/app.py' 'DA:3,1' 'DA:4,1' 'end_of_record' \
+        'SF:src/excluded.py' 'end_of_record' 'SF:tools/outside.py' 'end_of_record' >"$report" || return 1
+    fi
+    COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/full-output-$format"
+    run_coverage_evaluator "$report"
+    assert_evaluation 0 pass 2 0 100 2 || return 1
+  done
+  printf '# staged dirt\n' >>"$COVERAGE_FIXTURE_ROOT/tools/outside.py" || return 1
+  git -C "$COVERAGE_FIXTURE_ROOT" add tools/outside.py || return 1
+  printf '# unstaged dirt\n' >>"$COVERAGE_FIXTURE_ROOT/src/excluded.py" || return 1
+  printf 'untracked\n' >"$COVERAGE_FIXTURE_ROOT/untracked.txt" || return 1
+  COVERAGE_OUTPUT_DIRECTORY="$BATS_TEST_TMPDIR/dirty-output"
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/full.lcov"
+  assert_evaluation 0 pass 2 0 100 2 || return 1
+}
+
+@test "report inventory requires at least one effective production record" {
+  coverage_fixture_commit_file src/excluded.py $'excluded = 1\n' || return 1
+  coverage_fixture_commit_file tools/outside.py $'outside = 1\n' || return 1
+  COVERAGE_EXCLUDE_PATHS=src/excluded.py
+  printf '%s\n' 'SF:src/excluded.py' 'end_of_record' \
+    'SF:tools/outside.py' 'end_of_record' >"$BATS_TEST_TMPDIR/outside-only.lcov" || return 1
+  run_coverage_evaluator "$BATS_TEST_TMPDIR/outside-only.lcov"
+  assert_input_error missing-in-scope-report-path || return 1
 }
 
 @test "XML and LCOV classify represented unloaded source as below threshold" {

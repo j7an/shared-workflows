@@ -490,8 +490,6 @@ def inventory_cobertura(inputs: GateInputs, tracked: frozenset[str]) -> ReportIn
         if not filename:
             fail("malformed-cobertura")
         lines = entry.findall(".//{*}line")
-        if not lines:
-            fail("malformed-cobertura")
         for line in lines:
             try:
                 number = int(line.get("number", "")); hits = int(line.get("hits", ""))
@@ -519,7 +517,7 @@ def inventory_lcov(inputs: GateInputs, tracked: frozenset[str]) -> ReportInvento
     for rows in records:
         source = [row[3:] for row in rows if row.startswith("SF:")]
         data = [row for row in rows if row.startswith("DA:") or row.startswith("BRDA:")]
-        if len(source) != 1 or not source[0] or not data:
+        if len(source) != 1 or not source[0]:
             fail("malformed-lcov")
         for row in data:
             fields = row.split(":", 1)[1].split(",")
@@ -706,7 +704,11 @@ def main(env: Mapping[str, str]) -> int:
         inputs = parse_inputs(env)
         comparison = capture_comparison(inputs)
         effective = select_effective_files(inputs, comparison)
-        inventory = inventory_report(inputs, effective)
+        tracked = list_tracked(inputs.checkout, (".",), comparison.tested_sha,
+                               "invalid-comparison")
+        inventory = inventory_report(inputs, tracked)
+        if not inventory.repository_paths & effective:
+            fail("missing-in-scope-report-path")
         changed = select_changed_files(inputs, comparison, effective)
         missing = sorted(set(changed) - inventory.repository_paths)
         if missing:

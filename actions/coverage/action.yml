@@ -37,7 +37,7 @@ runs:
         COVERAGE_SOURCE_PATHS: ${{ inputs.source-paths }}
         COVERAGE_EXCLUDE_PATHS: ${{ inputs.exclude-paths }}
         COVERAGE_WORKING_DIRECTORY: ${{ inputs.working-directory }}
-        COVERAGE_OUTPUT_DIRECTORY: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ github.action }}
+        COVERAGE_OUTPUT_DIRECTORY: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.action }}
         COVERAGE_RUNNER_OS: ${{ runner.os }}
       run: python3 "$GITHUB_ACTION_PATH/evaluate.py"
       shell: bash
@@ -46,13 +46,13 @@ runs:
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: coverage-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ github.action }}
-        path: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ github.action }}
+        name: coverage-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.action }}
+        path: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.action }}
         if-no-files-found: error
     - id: finalize
       if: always()
       env:
-        COVERAGE_OUTPUT_DIRECTORY: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ github.action }}
+        COVERAGE_OUTPUT_DIRECTORY: ${{ runner.temp }}/shared-coverage/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.action }}
         COVERAGE_EVALUATE_OUTCOME: ${{ steps.evaluate.outcome }}
         COVERAGE_UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
       run: python3 "$GITHUB_ACTION_PATH/finalize.py"

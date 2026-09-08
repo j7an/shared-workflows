@@ -14,6 +14,10 @@ permissions:
 
 jobs:
   canary:
+    name: Canary ${{ matrix.cell }}
+    strategy:
+      matrix:
+        cell: [first, second]
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner
