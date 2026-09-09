@@ -402,6 +402,15 @@ The two streams compute next-version independently — `tools/v` callers see onl
 
 ### Version file bumping (`.version-bump.json`)
 
+Immediately before tag creation, the workflow requires live `main` to match the
+frozen tag target. After a version bump, a read that still returns the approved
+pre-bump source is retried up to six reads, two seconds apart (ten seconds of
+sleep total). A different commit, malformed response, or API failure stops the
+run immediately; the no-bump path does not retry mismatches. Diagnostics report
+the expected, observed, and approved source SHAs. Only reads are retried, never
+branch updates or tag creation. This tolerates an old ref read without changing
+the approved target; it does not make the read and tag creation atomic.
+
 Optional. If a file named `.version-bump.json` exists at the repo root, the workflow updates the listed JSON files with the new version *before* creating the tag. The bumped files are committed and pushed to `main` as a separate `chore(release): bump version files to <version>` commit. The new tag points at that commit.
 
 If `.version-bump.json` is absent, the bumper step is a no-op.

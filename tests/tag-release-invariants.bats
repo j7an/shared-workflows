@@ -157,6 +157,10 @@ extract_step_body() {
 @test "invariant: tag release checks final live main before creating its ref" {
   body=$(extract_step_body "Create and push tag")
   [ -n "$body" ]
+  printf '%s' "$body" | grep -qF 'PLANNED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}' || {
+    echo "VIOLATION: create-tag step does not bind PLANNED_SOURCE_SHA to plan output"
+    false
+  }
   target_line=$(printf '%s\n' "$body" | grep -nF \
     '[ -z "${TAG_TARGET_SHA:-}" ]' | cut -d: -f1)
   live_main_line=$(printf '%s\n' "$body" | grep -nF \
