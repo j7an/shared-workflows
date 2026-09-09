@@ -794,6 +794,7 @@ jobs:
       - name: Create and push tag
         id: create-tag
         env:
+          PLANNED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
           NEXT_TAG: ${{ needs.plan.outputs.next_tag }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -809,15 +810,32 @@ jobs:
             exit 1
           fi
 
-          if ! LIVE_MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" \
-            --jq 'select(.object.type == "commit") | .object.sha' 2>/dev/null); then
-            echo "::error::Could not verify live main immediately before tag creation"
-            exit 1
-          fi
-          if [ "$LIVE_MAIN_SHA" != "$TAG_TARGET_SHA" ]; then
-            echo "::error::Main changed before tag creation; expected ${TAG_TARGET_SHA}"
-            exit 1
-          fi
+          # A successful bump PATCH may briefly be followed by an old ref read.
+          # Only the approved pre-bump source is eligible for another read.
+          # Never retry a mutation or accept a different target.
+          for attempt in 1 2 3 4 5 6; do
+            if ! LIVE_MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" \
+              --jq 'select(.object.type == "commit") | .object.sha | select(type == "string")' 2>/dev/null); then
+              echo "::error::Could not verify live main immediately before tag creation"
+              exit 1
+            fi
+            if ! [[ "$LIVE_MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Live main response was malformed before tag creation"
+              exit 1
+            fi
+            if [ "$LIVE_MAIN_SHA" != "$TAG_TARGET_SHA" ]; then
+              echo "Main check ${attempt}/6: expected ${TAG_TARGET_SHA}; observed ${LIVE_MAIN_SHA}; approved source ${PLANNED_SOURCE_SHA}"
+              if [ "$TAG_TARGET_SHA" != "$PLANNED_SOURCE_SHA" ] &&
+                [ "$LIVE_MAIN_SHA" = "$PLANNED_SOURCE_SHA" ] &&
+                [ "$attempt" -lt 6 ]; then
+                sleep 2
+                continue
+              fi
+              echo "::error::Main changed before tag creation; expected ${TAG_TARGET_SHA}; observed ${LIVE_MAIN_SHA}; approved source ${PLANNED_SOURCE_SHA}"
+              exit 1
+            fi
+            break
+          done
 
           # Create a lightweight tag ref directly to the target commit.
           # Do not create an annotated tag object; GitHub does not auto-sign
