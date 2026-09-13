@@ -2046,341 +2046,137 @@ jobs:
               ;;
           esac
 
-          for ACTION in $ACTIONS; do
-            [ -z "$ACTION" ] && continue
-            _ver="${ACTION_VERSIONS[$ACTION]}"
-            if [ -n "$_ver" ]; then
-              DEPS="${DEPS}\`${ACTION}\` (v${_ver}), "
+          # --- BEGIN tier-1 scanner ---
+          scan_dependency() {
+            local eco="$1" name="$2" target="$3" ghsa_eco osv_eco display nodes patched
+            local ghsa_result ghsa_err ghsa_vulns ghsa_count osv_body osv_result osv_vulns osv_count
+            local gid severity summary fixed lowest is_fixed
+            case "$eco" in
+              actions) ghsa_eco=ACTIONS; osv_eco='GitHub Actions'; display="v$target" ;;
+              pypi) ghsa_eco=PIP; osv_eco=PyPI; display="v$target" ;;
+              npm) ghsa_eco=NPM; osv_eco=npm; display="$target" ;;
+              *) return 2 ;;
+            esac
+            if [ -n "$target" ]; then
+              DEPS="${DEPS}\`${name}\` (${display}), "
             else
-              DEPS="${DEPS}\`${ACTION}\`, "
+              DEPS="${DEPS}\`${name}\`, "
             fi
-
-            GHSA_RESULT=$(gh api graphql -f query='
+            ghsa_result=$(gh api graphql -f query='
               query($name: String!) {
                 securityVulnerabilities(
-                  ecosystem: ACTIONS
+                  ecosystem: '"$ghsa_eco"'
                   package: $name
                   first: 10
                 ) {
                   nodes {
-                    advisory {
-                      ghsaId
-                      severity
-                      summary
-                    }
+                    advisory { ghsaId severity summary }
                     vulnerableVersionRange
-                    firstPatchedVersion {
-                      identifier
-                    }
+                    firstPatchedVersion { identifier }
                   }
                 }
               }
-            ' -f "name=${ACTION}" 2>&1) || {
-              HAS_ERROR="true"
+            ' -f "name=$name" 2>&1) || {
+              HAS_ERROR=true
               SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
-              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${ACTION}\`) | - | - | GHSA |"$'\n'
-              GHSA_RESULT=""
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${name}\`) | - | - | GHSA |"$'\n'
+              ghsa_result=
             }
-
-            if [ -n "$GHSA_RESULT" ] && echo "$GHSA_RESULT" | jq -e '.errors' > /dev/null 2>&1; then
-              HAS_ERROR="true"
+            if [ -n "$ghsa_result" ] && echo "$ghsa_result" | jq -e '.errors' >/dev/null 2>&1; then
+              HAS_ERROR=true
               SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
-              GHSA_ERR=$(echo "$GHSA_RESULT" | jq -r '.errors[0].message // "unknown error"')
-              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${ACTION}\`: ${GHSA_ERR}) | - | - | GHSA |"$'\n'
-              GHSA_RESULT=""
+              ghsa_err=$(echo "$ghsa_result" | jq -r '.errors[0].message // "unknown error"')
+              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${name}\`: ${ghsa_err}) | - | - | GHSA |"$'\n'
+              ghsa_result=
             fi
-
-            if [ -n "$GHSA_RESULT" ]; then
-              _target_ver="${ACTION_VERSIONS[$ACTION]}"
-
-              if [ -n "$_target_ver" ]; then
-                while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
-                  [ -z "$_g_id" ] && continue
-                  if [ -n "$_g_patched" ]; then
-                    _lowest=$(printf '%s\n' "$_g_patched" "$_target_ver" | sort -V | head -1)
-                    if [ "$_lowest" = "$_g_patched" ]; then
-                      FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
-                      FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
-                      continue
+            nodes='.data.securityVulnerabilities.nodes[]'
+            patched='((.firstPatchedVersion.identifier // "") | ltrimstr("v"))'
+            if [ "$eco" = npm ]; then
+              nodes="${nodes}?"
+              patched='(.firstPatchedVersion.identifier // "")'
+            fi
+            if [ -n "$ghsa_result" ]; then
+              if [ -n "$target" ]; then
+                while IFS=$'\t' read -r gid severity summary fixed; do
+                  [ -z "$gid" ] && continue
+                  is_fixed=false
+                  if [ "$eco" = npm ]; then
+                    if [ -n "$fixed" ] && [ "$fixed" != null ] &&
+                       printf '%s\n%s\n' "$fixed" "$target" | sort -V -C 2>/dev/null; then
+                      is_fixed=true
                     fi
+                  elif [ -n "$fixed" ]; then
+                    lowest=$(printf '%s\n' "$fixed" "$target" | sort -V | head -1)
+                    [ "$lowest" != "$fixed" ] || is_fixed=true
                   fi
-                  SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
-                  GHSA_TOTAL=$((GHSA_TOTAL + 1))
-                done <<< "$(echo "$GHSA_RESULT" | jq -r '
-                  .data.securityVulnerabilities.nodes[] |
-                  [.advisory.ghsaId, .advisory.severity, .advisory.summary, ((.firstPatchedVersion.identifier // "") | ltrimstr("v"))] |
-                  @tsv
-                ' 2>/dev/null || true)"
+                  if [ "$is_fixed" = true ]; then
+                    FILTERED_RESULTS="${FILTERED_RESULTS}| ${gid} | ${severity} | ${summary} | GHSA | ${fixed} |"$'\n'
+                    FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
+                  else
+                    SCAN_RESULTS="${SCAN_RESULTS}| ${gid} | ${severity} | ${summary} | GHSA |"$'\n'
+                    GHSA_TOTAL=$((GHSA_TOTAL + 1))
+                  fi
+                done <<< "$(echo "$ghsa_result" | jq -r \
+                  "$nodes | [.advisory.ghsaId, .advisory.severity, .advisory.summary, $patched] | @tsv" \
+                  2>/dev/null || true)"
               else
-                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
-                  .data.securityVulnerabilities.nodes[] |
+                ghsa_vulns=$(echo "$ghsa_result" | jq -r "$nodes"' |
                   "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
                 ' 2>/dev/null || true)
-
-                if [ -n "$GHSA_VULNS" ]; then
-                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
-                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
-                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
+                if [ -n "$ghsa_vulns" ]; then
+                  ghsa_count=$(echo "$ghsa_vulns" | wc -l | tr -d ' ')
+                  GHSA_TOTAL=$((GHSA_TOTAL + ghsa_count))
+                  SCAN_RESULTS="${SCAN_RESULTS}${ghsa_vulns}"$'\n'
                 fi
               fi
             fi
-
-            _target_ver="${ACTION_VERSIONS[$ACTION]}"
-            if [ -n "$_target_ver" ]; then
-              OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" --arg ver "$_target_ver" \
+            if [ -n "$target" ]; then
+              osv_body=$(jq -n --arg name "$name" --arg eco "$osv_eco" --arg ver "$target" \
                 '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
             else
-              OSV_BODY=$(jq -n --arg name "$ACTION" --arg eco "GitHub Actions" \
+              osv_body=$(jq -n --arg name "$name" --arg eco "$osv_eco" \
                 '{"package":{"name":$name,"ecosystem":$eco}}')
             fi
-            OSV_RESULT=$(curl -sf --max-time 30 \
-              -X POST "https://api.osv.dev/v1/query" \
-              -H "Content-Type: application/json" \
-              -d "$OSV_BODY" \
-              2>&1) || {
-              HAS_ERROR="true"
+            # Preserve existing capture: Actions/PyPI mix stderr into the response;
+            # npm suppresses stderr. Establish the fd inside command substitution.
+            osv_result=$(
+              if [ "$eco" = npm ]; then exec 2>/dev/null; else exec 2>&1; fi
+              curl -sf --max-time 30 -X POST https://api.osv.dev/v1/query \
+                -H 'Content-Type: application/json' -d "$osv_body"
+            ) || {
+              HAS_ERROR=true
               SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
-              SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${ACTION}\`) | - | - | OSV |"$'\n'
-              OSV_RESULT=""
+              SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${name}\`) | - | - | OSV |"$'\n'
+              osv_result=
             }
-
-            if [ -n "$OSV_RESULT" ]; then
-              OSV_VULNS=$(echo "$OSV_RESULT" | jq -r '
+            if [ -n "$osv_result" ]; then
+              osv_vulns=$(echo "$osv_result" | jq -r '
                 .vulns[]? |
                 "| \(.id) | \(.database_specific.severity // "UNKNOWN") | \(.summary // .details[:80]) | OSV |"
               ' 2>/dev/null || true)
-
-              if [ -n "$OSV_VULNS" ]; then
-                OSV_COUNT=$(echo "$OSV_VULNS" | wc -l | tr -d ' ')
-                OSV_TOTAL=$((OSV_TOTAL + OSV_COUNT))
-                SCAN_RESULTS="${SCAN_RESULTS}${OSV_VULNS}"$'\n'
+              if [ -n "$osv_vulns" ]; then
+                osv_count=$(echo "$osv_vulns" | wc -l | tr -d ' ')
+                OSV_TOTAL=$((OSV_TOTAL + osv_count))
+                SCAN_RESULTS="${SCAN_RESULTS}${osv_vulns}"$'\n'
               fi
             fi
+            return 0
+          }
+          # --- END tier-1 scanner ---
+
+          for ACTION in $ACTIONS; do
+            [ -z "$ACTION" ] && continue
+            scan_dependency actions "$ACTION" "${ACTION_VERSIONS[$ACTION]}"
           done
 
           for PKG in $PY_DEPS; do
             [ -z "$PKG" ] && continue
-            _ver="${PY_VERSIONS[$PKG]}"
-            if [ -n "$_ver" ]; then
-              DEPS="${DEPS}\`${PKG}\` (v${_ver}), "
-            else
-              DEPS="${DEPS}\`${PKG}\`, "
-            fi
-
-            GHSA_RESULT=$(gh api graphql -f query='
-              query($name: String!) {
-                securityVulnerabilities(
-                  ecosystem: PIP
-                  package: $name
-                  first: 10
-                ) {
-                  nodes {
-                    advisory {
-                      ghsaId
-                      severity
-                      summary
-                    }
-                    vulnerableVersionRange
-                    firstPatchedVersion {
-                      identifier
-                    }
-                  }
-                }
-              }
-            ' -f "name=${PKG}" 2>&1) || {
-              HAS_ERROR="true"
-              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
-              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${PKG}\`) | - | - | GHSA |"$'\n'
-              GHSA_RESULT=""
-            }
-
-            if [ -n "$GHSA_RESULT" ] && echo "$GHSA_RESULT" | jq -e '.errors' > /dev/null 2>&1; then
-              HAS_ERROR="true"
-              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
-              GHSA_ERR=$(echo "$GHSA_RESULT" | jq -r '.errors[0].message // "unknown error"')
-              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${PKG}\`: ${GHSA_ERR}) | - | - | GHSA |"$'\n'
-              GHSA_RESULT=""
-            fi
-
-            if [ -n "$GHSA_RESULT" ]; then
-              _target_ver="${PY_VERSIONS[$PKG]}"
-
-              if [ -n "$_target_ver" ]; then
-                while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
-                  [ -z "$_g_id" ] && continue
-                  if [ -n "$_g_patched" ]; then
-                    _lowest=$(printf '%s\n' "$_g_patched" "$_target_ver" | sort -V | head -1)
-                    if [ "$_lowest" = "$_g_patched" ]; then
-                      FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
-                      FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
-                      continue
-                    fi
-                  fi
-                  SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
-                  GHSA_TOTAL=$((GHSA_TOTAL + 1))
-                done <<< "$(echo "$GHSA_RESULT" | jq -r '
-                  .data.securityVulnerabilities.nodes[] |
-                  [.advisory.ghsaId, .advisory.severity, .advisory.summary, ((.firstPatchedVersion.identifier // "") | ltrimstr("v"))] |
-                  @tsv
-                ' 2>/dev/null || true)"
-              else
-                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
-                  .data.securityVulnerabilities.nodes[] |
-                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
-                ' 2>/dev/null || true)
-
-                if [ -n "$GHSA_VULNS" ]; then
-                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
-                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
-                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
-                fi
-              fi
-            fi
-
-            _target_ver="${PY_VERSIONS[$PKG]}"
-            if [ -n "$_target_ver" ]; then
-              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" --arg ver "$_target_ver" \
-                '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
-            else
-              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "PyPI" \
-                '{"package":{"name":$name,"ecosystem":$eco}}')
-            fi
-            OSV_RESULT=$(curl -sf --max-time 30 \
-              -X POST "https://api.osv.dev/v1/query" \
-              -H "Content-Type: application/json" \
-              -d "$OSV_BODY" \
-              2>&1) || {
-              HAS_ERROR="true"
-              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
-              SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${PKG}\`) | - | - | OSV |"$'\n'
-              OSV_RESULT=""
-            }
-
-            if [ -n "$OSV_RESULT" ]; then
-              OSV_VULNS=$(echo "$OSV_RESULT" | jq -r '
-                .vulns[]? |
-                "| \(.id) | \(.database_specific.severity // "UNKNOWN") | \(.summary // .details[:80]) | OSV |"
-              ' 2>/dev/null || true)
-
-              if [ -n "$OSV_VULNS" ]; then
-                OSV_COUNT=$(echo "$OSV_VULNS" | wc -l | tr -d ' ')
-                OSV_TOTAL=$((OSV_TOTAL + OSV_COUNT))
-                SCAN_RESULTS="${SCAN_RESULTS}${OSV_VULNS}"$'\n'
-              fi
-            fi
+            scan_dependency pypi "$PKG" "${PY_VERSIONS[$PKG]}"
           done
 
           while IFS=$'\t' read -r PKG _npm_ver; do
             [ -z "$PKG" ] && continue
-            if [ -n "$_npm_ver" ]; then
-              DEPS="${DEPS}\`${PKG}\` (${_npm_ver}), "
-            else
-              DEPS="${DEPS}\`${PKG}\`, "
-            fi
-
-            GHSA_RESULT=$(gh api graphql -f query='
-              query($name: String!) {
-                securityVulnerabilities(
-                  ecosystem: NPM
-                  package: $name
-                  first: 10
-                ) {
-                  nodes {
-                    advisory {
-                      ghsaId
-                      severity
-                      summary
-                    }
-                    vulnerableVersionRange
-                    firstPatchedVersion {
-                      identifier
-                    }
-                  }
-                }
-              }
-            ' -f "name=${PKG}" 2>&1) || {
-              HAS_ERROR="true"
-              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
-              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA query failed for \`${PKG}\`) | - | - | GHSA |"$'\n'
-              GHSA_RESULT=""
-            }
-
-            if [ -n "$GHSA_RESULT" ] && echo "$GHSA_RESULT" | jq -e '.errors' > /dev/null 2>&1; then
-              HAS_ERROR="true"
-              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
-              GHSA_ERR=$(echo "$GHSA_RESULT" | jq -r '.errors[0].message // "unknown error"')
-              SCAN_RESULTS="${SCAN_RESULTS}| (GHSA error for \`${PKG}\`: ${GHSA_ERR}) | - | - | GHSA |"$'\n'
-              GHSA_RESULT=""
-            fi
-
-            if [ -n "$GHSA_RESULT" ]; then
-              # Version-aware filtering is MANDATORY (spec §7.1), mirroring the
-              # pypi loop. Without it, every npm bump of a package carrying any
-              # historical CVE — which is most widely-used packages — lands
-              # security-review-needed and suppresses auto-merge. The gate would
-              # be useless through false positives rather than unsafe.
-              if [ -n "$_npm_ver" ]; then
-                while IFS=$'\t' read -r _g_id _g_sev _g_sum _g_patched; do
-                  [ -z "$_g_id" ] && continue
-                  if [ -n "$_g_patched" ] && [ "$_g_patched" != "null" ] \
-                     && printf '%s\n%s\n' "$_g_patched" "$_npm_ver" \
-                        | sort -V -C 2>/dev/null; then
-                    # firstPatchedVersion <= target: already fixed in this bump.
-                    FILTERED_RESULTS="${FILTERED_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA | ${_g_patched} |"$'\n'
-                    FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
-                  else
-                    SCAN_RESULTS="${SCAN_RESULTS}| ${_g_id} | ${_g_sev} | ${_g_sum} | GHSA |"$'\n'
-                    GHSA_TOTAL=$((GHSA_TOTAL + 1))
-                  fi
-                done <<< "$(echo "$GHSA_RESULT" | jq -r '
-                  .data.securityVulnerabilities.nodes[]? |
-                  [.advisory.ghsaId, .advisory.severity, .advisory.summary,
-                   (.firstPatchedVersion.identifier // "")] | @tsv
-                ' 2>/dev/null || true)"
-              else
-                # No target version: report everything. Safer default, matching
-                # the existing Actions and pypi behavior.
-                GHSA_VULNS=$(echo "$GHSA_RESULT" | jq -r '
-                  .data.securityVulnerabilities.nodes[]? |
-                  "| \(.advisory.ghsaId) | \(.advisory.severity) | \(.advisory.summary) | GHSA |"
-                ' 2>/dev/null || true)
-                if [ -n "$GHSA_VULNS" ]; then
-                  GHSA_COUNT=$(echo "$GHSA_VULNS" | wc -l | tr -d ' ')
-                  GHSA_TOTAL=$((GHSA_TOTAL + GHSA_COUNT))
-                  SCAN_RESULTS="${SCAN_RESULTS}${GHSA_VULNS}"$'\n'
-                fi
-              fi
-            fi
-
-            if [ -n "$_npm_ver" ]; then
-              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "npm" --arg ver "$_npm_ver" \
-                '{"package":{"name":$name,"ecosystem":$eco},"version":$ver}')
-            else
-              OSV_BODY=$(jq -n --arg name "$PKG" --arg eco "npm" \
-                '{"package":{"name":$name,"ecosystem":$eco}}')
-            fi
-            OSV_RESULT=$(curl -sf --max-time 30 \
-              -X POST "https://api.osv.dev/v1/query" \
-              -H "Content-Type: application/json" \
-              -d "$OSV_BODY" \
-              2>/dev/null) || {
-              HAS_ERROR="true"
-              SCAN_ERROR_COUNT=$((SCAN_ERROR_COUNT + 1))
-              SCAN_RESULTS="${SCAN_RESULTS}| (OSV query failed for \`${PKG}\`) | - | - | OSV |"$'\n'
-              OSV_RESULT=""
-            }
-
-            if [ -n "$OSV_RESULT" ]; then
-              OSV_VULNS=$(echo "$OSV_RESULT" | jq -r '
-                .vulns[]? |
-                "| \(.id) | \(.database_specific.severity // "UNKNOWN") | \(.summary // .details[:80]) | OSV |"
-              ' 2>/dev/null || true)
-              if [ -n "$OSV_VULNS" ]; then
-                OSV_COUNT=$(echo "$OSV_VULNS" | wc -l | tr -d ' ')
-                OSV_TOTAL=$((OSV_TOTAL + OSV_COUNT))
-                SCAN_RESULTS="${SCAN_RESULTS}${OSV_VULNS}"$'\n'
-              fi
-            fi
+            scan_dependency npm "$PKG" "$_npm_ver"
           done <<< "$NPM_ROWS"
 
           # --- BEGIN tier-2 sweep ---
