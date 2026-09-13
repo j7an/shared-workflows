@@ -164,6 +164,15 @@ record_snapshot() {
   [[ "$stderr" == *"matching tag set changed"* ]]
 }
 
+@test "custom prefix snapshot ignores tags belonging to another stream" {
+  export TAG_PREFIX=tools/v PLANNED_NEXT_TAG=tools/v1.2.4
+  git -C "$TEST_REPO" tag tools/v1.2.3 HEAD~1
+  record_snapshot
+  git -C "$TEST_REPO" tag v9.0.0
+  run_validator
+  [ "$status" -eq 0 ]
+}
+
 @test "rejects matching tag-set drift" {
   git -C "$TEST_REPO" tag v1.2.2
   run_validator
