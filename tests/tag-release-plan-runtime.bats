@@ -66,8 +66,8 @@ output_value() {
 }
 
 assert_snapshot_outputs() {
-  local prefix expected_source_sha expected_first_release expected_latest_tag
-  local expected_latest_ref_sha expected_latest_commit_sha expected_snapshot_sha256
+  local prefix expected_source_sha expected_latest_tag expected_latest_commit_sha
+  local expected_snapshot_sha256
   prefix=${1:-v}
   expected_source_sha=$(git -C "$TEST_REPO" rev-parse HEAD)
   expected_latest_tag=$(
@@ -75,16 +75,10 @@ assert_snapshot_outputs() {
       sed -n '1p'
   )
   if [ -n "$expected_latest_tag" ]; then
-    expected_first_release=false
-    expected_latest_ref_sha=$(
-      git -C "$TEST_REPO" rev-parse "refs/tags/$expected_latest_tag"
-    )
     expected_latest_commit_sha=$(
       git -C "$TEST_REPO" rev-parse "$expected_latest_tag^{commit}"
     )
   else
-    expected_first_release=true
-    expected_latest_ref_sha=
     expected_latest_commit_sha=
   fi
   expected_snapshot_sha256=$(
@@ -96,16 +90,12 @@ assert_snapshot_outputs() {
   )
 
   grep -qE '^source_sha=[0-9a-f]{40}$' "$GITHUB_OUTPUT"
-  grep -qE '^first_release=(true|false)$' "$GITHUB_OUTPUT"
-  grep -qE '^latest_ref_sha=([0-9a-f]{40})?$' "$GITHUB_OUTPUT"
-  grep -qE '^latest_commit_sha=([0-9a-f]{40})?$' "$GITHUB_OUTPUT"
   grep -qE '^tag_snapshot_sha256=[0-9a-f]{64}$' "$GITHUB_OUTPUT"
   [ "$(output_value source_sha)" = "$expected_source_sha" ]
-  [ "$(output_value first_release)" = "$expected_first_release" ]
-  [ "$(output_value latest_tag)" = "$expected_latest_tag" ]
-  [ "$(output_value latest_ref_sha)" = "$expected_latest_ref_sha" ]
-  [ "$(output_value latest_commit_sha)" = "$expected_latest_commit_sha" ]
   [ "$(output_value tag_snapshot_sha256)" = "$expected_snapshot_sha256" ]
+  if grep -qE '^(first_release|latest_tag|latest_ref_sha|latest_commit_sha)=' "$GITHUB_OUTPUT"; then
+    return 1
+  fi
   grep -q "^### Release " "$GITHUB_STEP_SUMMARY"
   grep -qF "**Source commit:** \`$expected_source_sha\`" "$GITHUB_STEP_SUMMARY"
   if [ -n "$expected_latest_commit_sha" ]; then
@@ -171,22 +161,17 @@ assert_snapshot_outputs() {
   make_history "fix: tools patch" "tools/v1.2.3"
   run_plan auto tools/v
   [ "$status" -eq 0 ]
-  grep -qx "latest_tag=tools/v1.2.3" "$GITHUB_OUTPUT"
   grep -qx "next_tag=tools/v1.2.4" "$GITHUB_OUTPUT"
   assert_snapshot_outputs tools/v
 }
 
-@test "first release records empty prior-tag witnesses" {
+@test "first release retains an empty previous-tag summary" {
   init_repo
   printf 'first\n' >"$TEST_REPO/file"
   git -C "$TEST_REPO" add file
   git -C "$TEST_REPO" commit -qm "fix: first"
   run_plan auto v
   [ "$status" -eq 0 ]
-  grep -qx "first_release=true" "$GITHUB_OUTPUT"
-  grep -qx "latest_tag=" "$GITHUB_OUTPUT"
-  grep -qx "latest_ref_sha=" "$GITHUB_OUTPUT"
-  grep -qx "latest_commit_sha=" "$GITHUB_OUTPUT"
   grep -qx "next_tag=v0.0.1" "$GITHUB_OUTPUT"
   assert_snapshot_outputs v
 }

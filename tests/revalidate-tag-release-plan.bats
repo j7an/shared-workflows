@@ -28,20 +28,7 @@ setup() {
   export TAG_PREFIX="v"
   export PLANNED_SOURCE_SHA
   PLANNED_SOURCE_SHA=$(git -C "$TEST_REPO" rev-parse HEAD)
-  export PLANNED_FIRST_RELEASE=false
-  export PLANNED_LATEST_TAG=v1.2.3
-  export PLANNED_LATEST_REF_SHA
-  PLANNED_LATEST_REF_SHA=$(git -C "$TEST_REPO" rev-parse refs/tags/v1.2.3)
-  export PLANNED_LATEST_COMMIT_SHA
-  PLANNED_LATEST_COMMIT_SHA=$(git -C "$TEST_REPO" rev-parse 'v1.2.3^{commit}')
-  export PLANNED_TAG_SNAPSHOT_SHA256
-  PLANNED_TAG_SNAPSHOT_SHA256=$(
-    git -C "$TEST_REPO" for-each-ref \
-      --format='%(refname)%09%(objectname)' 'refs/tags/v*.*.*' |
-      LC_ALL=C sort |
-      shasum -a 256 |
-      awk '{print $1}'
-  )
+  record_snapshot
   export PLANNED_NEXT_TAG=v1.2.4
   export FAKE_MAIN_SHA="$PLANNED_SOURCE_SHA"
   export FAKE_NEXT_TAG_JSON='[]'
@@ -95,6 +82,14 @@ run_validator() {
   run --separate-stderr bash -c 'cd "$1" && "$2"' _ "$TEST_REPO" "$SCRIPT"
 }
 
+record_snapshot() {
+  export PLANNED_TAG_SNAPSHOT_SHA256
+  PLANNED_TAG_SNAPSHOT_SHA256=$(
+    git -C "$TEST_REPO" for-each-ref --format='%(refname)%09%(objectname)' \
+      "refs/tags/${TAG_PREFIX}*.*.*" | LC_ALL=C sort | shasum -a 256 | awk '{print $1}'
+  )
+}
+
 @test "accepts the exact approved main and tag snapshot" {
   run_validator
   [ "$status" -eq 0 ]
@@ -117,25 +112,75 @@ run_validator() {
   [[ "$stderr" == *"main changed after release planning"* ]]
 }
 
-@test "rejects latest tag name drift" {
-  export PLANNED_LATEST_TAG=v1.2.2
+@test "rejects moving an approved lightweight tag" {
+  git -C "$TEST_REPO" tag -f v1.2.3 HEAD
   run_validator
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"highest matching tag changed"* ]]
+  [[ "$stderr" == *"matching tag set changed"* ]]
 }
 
-@test "rejects latest raw ref drift" {
-  export PLANNED_LATEST_REF_SHA=2222222222222222222222222222222222222222
+@test "rejects deletion of an approved matching tag" {
+  git -C "$TEST_REPO" tag -d v1.2.3
   run_validator
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"latest tag ref changed"* ]]
+  [[ "$stderr" == *"matching tag set changed"* ]]
 }
 
-@test "rejects latest peeled commit drift" {
-  export PLANNED_LATEST_COMMIT_SHA=3333333333333333333333333333333333333333
+@test "rejects annotated tag replacement with the same peeled commit" {
+  git -C "$TEST_REPO" -c tag.gpgSign=false tag -f -a v1.2.3 HEAD~1 -m original
+  record_snapshot
+  local before
+  before=$(git -C "$TEST_REPO" rev-parse 'v1.2.3^{commit}')
+  git -C "$TEST_REPO" -c tag.gpgSign=false tag -f -a v1.2.3 HEAD~1 -m replacement
+  [ "$(git -C "$TEST_REPO" rev-parse 'v1.2.3^{commit}')" = "$before" ]
   run_validator
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"latest tag target changed"* ]]
+  [[ "$stderr" == *"matching tag set changed"* ]]
+}
+
+@test "rejects annotated tag retargeting" {
+  git -C "$TEST_REPO" -c tag.gpgSign=false tag -f -a v1.2.3 HEAD~1 -m original
+  record_snapshot
+  git -C "$TEST_REPO" -c tag.gpgSign=false tag -f -a v1.2.3 HEAD -m retargeted
+  run_validator
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *"matching tag set changed"* ]]
+}
+
+@test "rejects a newly created tag after a first-release plan" {
+  git -C "$TEST_REPO" tag -d v1.2.3
+  export PLANNED_NEXT_TAG=v0.0.1
+  record_snapshot
+  git -C "$TEST_REPO" tag v0.0.1 HEAD~1
+  run_validator
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *"matching tag set changed"* ]]
+}
+
+@test "rejects creation of a higher matching tag after planning" {
+  git -C "$TEST_REPO" tag v9.0.0
+  run_validator
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *"matching tag set changed"* ]]
+}
+
+@test "custom prefix snapshot ignores tags belonging to another stream" {
+  export TAG_PREFIX=tools/v PLANNED_NEXT_TAG=tools/v1.2.4
+  git -C "$TEST_REPO" tag tools/v1.2.3 HEAD~1
+  record_snapshot
+  git -C "$TEST_REPO" tag v9.0.0
+  run_validator
+  [ "$status" -eq 0 ]
+}
+
+@test "custom prefix snapshot rejects retargeting its matching tag" {
+  export TAG_PREFIX=tools/v PLANNED_NEXT_TAG=tools/v1.2.4
+  git -C "$TEST_REPO" tag tools/v1.2.3 HEAD~1
+  record_snapshot
+  git -C "$TEST_REPO" tag -f tools/v1.2.3 HEAD
+  run_validator
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *"matching tag set changed"* ]]
 }
 
 @test "rejects matching tag-set drift" {
@@ -152,14 +197,18 @@ run_validator() {
   [[ "$stderr" == *"proposed tag already exists"* ]]
 }
 
-@test "rejects a changed first-release state" {
-  export PLANNED_FIRST_RELEASE=true
-  export PLANNED_LATEST_TAG=
-  export PLANNED_LATEST_REF_SHA=
-  export PLANNED_LATEST_COMMIT_SHA=
+@test "rejects malformed snapshot before any tag comparison" {
+  export PLANNED_TAG_SNAPSHOT_SHA256=invalid
+  run_validator
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"PLANNED_TAG_SNAPSHOT_SHA256 is not a lowercase SHA-256"* ]]
+}
+
+@test "rejects a checkout different from the approved source" {
+  git -C "$TEST_REPO" checkout -q HEAD~1
   run_validator
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"first-release state changed"* ]]
+  [[ "$stderr" == *"checked-out source does not match the approved source"* ]]
 }
 
 @test "rejects malformed planned SHA before inspection" {
@@ -226,18 +275,8 @@ SH
 
 @test "accepts an unchanged first-release snapshot" {
   git -C "$TEST_REPO" tag -d v1.2.3
-  export PLANNED_FIRST_RELEASE=true
-  export PLANNED_LATEST_TAG=
-  export PLANNED_LATEST_REF_SHA=
-  export PLANNED_LATEST_COMMIT_SHA=
-  export PLANNED_TAG_SNAPSHOT_SHA256
-  PLANNED_TAG_SNAPSHOT_SHA256=$(
-    git -C "$TEST_REPO" for-each-ref \
-      --format='%(refname)%09%(objectname)' 'refs/tags/v*.*.*' |
-      LC_ALL=C sort |
-      shasum -a 256 |
-      awk '{print $1}'
-  )
+  export PLANNED_NEXT_TAG=v0.0.1
+  record_snapshot
 
   run_validator
   [ "$status" -eq 0 ]

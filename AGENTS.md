@@ -17,14 +17,14 @@ bats tests/extract-deps.bats                 # run one test file
 bats tests/extract-deps.bats --filter "name" # run tests whose name matches a substring
 ./scripts/check-inline-sync.sh               # verify embedded inline bash == scripts/*.sh
 ./scripts/lint-workflow-call.sh              # verify workflow_call files use no caller-context refs
-./scripts/lint-workflows.sh                  # actionlint structural lint (non-hanging mode)
+actionlint -shellcheck= -pyflakes= .github/workflows/*.yml # actionlint structural lint
 ```
 
 The coverage tests require `DIFF_COVER_PATH` to name an executable from the
 supported `diff-cover >=10.2.0,<11.0` range. Use the temporary venv setup above,
 or export the path to an existing supported installation before running Bats.
 
-The bats, inline-sync, and workflow-call checks run in `ci-scripts.yml` on every PR touching `scripts/`, `tests/`, or `.github/workflows/`. `lint-workflows.sh` is **local-only**: plain `actionlint` hangs on `dependency-safety.yml` (its large inlined `Scan and report` block × actionlint's ShellCheck orchestration), so the wrapper runs `actionlint -shellcheck= -pyflakes=`. Its bats contract test runs in CI, but actionlint itself is not installed there. ShellCheck is a **separate, optional** signal (`shellcheck scripts/*.sh`) with known info-level findings — not part of this gate. Tests are [bats](https://github.com/bats-core/bats-core); fixtures live under `tests/fixtures/<script-name>/`.
+The bats, inline-sync, and workflow-call checks run in `ci-scripts.yml` on every PR touching `scripts/`, `tests/`, or `.github/workflows/`. Direct actionlint is **local-only** and is not installed by `ci-scripts.yml`. Disable actionlint's ShellCheck and Pyflakes integrations for structural checks: the large inline dependency-safety Bash block has caused the integrated analysis to hang. Run ShellCheck separately against `scripts/*.sh` when useful; it remains an optional signal with known info-level findings. Tests are [bats](https://github.com/bats-core/bats-core); fixtures live under `tests/fixtures/<script-name>/`.
 
 ## The inline-sync invariant (most important architectural constraint)
 
@@ -54,7 +54,7 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 
 - `dependency-safety.yml` — scans each Dependabot PR for advisories; post-PR release-age verification is opt-in via `release_age_policy` (default `"off"`; `advisory` labels + suppresses auto-merge, `blocking` fails the gate), and `auto_merge` defaults to `true`. Pipeline: extract → fallback → guard → age check (policy-gated) → GHSA/OSV scan → scorecard → comment → labels; the verdict layer is deterministic: `failure` on age violation only under `blocking`, `error` on extraction/scan failure, `success` otherwise. Verdict translation lives in `safety-verdict.sh`. No rescan companion — verifier is single-shot per PR event.
 - `tag-release.yml` — computes the next semver tag from Conventional Commits, optionally runs `bump-version-files.sh` against `.version-bump.json`, creates any bump commit through the GitHub Git Data API, verifies that workflow-created bump commit before advancing `main`, then creates the release tag as a lightweight ref to the target commit. Requires a GitHub App key (`RELEASE_BOT_PRIVATE_KEY` secret, `RELEASE_BOT_APP_ID` var). Do not assume GitHub auto-signs annotated tag objects.
-- `publish-pypi.yml` — `uv build` → TestPyPI (with install verification) → PyPI via OIDC trusted publishing → GitHub Release.
+- `publish-pypi.yml` has been removed; use the caller-owned PyPI Trusted Publishing template in `.github/workflows/README.md`.
 
 **Release machinery for this repo itself:** `release-self.yml` (manual `workflow_dispatch`) → calls `tag-release.yml` → calls `release.yml`. `release.yml` is `workflow_call`-only (no `push: tags` trigger) and floats the major/minor tags (`v2` → `v2.3` → `v2.3.1`) as lightweight refs to the release target commit.
 

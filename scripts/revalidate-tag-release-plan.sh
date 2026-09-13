@@ -32,7 +32,7 @@ tag_snapshot_sha256() {
 
 for name in \
   GITHUB_REPOSITORY GH_TOKEN TAG_PREFIX PLANNED_SOURCE_SHA \
-  PLANNED_FIRST_RELEASE PLANNED_TAG_SNAPSHOT_SHA256 PLANNED_NEXT_TAG; do
+  PLANNED_TAG_SNAPSHOT_SHA256 PLANNED_NEXT_TAG; do
   require_value "$name"
 done
 
@@ -47,32 +47,10 @@ printf '%s' "$PLANNED_TAG_SNAPSHOT_SHA256" |
   grep -qE '^[0-9a-f]{64}$' ||
   die_input "PLANNED_TAG_SNAPSHOT_SHA256 is not a lowercase SHA-256"
 
-case "$PLANNED_FIRST_RELEASE" in
-  true|false) ;;
-  *) die_input "PLANNED_FIRST_RELEASE must be true or false" ;;
-esac
-
 version=${PLANNED_NEXT_TAG#"$TAG_PREFIX"}
 [ "$version" != "$PLANNED_NEXT_TAG" ] &&
   printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' ||
   die_input "PLANNED_NEXT_TAG is not the selected prefix plus stable SemVer"
-
-if [ "$PLANNED_FIRST_RELEASE" = true ]; then
-  [ -z "${PLANNED_LATEST_TAG-}" ] ||
-    die_input "PLANNED_LATEST_TAG must be empty for a first release"
-  [ -z "${PLANNED_LATEST_REF_SHA-}" ] ||
-    die_input "PLANNED_LATEST_REF_SHA must be empty for a first release"
-  [ -z "${PLANNED_LATEST_COMMIT_SHA-}" ] ||
-    die_input "PLANNED_LATEST_COMMIT_SHA must be empty for a first release"
-else
-  require_value PLANNED_LATEST_TAG
-  require_value PLANNED_LATEST_REF_SHA
-  require_value PLANNED_LATEST_COMMIT_SHA
-  is_sha1 "$PLANNED_LATEST_REF_SHA" ||
-    die_input "PLANNED_LATEST_REF_SHA is not a lowercase 40-character SHA"
-  is_sha1 "$PLANNED_LATEST_COMMIT_SHA" ||
-    die_input "PLANNED_LATEST_COMMIT_SHA is not a lowercase 40-character SHA"
-fi
 
 head_sha=$(git rev-parse HEAD 2>/dev/null) ||
   die_state "could not inspect checked-out source"
@@ -91,31 +69,6 @@ fi
 is_sha1 "$live_main" || die_state "live main response was malformed"
 [ "$live_main" = "$PLANNED_SOURCE_SHA" ] ||
   die_state "main changed after release planning"
-
-if ! current_latest=$(git tag -l "${TAG_PREFIX}*.*.*" \
-  --sort=-version:refname 2>/dev/null | sed -n '1p'); then
-  die_state "could not inspect matching tags"
-fi
-if [ -z "$current_latest" ]; then
-  current_first_release=true
-  current_ref_sha=
-  current_commit_sha=
-else
-  current_first_release=false
-  current_ref_sha=$(git rev-parse "refs/tags/$current_latest" 2>/dev/null) ||
-    die_state "could not inspect latest tag ref"
-  current_commit_sha=$(git rev-parse "$current_latest^{commit}" 2>/dev/null) ||
-    die_state "could not inspect latest tag target"
-fi
-
-[ "$current_first_release" = "$PLANNED_FIRST_RELEASE" ] ||
-  die_state "first-release state changed"
-[ "$current_latest" = "${PLANNED_LATEST_TAG-}" ] ||
-  die_state "highest matching tag changed"
-[ "$current_ref_sha" = "${PLANNED_LATEST_REF_SHA-}" ] ||
-  die_state "latest tag ref changed"
-[ "$current_commit_sha" = "${PLANNED_LATEST_COMMIT_SHA-}" ] ||
-  die_state "latest tag target changed"
 
 if ! current_digest=$(tag_snapshot_sha256 2>/dev/null); then
   die_state "could not inspect matching tag set"

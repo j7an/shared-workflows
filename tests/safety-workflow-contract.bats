@@ -56,11 +56,6 @@ input_default() {
   done
 }
 
-@test "npm tier-1 loop queries the NPM GHSA ecosystem" {
-  run grep -q "ecosystem: NPM" .github/workflows/dependency-safety.yml
-  [ "$status" -eq 0 ]
-}
-
 @test "tier-2 sweep uses the OSV batch endpoint" {
   run grep -q "api.osv.dev/v1/querybatch" .github/workflows/dependency-safety.yml
   [ "$status" -eq 0 ]

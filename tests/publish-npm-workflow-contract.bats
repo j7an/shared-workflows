@@ -3,6 +3,16 @@
 
 YAML=".github/workflows/publish-npm.yml"
 
+npm_example_yaml() {
+  awk '
+    /^## `publish-npm.yml`$/ { section=1; next }
+    section && /^## / { exit }
+    section && /^```yaml[[:space:]]*$/ { code=1; next }
+    code && /^[[:space:]]*```[[:space:]]*$/ { code=0; next }
+    code { print }
+  ' .github/workflows/README.md
+}
+
 workflow_inputs_block() {
   sed -n '/^  workflow_call:$/,/^permissions:$/p' "$YAML"
 }
@@ -277,6 +287,29 @@ run_blocks() {
 @test "preflight logic is embedded inline, not fetched at runtime" {
   grep -qF '# --- BEGIN inline:scripts/npm-package-preflight.sh ---' "$YAML"
   grep -qF '# --- END inline:scripts/npm-package-preflight.sh ---' "$YAML"
+}
+
+@test "npm caller examples use released refs or immutable commits" {
+  local refs ref
+  refs=$(npm_example_yaml | awk '
+    /uses: j7an\/shared-workflows\/\.github\/workflows\/publish-npm.yml@/ {
+      sub(/^.*publish-npm.yml@/, ""); sub(/[[:space:]].*$/, ""); print
+    }')
+  [ -n "$refs" ] || return 1
+  while IFS= read -r ref; do
+    printf '%s\n' "$ref" | grep -qE '^(v[0-9]+(\.[0-9]+){0,2}|[0-9a-f]{40})$' || {
+      printf 'nonrelease npm caller ref: %s\n' "$ref" >&2; return 1;
+    }
+  done <<< "$refs"
+}
+
+@test "npm executable examples do not force provenance configuration" {
+  local examples
+  examples=$(npm_example_yaml)
+  [ -n "$examples" ] || return 1
+  if printf '%s\n' "$examples" | grep -qE -- '--provenance|NPM_CONFIG_PROVENANCE'; then
+    return 1
+  fi
 }
 
 @test "preflight is invoked exactly once" {

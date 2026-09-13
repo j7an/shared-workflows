@@ -191,36 +191,11 @@ via `config_path`). Callers keep their own `schedule`,
 uv and runs `uvx`, so the caller repo does not need to be a uv-managed Python
 project.
 
-Prefer the App-token caller for repos with required checks:
-
-```yaml
-name: Pre-commit Autoupdate
-
-on:
-  schedule:
-    - cron: "0 8 * * 1"
-  workflow_dispatch:
-
-permissions: {}
-
-concurrency:
-  group: pre-commit-autoupdate
-  cancel-in-progress: true
-
-jobs:
-  autoupdate:
-    permissions:
-      contents: read
-    uses: j7an/shared-workflows/.github/workflows/pre-commit-autoupdate.yml@v4
-    secrets:
-      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-```
-
-The caller repo must define `vars.RELEASE_BOT_APP_ID`. Without that var, the
-workflow falls back to `GITHUB_TOKEN`; fallback callers must grant
-`contents: write` and `pull-requests: write`, and their generated PRs may need
-a close/reopen or empty commit to start required CI because of GitHub's
-recursion guard.
+Use the [recommended App-token caller](.github/workflows/README.md#recommended-app-token-caller)
+for required checks. It uses `uvx`; callers must define
+`vars.RELEASE_BOT_APP_ID`. Without that var, the workflow falls back to
+`GITHUB_TOKEN`; see the linked fallback caller and its permissions and
+recursion-guard caveat.
 
 ## pnpm packageManager Update
 
@@ -745,7 +720,7 @@ Before opening a PR that adds or modifies a `workflow_call` file:
 Run these locally before opening a PR that touches `.github/workflows/` or `scripts/`:
 
 ```bash
-./scripts/lint-workflows.sh          # workflow/YAML structure (actionlint, non-hanging mode)
+actionlint -shellcheck= -pyflakes= .github/workflows/*.yml # workflow/YAML structure
 bats tests/                          # script / runtime behavior
 ./scripts/check-inline-sync.sh       # inline copies match scripts/*.sh
 ./scripts/lint-workflow-call.sh      # no caller-context refs in workflow_call files
@@ -757,15 +732,10 @@ Optional, advisory shell analysis:
 shellcheck scripts/*.sh              # completes, but has known info-level findings; not a gate
 ```
 
-**Why `lint-workflows.sh` instead of plain `actionlint`?** Default `actionlint`
-(with its ShellCheck integration enabled) **hangs** on
-`.github/workflows/dependency-safety.yml`: that file carries a large inlined
-`Scan and report` Bash block (required by the [inline-sync architecture](#known-caller-side-constraints)),
-which interacts badly with actionlint's ShellCheck orchestration. The hang is a
-tool limitation, **not** a workflow syntax error, and it is pre-existing on
-`main`. The wrapper disables that integration (`actionlint -shellcheck=
--pyflakes=`) so structural linting completes deterministically. ShellCheck still
-runs as a **separate, optional** signal against the source scripts.
+Disable actionlint's ShellCheck and Pyflakes integrations for structural checks:
+the large inline dependency-safety Bash block has caused the integrated analysis
+to hang. Run ShellCheck separately against `scripts/*.sh` when useful; it remains
+an optional signal with known info-level findings.
 
 ## Release Bot App setup
 
@@ -877,27 +847,9 @@ The `environment: release` + `if: github.ref == 'refs/heads/main'` gate inside `
 
 ### On the `@v4` pin
 
-`@v4` is the floating major tag for the current `v4.x.y` line. It always
-points at the latest `v4.x.y` release because `release.yml` force-updates
-floating majors on every publish. Pinning to `@v4` means you get all
-non-breaking updates within v4 automatically. Pin to `@v4.0` for patch-only
-updates, or `@v4.0.0` for an immutable freeze — see the [Versioning](#versioning)
-section above.
-
-`@v3` is the previous line, frozen at the last release where post-PR
-release-age verification was on by default and auto-merge was opt-in. `@v2`
-is the frozen historical cooldown-bearing line. Both continue to work but
-receive no further updates — see [v3 → v4 migration](#v3--v4-migration).
+See [Versioning](#versioning) for floating, patch-only, and immutable pins.
 
 ## `publish-pypi.yml`
 
-`publish-pypi.yml` remains in this repo for compatibility with the published
-`@v4` surface, but it is not the recommended Trusted Publishing path for new
-package releases. The caller-owned template in
-[`.github/workflows/README.md`](.github/workflows/README.md#caller-owned-pypi-trusted-publishing-template)
-is the canonical PyPI/TestPyPI guidance.
-
-TestPyPI install verification uses an explicit Python version (`verify-python`
-for the reusable workflow). The verification job writes an ephemeral
-`.verify/pyproject.toml` and pins only the package under test to TestPyPI with
-an explicit uv source. Normal dependencies continue to resolve from PyPI.
+This reusable workflow has been removed. Use the
+[caller-owned PyPI Trusted Publishing template](.github/workflows/README.md#caller-owned-pypi-trusted-publishing-template).

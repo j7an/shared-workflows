@@ -121,10 +121,6 @@ job_permissions_block() {
   assert_lacks "$block" 'RELEASE_BOT_PRIVATE_KEY'
   assert_contains "$block" 'TAG_PREFIX: ${{ inputs.tag-prefix }}'
   assert_contains "$block" 'PLANNED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}'
-  assert_contains "$block" 'PLANNED_FIRST_RELEASE: ${{ needs.plan.outputs.first_release }}'
-  assert_contains "$block" 'PLANNED_LATEST_TAG: ${{ needs.plan.outputs.latest_tag }}'
-  assert_contains "$block" 'PLANNED_LATEST_REF_SHA: ${{ needs.plan.outputs.latest_ref_sha }}'
-  assert_contains "$block" 'PLANNED_LATEST_COMMIT_SHA: ${{ needs.plan.outputs.latest_commit_sha }}'
   assert_contains "$block" 'PLANNED_TAG_SNAPSHOT_SHA256: ${{ needs.plan.outputs.tag_snapshot_sha256 }}'
   assert_contains "$block" 'PLANNED_NEXT_TAG: ${{ needs.plan.outputs.next_tag }}'
 }
