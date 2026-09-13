@@ -6,116 +6,29 @@
   [ -z "$output" ]
 }
 
-@test "single supported workflow yml — empty output" {
-  run bash -c 'printf ".github/workflows/ci.yml\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+@test "supported single paths emit no unsupported paths" {
+  local path
+  for path in .github/workflows/ci.yml .github/workflows/release.yaml \
+    uv.lock subdir/uv.lock poetry.lock requirements.txt requirements-dev.txt; do
+    run bash -c 'printf "%s\\n" "$1" | bash scripts/classify-touched-paths.sh' _ "$path"
+    if [ "$status" -ne 0 ] || [ -n "$output" ]; then
+      printf 'supported path failed: %s; status=%s; output=%s\\n' "$path" "$status" "$output" >&2
+      return 1
+    fi
+  done
 }
 
-@test "single supported workflow yaml — empty output" {
-  run bash -c 'printf ".github/workflows/release.yaml\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-@test "non-workflow *.yml is unsupported" {
-  run bash -c 'printf "mypkg/config.yml\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "mypkg/config.yml" ]
-}
-
-@test "uv.lock at root — supported" {
-  run bash -c 'printf "uv.lock\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-@test "uv.lock in subdir — supported (basename match)" {
-  run bash -c 'printf "subdir/uv.lock\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-@test "poetry.lock — supported" {
-  run bash -c 'printf "poetry.lock\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-@test "requirements.txt — supported" {
-  run bash -c 'printf "requirements.txt\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-@test "requirements-dev.txt — supported (glob match)" {
-  run bash -c 'printf "requirements-dev.txt\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-# Path-only classifier marks pyproject.toml unsupported. The
-# dependency-safety workflow may clear it via
-# scripts/pyproject-bump-extract.sh after diff inspection (issue #66);
-# this test exercises the classifier in isolation.
-@test "pyproject.toml — unsupported (path-only)" {
-  run bash -c 'printf "pyproject.toml\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "pyproject.toml" ]
-}
-
-@test "Pipfile — unsupported" {
-  run bash -c 'printf "Pipfile\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "Pipfile" ]
-}
-
-@test "Pipfile.lock — unsupported by default (no *.lock catch-all)" {
-  run bash -c 'printf "Pipfile.lock\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "Pipfile.lock" ]
-}
-
-@test "package.json — unsupported" {
-  run bash -c 'printf "package.json\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "package.json" ]
-}
-
-@test "package-lock.json — unsupported" {
-  run bash -c 'printf "package-lock.json\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "package-lock.json" ]
-}
-
-@test "yarn.lock — unsupported by default (no *.lock catch-all)" {
-  run bash -c 'printf "yarn.lock\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "yarn.lock" ]
-}
-
-@test "pnpm-lock.yaml — unsupported" {
-  run bash -c 'printf "pnpm-lock.yaml\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "pnpm-lock.yaml" ]
-}
-
-@test "go.mod — unsupported" {
-  run bash -c 'printf "go.mod\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "go.mod" ]
-}
-
-@test "Cargo.toml — unsupported" {
-  run bash -c 'printf "Cargo.toml\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "Cargo.toml" ]
-}
-
-@test "Cargo.lock — unsupported" {
-  run bash -c 'printf "Cargo.lock\n" | bash scripts/classify-touched-paths.sh'
-  [ "$status" -eq 0 ]
-  [ "$output" = "Cargo.lock" ]
+@test "unsupported single paths are emitted unchanged" {
+  local path
+  # Path-only classification; diff-aware composition may separately clear files.
+  for path in mypkg/config.yml pyproject.toml Pipfile Pipfile.lock package.json \
+    package-lock.json yarn.lock pnpm-lock.yaml go.mod Cargo.toml Cargo.lock; do
+    run bash -c 'printf "%s\\n" "$1" | bash scripts/classify-touched-paths.sh' _ "$path"
+    if [ "$status" -ne 0 ] || [ "$output" != "$path" ]; then
+      printf 'unsupported path failed: %s; status=%s; output=%s\\n' "$path" "$status" "$output" >&2
+      return 1
+    fi
+  done
 }
 
 @test "mixed supported+unsupported (issue #62) — only unsupported emitted" {
