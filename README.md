@@ -847,8 +847,7 @@ The `environment: release` + `if: github.ref == 'refs/heads/main'` gate inside `
 
 ### On the `@v4` pin
 
-See [Versioning](#versioning) for floating, patch-only, and immutable pins,
-along with the supported historical release lines.
+See [Versioning](#versioning) for floating, patch-only, and immutable pins.
 
 ## `publish-pypi.yml`
 

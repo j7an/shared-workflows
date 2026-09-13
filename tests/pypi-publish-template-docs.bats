@@ -89,3 +89,17 @@ template_job() {
     return 1
   fi
 }
+
+@test "template keeps version helpers ahead of their release operations" {
+  local build release derive upload classify create
+  build=$(template_job build)
+  release=$(template_job github-release)
+  derive=$(printf '%s\n' "$build" | grep -nF 'bash scripts/derive-published-version.sh' | cut -d: -f1)
+  upload=$(printf '%s\n' "$build" | grep -nF 'actions/upload-artifact@' | cut -d: -f1)
+  classify=$(printf '%s\n' "$release" | grep -nF 'bash scripts/classify-prerelease.sh' | cut -d: -f1)
+  create=$(printf '%s\n' "$release" | grep -nF 'gh release create' | cut -d: -f1)
+  [ -n "$derive" ] && [ -n "$upload" ] && [ "$derive" -lt "$upload" ] || return 1
+  [ -n "$classify" ] && [ -n "$create" ] && [ "$classify" -lt "$create" ] || return 1
+  [[ "$release" != *'softprops/action-gh-release'* ]] || return 1
+  [[ "$release" != *'[[ "$TAG" == *-* ]]'* ]] || return 1
+}

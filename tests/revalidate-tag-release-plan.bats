@@ -173,6 +173,16 @@ record_snapshot() {
   [ "$status" -eq 0 ]
 }
 
+@test "custom prefix snapshot rejects retargeting its matching tag" {
+  export TAG_PREFIX=tools/v PLANNED_NEXT_TAG=tools/v1.2.4
+  git -C "$TEST_REPO" tag tools/v1.2.3 HEAD~1
+  record_snapshot
+  git -C "$TEST_REPO" tag -f tools/v1.2.3 HEAD
+  run_validator
+  [ "$status" -eq 1 ]
+  [[ "$stderr" == *"matching tag set changed"* ]]
+}
+
 @test "rejects matching tag-set drift" {
   git -C "$TEST_REPO" tag v1.2.2
   run_validator
