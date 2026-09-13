@@ -69,17 +69,21 @@ run_bumper() {
   [ "$(jq -r '.version' multi-pkg-server.json)" = "0.0.0" ]
 }
 
-# === Security boundary smoke (I4 mitigation — full coverage in T8/T9) ===
-
-@test "validator: rejects path_expr with pipe (smoke; T8 has full coverage)" {
-  cat > .version-bump.json <<'JSON'
-{ "files": [ { "path": "package.json", "path_expr": ".version | input_filename" } ] }
-JSON
-  ORIG=$(cat package.json)
-  run bash "$REPO_ROOT/scripts/bump-version-files.sh" .version-bump.json 1.2.3
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-  [[ "$output" =~ "skipped (invalid path_expr)" ]]
+@test "invalid nonempty path expressions are rejected without modifying targets" {
+  local fixture target seen=0
+  for fixture in "$REPO_ROOT"/tests/fixtures/bump-version-files/invalid-path-expr/*.json; do
+    [ -f "$fixture" ] || { printf 'missing rejection fixtures\n' >&2; return 1; }
+    [ "${fixture##*/}" = empty.json ] && continue
+    target=$(jq -er '.files[0].path' "$fixture") || return 1
+    run_bumper "invalid-path-expr/${fixture##*/}" "1.2.3"
+    if [ "$status" -ne 2 ] || [[ "$output" != *'skipped (invalid path_expr)'* ]] ||
+       ! cmp -s "$target" "$REPO_ROOT/tests/fixtures/bump-version-files/targets/$target"; then
+      printf 'rejection failed: %s; status=%s; output=%s\n' "$fixture" "$status" "$output" >&2
+      return 1
+    fi
+    seen=$((seen + 1))
+  done
+  [ "$seen" -gt 0 ]
 }
 
 @test "path_expr: deeply nested (3+ levels) is bumped" {
@@ -131,102 +135,7 @@ JSON
   [[ "$output" =~ "invalid 'files' array" ]]
 }
 
-# === Path-expression rejection (per-entry skip; security boundary) ===
-
-@test "rejection: pipe '|' is rejected, file untouched" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/pipe.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-  [[ "$output" =~ "skipped (invalid path_expr)" ]]
-}
-
-@test "rejection: wildcard '[*]' is rejected" {
-  ORIG=$(cat server.json)
-  run_bumper "invalid-path-expr/wildcard.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat server.json)" = "$ORIG" ]
-  [[ "$output" =~ "skipped (invalid path_expr)" ]]
-}
-
-@test "rejection: slice '[0:1]' is rejected" {
-  ORIG=$(cat server.json)
-  run_bumper "invalid-path-expr/slice.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat server.json)" = "$ORIG" ]
-}
-
-@test "rejection: negative index '[-1]' is rejected" {
-  ORIG=$(cat server.json)
-  run_bumper "invalid-path-expr/negative-index.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat server.json)" = "$ORIG" ]
-}
-
-@test "rejection: recursive descent '..' is rejected" {
-  ORIG=$(cat server.json)
-  run_bumper "invalid-path-expr/recursive-descent.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat server.json)" = "$ORIG" ]
-}
-
-@test "rejection: parens '()' are rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/parens.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-}
-
-@test "rejection: arithmetic '+' is rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/arithmetic.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-}
-
-@test "rejection: format string '@sh' is rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/format-string.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-}
-
-@test "rejection: variable reference '\$ENV' is rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/variable-ref.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-}
-
-@test "rejection: quoted-string key '[\"x\"]' is rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/quoted-key.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-}
-
 # === Anchor-bypass attempts (^ and $ on the regex) ===
-
-@test "anchor: leading whitespace cannot bypass validator" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/leading-whitespace.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-}
-
-@test "anchor: trailing whitespace cannot bypass validator" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/trailing-whitespace.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-}
-
-@test "anchor: unanchored prefix 'xxx.version' rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/unanchored-prefix.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-}
 
 @test "anchor: empty path_expr is treated as missing — schema error" {
   run_bumper "invalid-path-expr/empty.json" "1.2.3"
@@ -234,13 +143,6 @@ JSON
   # so schema validation catches it as "neither field nor path_expr"
   [ "$status" -eq 1 ]
   [[ "$output" =~ "neither 'field' nor 'path_expr'" ]]
-}
-
-@test "anchor: injection suffix '.version; rm -rf /' is rejected as a whole" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/injection-suffix.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
 }
 
 # === Filesystem-path safety (regression coverage from inline bumper) ===
@@ -348,56 +250,6 @@ JSON
   [ "$(jq -r '.dependencies["eslint-config-airbnb"].version' package-scoped.json)" = "1.2.3" ]
   # Sibling dependency was NOT touched
   [ "$(jq -r '.dependencies["@scope/pkg"].version' package-scoped.json)" = "0.0.0" ]
-}
-
-# === Hardening: rejection of malformed new forms ===
-
-@test "rejection: empty quoted key '[\"\"]' is rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/empty-quoted-key.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-  [[ "$output" =~ "skipped (invalid path_expr)" ]]
-}
-
-@test "rejection: whitespace in quoted key is rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/whitespace-in-key.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-  [[ "$output" =~ "skipped (invalid path_expr)" ]]
-}
-
-@test "rejection: injection char ';' in quoted key is rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/injection-in-key.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-  [[ "$output" =~ "skipped (invalid path_expr)" ]]
-}
-
-@test "rejection: single-quoted key is rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/single-quoted-key.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-  [[ "$output" =~ "skipped (invalid path_expr)" ]]
-}
-
-@test "rejection: unclosed quoted key is rejected" {
-  ORIG=$(cat package.json)
-  run_bumper "invalid-path-expr/unclosed-quoted-key.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat package.json)" = "$ORIG" ]
-  [[ "$output" =~ "skipped (invalid path_expr)" ]]
-}
-
-@test "rejection: spaced wildcard '[ ]' is rejected" {
-  ORIG=$(cat server.json)
-  run_bumper "invalid-path-expr/whitespace-wildcard.json" "1.2.3"
-  [ "$status" -eq 2 ]
-  [ "$(cat server.json)" = "$ORIG" ]
-  [[ "$output" =~ "skipped (invalid path_expr)" ]]
 }
 
 # === Manifest emission: bump.modified contract (#issue-cross-agent-12) ===
