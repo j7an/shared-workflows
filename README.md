@@ -720,7 +720,7 @@ Before opening a PR that adds or modifies a `workflow_call` file:
 Run these locally before opening a PR that touches `.github/workflows/` or `scripts/`:
 
 ```bash
-./scripts/lint-workflows.sh          # workflow/YAML structure (actionlint, non-hanging mode)
+actionlint -shellcheck= -pyflakes= .github/workflows/*.yml # workflow/YAML structure
 bats tests/                          # script / runtime behavior
 ./scripts/check-inline-sync.sh       # inline copies match scripts/*.sh
 ./scripts/lint-workflow-call.sh      # no caller-context refs in workflow_call files
@@ -732,15 +732,10 @@ Optional, advisory shell analysis:
 shellcheck scripts/*.sh              # completes, but has known info-level findings; not a gate
 ```
 
-**Why `lint-workflows.sh` instead of plain `actionlint`?** Default `actionlint`
-(with its ShellCheck integration enabled) **hangs** on
-`.github/workflows/dependency-safety.yml`: that file carries a large inlined
-`Scan and report` Bash block (required by the [inline-sync architecture](#known-caller-side-constraints)),
-which interacts badly with actionlint's ShellCheck orchestration. The hang is a
-tool limitation, **not** a workflow syntax error, and it is pre-existing on
-`main`. The wrapper disables that integration (`actionlint -shellcheck=
--pyflakes=`) so structural linting completes deterministically. ShellCheck still
-runs as a **separate, optional** signal against the source scripts.
+Disable actionlint's ShellCheck and Pyflakes integrations for structural checks:
+the large inline dependency-safety Bash block has caused the integrated analysis
+to hang. Run ShellCheck separately against `scripts/*.sh` when useful; it remains
+an optional signal with known info-level findings.
 
 ## Release Bot App setup
 
