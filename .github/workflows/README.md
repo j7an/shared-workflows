@@ -284,38 +284,8 @@ repos whose real `dependency-safety.yml` scanner caller is gated to
 Dependabot-only.
 
 The reusable workflow is `workflow_call`-only. The consumer keeps the trusted
-`pull_request_target` trigger in a tiny local wrapper:
-
-```yaml
-name: Dependency Safety Non-Bot Gate
-
-on:
-  pull_request_target: # zizmor: ignore[dangerous-triggers] status-only path; never checks out or runs PR code
-    types: [opened, synchronize, reopened]
-    branches: [main]  # include every branch where dependency-safety / gate is required
-
-permissions: {}
-
-concurrency:
-  group: dep-safety-gate-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
-jobs:
-  gate:
-    permissions:
-      statuses: write
-    uses: j7an/shared-workflows/.github/workflows/dependency-safety-non-bot-gate.yml@v4
-```
-
-Pair it with a scanner caller that uses the complementary condition:
-
-```yaml
-jobs:
-  safety:
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
-    uses: j7an/shared-workflows/.github/workflows/dependency-safety.yml@v4
-    secrets: inherit
-```
+`pull_request_target` trigger in a tiny local wrapper. See the complete
+[scanner and non-bot-gate pair](../../README.md#fork-prs-and-the-required-gate).
 
 The wrapper must not check out code, pass `secrets: inherit`, install
 dependencies, or run PR-authored files. The wrapper grants `statuses: write`;
@@ -697,44 +667,10 @@ identifying which workspace it publishes:
 
 ## `publish-pypi.yml`
 
-Builds a Python package with `uv build`, stages on TestPyPI with install
-verification, promotes to production PyPI via OIDC trusted publishing, and
-creates a GitHub Release.
-
-> **Trusted Publishing status:** this reusable workflow is not supported for
-> PyPI/TestPyPI Trusted Publishing from package repos. Current PyPI behavior
-> does not authorize cross-repo reusable workflows as Trusted Publisher
-> workflows: the caller repo owns the OIDC repository claim, while the called
-> workflow path points at `j7an/shared-workflows`.
-
-Long-lived API-token publishing is intentionally out of scope for this repo's
-recommended PyPI release path. Keep package publish jobs in the package repo and
-use the caller-owned template below for Trusted Publishing.
-
-The workflow file remains in this repo for compatibility with the published
-`@v4` surface. Do not use it as the trusted-publisher workflow for new package
-releases.
-
-### Inputs
-
-| Input | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `tag` | string | yes | - | Semver tag to publish, such as `tools/v0.1.0` or `v1.2.3`. |
-| `package-dir` | string | no | `.` | Directory containing `pyproject.toml` relative to repo root. |
-| `testpypi-package` | string | yes | - | Distribution name on TestPyPI for install verification. |
-| `verify-python` | string | no | `3.13` | Python version used for TestPyPI install verification. |
-| `draft-release` | boolean | no | `false` | Create the GitHub release as a draft. |
-| `attach-assets` | boolean | no | `true` | Attach wheel and sdist to the GitHub release. |
-
-Use normalized prerelease tag tails such as `v1.2.3rc1` or `tools/v1.2.3rc1`.
-Do not use `v1.2.3-rc1`; PyPI artifacts normalize that spelling to `1.2.3rc1`,
-and the verification step requires the tag tail to match the published version.
-
-### Compatibility note
-
-If PyPI later supports cross-repo reusable workflows as Trusted Publisher
-workflows, reassess whether this reusable workflow should become the recommended
-path again. Until then, prefer the caller-owned template.
+This reusable workflow has been removed. Use the
+[caller-owned PyPI Trusted Publishing template](#caller-owned-pypi-trusted-publishing-template)
+below; publishing jobs run in the package repository, which owns their Trusted
+Publisher configuration. Existing immutable release refs retain the older file.
 
 ## Caller-owned PyPI Trusted Publishing template
 
