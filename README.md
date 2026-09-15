@@ -214,13 +214,6 @@ The workflow provisions the exact selected pnpm without Corepack, generates the
 lockfile with lifecycle scripts disabled, and requires a subsequent frozen
 install with lifecycle scripts disabled to leave both files byte-identical.
 
-**Breaking change (next major release):** the tracked, non-symlink manifest and
-adjacent lockfile requirements, `package.json` basename, and ancestor workspace
-rejection replace the previous manifest-only contract. They apply even when no
-version update is available. Existing `@v4` callers retain the earlier contract;
-adopters must select the new major release or a reviewed commit and provide a
-supported file layout.
-
 **Execution boundary:** pnpmfile hooks still execute, including repository
 `.pnpmfile.cjs` hooks and hooks supplied by config dependencies. Disabling them
 could change dependency resolution relative to consumer CI. The tracked-file
