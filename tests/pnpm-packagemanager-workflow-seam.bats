@@ -199,6 +199,7 @@ STUB
 write_pnpm_stub() {
   cat > "$STUB_BIN/pnpm" <<'STUB'
 #!/usr/bin/env bash
+printf 'cwd=%s\n' "$PWD" >> "$PNPM_ARGS"
 printf '%s\n' "$@" >> "$PNPM_ARGS"
 if [ "$1" = "--version" ]; then
   printf '%s\n' "${PNPM_ACTUAL_VERSION:-9.15.9}"
@@ -207,6 +208,7 @@ fi
 case "${PNPM_MODE:-ok}" in
   generate-fail) [ "$1" = "install" ] && [ "$2" = "--lockfile-only" ] && exit 1 ;;
   generate-mutate-manifest) [ "$1" = "install" ] && [ "$2" = "--lockfile-only" ] && printf '\n' >> package.json ;;
+  generate-mutate-lockfile) [ "$1" = "install" ] && [ "$2" = "--lockfile-only" ] && printf '\n' >> pnpm-lock.yaml ;;
   frozen-fail) [ "$1" = "install" ] && [ "$2" = "--frozen-lockfile" ] && exit 1 ;;
   frozen-mutate-manifest) [ "$1" = "install" ] && [ "$2" = "--frozen-lockfile" ] && printf '\n' >> package.json ;;
   frozen-mutate-lockfile) [ "$1" = "install" ] && [ "$2" = "--frozen-lockfile" ] && printf '\n' >> pnpm-lock.yaml ;;
@@ -415,6 +417,7 @@ run_lockfile_validation() {
   run_resolve
   [ "$status" -eq 0 ]
   grep -qx "manifest_path=package.json" "$GITHUB_OUTPUT"
+  grep -qx "lockfile_path=pnpm-lock.yaml" "$GITHUB_OUTPUT"
   ! grep -q "manifest_path=./package.json" "$GITHUB_OUTPUT" || return 1
 }
 
@@ -447,6 +450,7 @@ run_lockfile_validation() {
   run_resolve
   [ "$status" -eq 0 ]
   grep -qx "manifest_path=packages/app/package.json" "$GITHUB_OUTPUT"
+  grep -qx "lockfile_path=packages/app/pnpm-lock.yaml" "$GITHUB_OUTPUT"
   grep -q '"pnpm@9.15.9"' "$WORKDIR/packages/app/package.json"
 }
 
@@ -462,6 +466,55 @@ run_lockfile_validation() {
   [ "$status" -ne 0 ]
   [ "${output#*::error::required tracked adjacent pnpm lockfile is missing}" != "$output" ]
   grep -q '"pnpm@9.15.0"' "$WORKDIR/package.json"
+}
+
+@test "a manifest symlink is refused before the selection request" {
+  place_manifest "$MFX/plain.json"
+  mv "$WORKDIR/package.json" "$WORKDIR/real-package.json"
+  ln -s real-package.json "$WORKDIR/package.json"
+  export INPUT_MANIFEST_PATH="package.json"
+  export INPUT_MIN_AGE_DAYS=5
+
+  run_resolve
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::manifest must be an existing non-symlink file: package.json}" != "$output" ]
+  [ ! -s "$CURL_ARGS" ]
+}
+
+@test "a lockfile symlink is refused before the selection request" {
+  place_manifest "$MFX/plain.json"
+  mv "$WORKDIR/pnpm-lock.yaml" "$WORKDIR/real-lock.yaml"
+  ln -s real-lock.yaml "$WORKDIR/pnpm-lock.yaml"
+  export INPUT_MANIFEST_PATH="package.json"
+  export INPUT_MIN_AGE_DAYS=5
+
+  run_resolve
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::required tracked adjacent pnpm lockfile is missing or a symlink: pnpm-lock.yaml}" != "$output" ]
+  [ ! -s "$CURL_ARGS" ]
+}
+
+@test "an untracked adjacent lockfile is refused before the selection request" {
+  place_manifest "$MFX/plain.json"
+  git -C "$WORKDIR" rm -q --cached pnpm-lock.yaml
+  export INPUT_MANIFEST_PATH="package.json"
+  export INPUT_MIN_AGE_DAYS=5
+
+  run_resolve
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::required tracked adjacent pnpm lockfile is untracked: pnpm-lock.yaml}" != "$output" ]
+  [ ! -s "$CURL_ARGS" ]
+}
+
+@test "a non-package.json manifest path is refused before the selection request" {
+  place_manifest "$MFX/plain.json" "packages/app/not-package.json"
+  export INPUT_MANIFEST_PATH="packages/app/not-package.json"
+  export INPUT_MIN_AGE_DAYS=5
+
+  run_resolve
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::manifest_path must name package.json: packages/app/not-package.json}" != "$output" ]
+  [ ! -s "$CURL_ARGS" ]
 }
 
 @test "an untracked manifest is refused before rewriting" {
@@ -513,6 +566,62 @@ run_lockfile_validation() {
   [ "$status" -ne 0 ]
   [ "${output#*::error::provisioned pnpm version does not match selected version}" != "$output" ]
   grep -qx -- '--ignore-scripts' "$NPM_ARGS"
+}
+
+@test "nested lockfile validation runs the exact pnpm sequence and accepts the tracked pair" {
+  place_manifest "$MFX/plain.json" "packages/app/package.json"
+  printf '\n' >> "$WORKDIR/packages/app/package.json"
+  export MANIFEST="packages/app/package.json"
+  export LOCKFILE="packages/app/pnpm-lock.yaml"
+  export PNPM_VERSION="9.15.9"
+  export PNPM_MODE="generate-mutate-lockfile"
+  export TEST_REAL_GIT
+  TEST_REAL_GIT=$(command -v git)
+  cat > "$STUB_BIN/git" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = diff ] && [ "$REVERSE_GIT_DIFF" = true ]; then
+  "$TEST_REAL_GIT" "$@" | awk '{ lines[NR] = $0 } END { for (i = NR; i > 0; i--) print lines[i] }'
+else
+  exec "$TEST_REAL_GIT" "$@"
+fi
+STUB
+  chmod +x "$STUB_BIN/git"
+
+  for REVERSE_GIT_DIFF in false true; do
+    export REVERSE_GIT_DIFF
+    : > "$PNPM_ARGS"
+    run_lockfile_validation
+    [ "$status" -eq 0 ]
+    # Only the invocation PID is variable; compare every other byte, including
+    # the command order, argument count, working directories, and shared store.
+    store=$(sed -n '9p' "$PNPM_ARGS")
+    case "$store" in
+      "$RUNNER_TEMP/pnpm-store-$PNPM_VERSION-"*) ;;
+      *) return 1 ;;
+    esac
+    case "${store##*-}" in ''|*[!0-9]*) return 1 ;; esac
+    cat > "$TEST_TMP/expected-pnpm-args" <<EOF
+cwd=$RUNNER_TEMP
+--version
+cwd=$WORKDIR/packages/app
+install
+--lockfile-only
+--no-frozen-lockfile
+--ignore-scripts
+--store-dir
+$store
+cwd=$WORKDIR/packages/app
+install
+--frozen-lockfile
+--ignore-scripts
+--store-dir
+$store
+EOF
+    cmp "$TEST_TMP/expected-pnpm-args" "$PNPM_ARGS"
+  done
+  changed=$(git -C "$WORKDIR" diff --name-only HEAD | LC_ALL=C sort)
+  [ "$changed" = $'packages/app/package.json\npackages/app/pnpm-lock.yaml' ]
 }
 
 @test "the lockfile validation rejects a failed lockfile generation" {
@@ -657,6 +766,44 @@ pnpm-lock.yaml"
   run_step "Verify the pull request touches only the manifest and lockfile"
   [ "$status" -eq 0 ]
   grep -qx "repos/octo/example/pulls/7/files" "$GH_ARGS"
+}
+
+@test "the verify step accepts a manifest-only pull request" {
+  export GH_TOKEN="t"
+  export GH_REPO="octo/example"
+  export PR="7"
+  export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export GH_STDOUT="package.json"
+
+  run_step "Verify the pull request touches only the manifest and lockfile"
+  [ "$status" -eq 0 ]
+}
+
+@test "the verify step accepts the allowed pair in reverse API order" {
+  export GH_TOKEN="t"
+  export GH_REPO="octo/example"
+  export PR="7"
+  export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export GH_STDOUT="pnpm-lock.yaml
+package.json"
+
+  run_step "Verify the pull request touches only the manifest and lockfile"
+  [ "$status" -eq 0 ]
+}
+
+@test "the verify step rejects a lockfile-only pull request" {
+  export GH_TOKEN="t"
+  export GH_REPO="octo/example"
+  export PR="7"
+  export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export GH_STDOUT="pnpm-lock.yaml"
+
+  run_step "Verify the pull request touches only the manifest and lockfile"
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::pull request touches unexpected paths}" != "$output" ]
 }
 
 @test "the verify step fails when the pull request touches an unrelated path" {

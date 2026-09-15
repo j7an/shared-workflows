@@ -781,6 +781,7 @@ jobs:
             fi
             echo
             echo "The matching \`pnpm-lock.yaml\` was regenerated and validated by a frozen install with lifecycle scripts disabled."
+            echo "Repository pnpmfile hooks and hooks supplied by config dependencies still execute; this validation is not a sandbox."
             if [ "$USE_FALLBACK_CAVEAT" = "true" ]; then
               echo
               echo "Note: GITHUB_TOKEN-authored PRs may not trigger required CI automatically due to GitHub's recursion guard. If checks do not start, close and reopen this PR or push an empty commit."
