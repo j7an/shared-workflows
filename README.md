@@ -204,8 +204,22 @@ that keeps a repo's pinned `packageManager` field (in `package.json`, default
 path) current against the pnpm releases published on the npm registry. It
 reads the current `pnpm@x.y.z[+algo.hex]` pin, queries the full npm packument
 for `pnpm`, selects the newest non-deprecated release in the *same* major that
-clears the minimum release age, rewrites only the `packageManager` value, and
-opens (or refreshes) a pull request carrying just that one-line change.
+clears the minimum release age, rewrites the `packageManager` value, regenerates
+the adjacent `pnpm-lock.yaml`, and opens (or refreshes) a pull request carrying
+that validated pair. The selected manifest must be a tracked, non-symlink
+`package.json` beside a tracked, non-symlink `pnpm-lock.yaml`; nested
+independent projects work. A `pnpm-workspace.yaml` in any parent directory through
+the repository root fails the run before version selection, including no-op runs.
+The workflow provisions the exact selected pnpm without Corepack, generates the
+lockfile with lifecycle scripts disabled, and requires a subsequent frozen
+install with lifecycle scripts disabled to leave both files byte-identical.
+
+**Execution boundary:** pnpmfile hooks still execute, including repository
+`.pnpmfile.cjs` hooks and hooks supplied by config dependencies. Disabling them
+could change dependency resolution relative to consumer CI. The tracked-file
+checks are not a sandbox: hooks can write untracked files, and installation leaves
+`node_modules` in the disposable runner checkout. Runner egress remains in audit
+mode. Callers must trust the configuration and dependencies used by these installs.
 
 Callers keep their own `schedule` and `workflow_dispatch` triggers; the shared
 workflow does the resolution, integrity verification, and PR management.
@@ -239,7 +253,7 @@ the caller withheld.
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
-| `manifest_path` | string | `"package.json"` | Path to the `package.json` carrying the `packageManager` field. Must be relative, must not contain `..`, a newline, or a carriage return. A leading `./` is normalized away so the value matches what the pull-request files API reports |
+| `manifest_path` | string | `"package.json"` | Path to a tracked non-symlink `package.json` carrying the `packageManager` field. It must be relative, must not contain `..`, a newline, or a carriage return, and needs an existing tracked non-symlink `pnpm-lock.yaml` beside it. A `pnpm-workspace.yaml` in any parent directory through the repository root fails the run, even when no version update is available. A leading `./` is normalized away so the value matches what the pull-request files API reports |
 | `minimum_release_age_days` | number | `5` | A pnpm release must be at least this old before a PR is opened. Bypassed when the currently pinned version is deprecated. Set `0` to disable waiting — unlike `dependency-safety.yml`'s input of the same name, this gates whether the PR is created at all and has no off switch |
 | `branch` | string | `"deps/pnpm-packagemanager"` | Pull request branch |
 | `title` | string | `"deps: update pnpm packageManager"` | Pull request title |
