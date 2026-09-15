@@ -53,13 +53,17 @@ WF=".github/workflows/pnpm-packagemanager-update.yml"
   [ "$output" -eq 0 ]
 }
 
-@test "the PR is restricted to the manifest path" {
+@test "the PR is restricted to the normalized manifest and adjacent lockfile paths" {
   # -F is REQUIRED, not stylistic: `{{ ... }}` is a regex brace expression, so
   # the plain `grep -c` this test originally used returns 0 against a file that
   # DOES contain the line, and the test could never pass. Verified 2026-08-07:
   # `grep -c 'add-paths: ${{ ... }}'` -> 0, `grep -cF` -> 1.
-  run grep -cF 'add-paths: ${{ steps.update.outputs.manifest_path }}' "$WF"
+  run grep -cF 'add-paths: |' "$WF"
   [ "$output" -eq 1 ]
+  run grep -cF '${{ steps.update.outputs.manifest_path }}' "$WF"
+  [ "$output" -ge 2 ]
+  run grep -cF '${{ steps.update.outputs.lockfile_path }}' "$WF"
+  [ "$output" -ge 2 ]
 }
 
 @test "add-paths and the verify comparison read the same normalized path" {
@@ -68,11 +72,30 @@ WF=".github/workflows/pnpm-packagemanager-update.yml"
   # place fails the verify step AFTER the pull request already exists. The
   # normalized output from the update step is the single source for both.
   run grep -cF 'MANIFEST: ${{ steps.update.outputs.manifest_path }}' "$WF"
-  [ "$output" -eq 1 ]
+  [ "$output" -ge 1 ]
+  run grep -cF 'LOCKFILE: ${{ steps.update.outputs.lockfile_path }}' "$WF"
+  [ "$output" -ge 2 ]
   run grep -cF '${{ inputs.manifest_path }}' "$WF"
   [ "$output" -eq 1 ]
   # ...and that one remaining use is the update step's own input.
   run grep -cF 'INPUT_MANIFEST_PATH: ${{ inputs.manifest_path }}' "$WF"
+  [ "$output" -eq 1 ]
+}
+
+@test "the selected pnpm is provisioned without Corepack and validates generation plus frozen install" {
+  run grep -cE '^[[:space:]]*(corepack|COREPACK)' "$WF"
+  [ "$output" -eq 0 ]
+  run grep -cF 'actions/setup-node@' "$WF"
+  [ "$output" -eq 1 ]
+  run grep -cF 'node-version: "24"' "$WF"
+  [ "$output" -eq 1 ]
+  run grep -cF 'npm install --ignore-scripts --prefix "$PNPM_PREFIX"' "$WF"
+  [ "$output" -eq 1 ]
+  run grep -cF -- '--registry=https://registry.npmjs.org' "$WF"
+  [ "$output" -eq 1 ]
+  run grep -cF 'install --lockfile-only --no-frozen-lockfile --ignore-scripts' "$WF"
+  [ "$output" -eq 1 ]
+  run grep -cF 'install --frozen-lockfile --ignore-scripts' "$WF"
   [ "$output" -eq 1 ]
 }
 

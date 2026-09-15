@@ -517,9 +517,41 @@ jobs:
           # manifest_path first would hand an unvalidated path to `add-paths:`
           # and the verify step even on the failing path.
           reject_unsafe_manifest_path "$MANIFEST"
+          [ "${MANIFEST##*/}" = "package.json" ] || {
+            echo "::error::manifest_path must name package.json: $MANIFEST"
+            exit 1
+          }
           echo "manifest_path=$MANIFEST" >> "$GITHUB_OUTPUT"
 
-          [ -f "$MANIFEST" ] || { echo "::error::manifest not found: $MANIFEST"; exit 1; }
+          [ -f "$MANIFEST" ] && [ ! -L "$MANIFEST" ] || {
+            echo "::error::manifest must be an existing non-symlink file: $MANIFEST"
+            exit 1
+          }
+          git ls-files --error-unmatch -- "$MANIFEST" >/dev/null 2>&1 || {
+            echo "::error::manifest must be tracked: $MANIFEST"
+            exit 1
+          }
+          LOCKFILE="$(dirname "$MANIFEST")/pnpm-lock.yaml"
+          while [ "${LOCKFILE#./}" != "$LOCKFILE" ]; do
+            LOCKFILE="${LOCKFILE#./}"
+          done
+          [ -f "$LOCKFILE" ] && [ ! -L "$LOCKFILE" ] || {
+            echo "::error::required tracked adjacent pnpm lockfile is missing or a symlink: $LOCKFILE"
+            exit 1
+          }
+          git ls-files --error-unmatch -- "$LOCKFILE" >/dev/null 2>&1 || {
+            echo "::error::required tracked adjacent pnpm lockfile is untracked: $LOCKFILE"
+            exit 1
+          }
+          LAYOUT_DIR=$(dirname "$MANIFEST")
+          while [ "$LAYOUT_DIR" != "." ]; do
+            LAYOUT_DIR=$(dirname "$LAYOUT_DIR")
+            if [ -e "$LAYOUT_DIR/pnpm-workspace.yaml" ] || [ -L "$LAYOUT_DIR/pnpm-workspace.yaml" ]; then
+              echo "::error::ancestor pnpm workspace layouts are not supported: $LAYOUT_DIR/pnpm-workspace.yaml"
+              exit 1
+            fi
+          done
+          echo "lockfile_path=$LOCKFILE" >> "$GITHUB_OUTPUT"
 
           if ! CUR_ROW=$(packagemanager_bump --mode=current < "$MANIFEST"); then
             echo "::error::could not read a pnpm packageManager pin from $MANIFEST"
@@ -647,6 +679,65 @@ jobs:
             echo "deprecation_file=${RUNNER_TEMP}/deprecation.txt" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Set up Node.js for lockfile validation
+        if: steps.update.outputs.skip != 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Regenerate and validate lockfile
+        if: steps.update.outputs.skip != 'true'
+        env:
+          MANIFEST: ${{ steps.update.outputs.manifest_path }}
+          LOCKFILE: ${{ steps.update.outputs.lockfile_path }}
+          PNPM_VERSION: ${{ steps.update.outputs.target }}
+        run: |
+          set -euo pipefail
+          PNPM_PREFIX="${RUNNER_TEMP}/pnpm-${PNPM_VERSION}-$$"
+          PNPM_STORE="${RUNNER_TEMP}/pnpm-store-${PNPM_VERSION}-$$"
+          MANIFEST_SNAPSHOT="${RUNNER_TEMP}/package.json.before-pnpm"
+          LOCKFILE_SNAPSHOT="${RUNNER_TEMP}/pnpm-lock.yaml.before-frozen"
+          trap 'rm -rf "$PNPM_PREFIX" "$PNPM_STORE" "$MANIFEST_SNAPSHOT" "$LOCKFILE_SNAPSHOT"' EXIT
+
+          npm install --ignore-scripts --prefix "$PNPM_PREFIX" --no-package-lock --no-audit --no-fund --registry=https://registry.npmjs.org "pnpm@${PNPM_VERSION}" \
+            || { echo "::error::could not provision selected pnpm ${PNPM_VERSION}"; exit 1; }
+          PNPM_BIN="${PNPM_PREFIX}/node_modules/.bin/pnpm"
+          ACTUAL_VERSION=$(cd "$RUNNER_TEMP" && "$PNPM_BIN" --version) \
+            || { echo "::error::could not run provisioned pnpm outside the project"; exit 1; }
+          [ "$ACTUAL_VERSION" = "$PNPM_VERSION" ] || {
+            echo "::error::provisioned pnpm version does not match selected version"
+            exit 1
+          }
+
+          cp "$MANIFEST" "$MANIFEST_SNAPSHOT"
+          MANIFEST_DIR=$(dirname "$MANIFEST")
+          (
+            cd "$MANIFEST_DIR"
+            "$PNPM_BIN" install --lockfile-only --no-frozen-lockfile --ignore-scripts --store-dir "$PNPM_STORE"
+          ) || { echo "::error::pnpm lockfile generation failed"; exit 1; }
+          cmp -s "$MANIFEST_SNAPSHOT" "$MANIFEST" || {
+            echo "::error::pnpm lockfile generation changed the rewritten manifest"
+            exit 1
+          }
+
+          cp "$LOCKFILE" "$LOCKFILE_SNAPSHOT"
+          (
+            cd "$MANIFEST_DIR"
+            "$PNPM_BIN" install --frozen-lockfile --ignore-scripts --store-dir "$PNPM_STORE"
+          ) || { echo "::error::frozen pnpm install failed"; exit 1; }
+          cmp -s "$MANIFEST_SNAPSHOT" "$MANIFEST" && cmp -s "$LOCKFILE_SNAPSHOT" "$LOCKFILE" || {
+            echo "::error::frozen pnpm install changed the validated manifest or lockfile"
+            exit 1
+          }
+
+          changed=$(git diff --name-only HEAD | LC_ALL=C sort)
+          allowed_pair=$(printf '%s\n%s\n' "$MANIFEST" "$LOCKFILE" | LC_ALL=C sort)
+          if [ -n "$changed" ] && [ "$changed" != "$MANIFEST" ] && [ "$changed" != "$LOCKFILE" ] && [ "$changed" != "$allowed_pair" ]; then
+            echo "::error::pnpm validation changed an unexpected path"
+            printf '%s\n' "$changed"
+            exit 1
+          fi
+
       - name: Compose pull request body
         id: body
         if: steps.update.outputs.skip != 'true'
@@ -689,7 +780,7 @@ jobs:
               echo "The target release is at least ${MIN_AGE_DAYS} days old and is not deprecated."
             fi
             echo
-            echo "Only the \`packageManager\` value changed; no lockfile was touched."
+            echo "The matching \`pnpm-lock.yaml\` was regenerated and validated by a frozen install with lifecycle scripts disabled."
             if [ "$USE_FALLBACK_CAVEAT" = "true" ]; then
               echo
               echo "Note: GITHUB_TOKEN-authored PRs may not trigger required CI automatically due to GitHub's recursion guard. If checks do not start, close and reopen this PR or push an empty commit."
@@ -711,21 +802,26 @@ jobs:
           # The NORMALIZED path, not inputs.manifest_path: `./package.json` and
           # `package.json` must be one string by the time it reaches add-paths,
           # the verify step, and the GitHub API's own normalized reply.
-          add-paths: ${{ steps.update.outputs.manifest_path }}
+          add-paths: |
+            ${{ steps.update.outputs.manifest_path }}
+            ${{ steps.update.outputs.lockfile_path }}
           body-path: ${{ steps.body.outputs.path }}
           title: ${{ steps.update.outputs.select_mode == 'bypass' && format('{0} (cooldown bypassed — previous pin deprecated)', inputs.title) || inputs.title }}
 
-      - name: Verify the pull request touches only the manifest
+      - name: Verify the pull request touches only the manifest and lockfile
         if: steps.cpr.outputs.pull-request-number != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ steps.cpr.outputs.pull-request-number }}
           MANIFEST: ${{ steps.update.outputs.manifest_path }}
+          LOCKFILE: ${{ steps.update.outputs.lockfile_path }}
         run: |
           set -euo pipefail
           files=$(gh api "repos/${GH_REPO}/pulls/${PR}/files" --paginate --jq '.[].filename')
-          if [ "$files" != "$MANIFEST" ]; then
+          files_sorted=$(printf '%s\n' "$files" | LC_ALL=C sort)
+          allowed_pair=$(printf '%s\n%s\n' "$MANIFEST" "$LOCKFILE" | LC_ALL=C sort)
+          if [ "$files" != "$MANIFEST" ] && [ "$files_sorted" != "$allowed_pair" ]; then
             echo "::error::pull request touches unexpected paths:"
             printf '%s\n' "$files"
             exit 1
@@ -755,9 +851,9 @@ jobs:
             exit 1
           fi
           if [ "$SELECT_MODE" = "bypass" ]; then
-            DESC="pnpm ${TARGET}: exact published version, not deprecated, major unchanged, manifest only. Cooldown bypassed — prior pin deprecated."
+            DESC="pnpm ${TARGET}: exact published version, lockfile frozen-validated. Cooldown bypassed — prior pin deprecated."
           else
-            DESC="pnpm ${TARGET}: exact published version, not deprecated, ${MIN_AGE_DAYS}d+ old, major unchanged, manifest only."
+            DESC="pnpm ${TARGET}: exact published version, lockfile frozen-validated, ${MIN_AGE_DAYS}d+ old."
           fi
           # GitHub truncates at 140. Assert rather than hope: the first draft of
           # the bypass string measured 141 and would have silently lost its tail.

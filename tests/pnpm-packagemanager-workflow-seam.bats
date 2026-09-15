@@ -79,12 +79,22 @@ setup() {
   export CURL_ARGS="$TEST_TMP/curl_args"
   export CURL_MAP="$TEST_TMP/curl_map"
   export GH_ARGS="$TEST_TMP/gh_args"
+  export NPM_ARGS="$TEST_TMP/npm_args"
+  export PNPM_ARGS="$TEST_TMP/pnpm_args"
   : > "$CURL_ARGS"
   : > "$CURL_MAP"
   : > "$GH_ARGS"
+  : > "$NPM_ARGS"
+  : > "$PNPM_ARGS"
 
   write_curl_stub
   write_gh_stub
+  write_npm_stub
+  write_pnpm_stub
+  git -C "$WORKDIR" init -q
+  git -C "$WORKDIR" config user.email test@example.invalid
+  git -C "$WORKDIR" config user.name test
+  git -C "$WORKDIR" config commit.gpgsign false
 }
 
 teardown() {
@@ -161,6 +171,52 @@ STUB
   chmod +x "$STUB_BIN/gh"
 }
 
+write_npm_stub() {
+  cat > "$STUB_BIN/npm" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$NPM_ARGS"
+case "${NPM_MODE:-ok}" in
+  fail) exit 1 ;;
+esac
+prefix=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prefix) prefix="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$prefix/node_modules/.bin"
+cat > "$prefix/node_modules/.bin/pnpm" <<'PNPM'
+#!/usr/bin/env bash
+exec pnpm "$@"
+PNPM
+chmod +x "$prefix/node_modules/.bin/pnpm"
+exit 0
+STUB
+  chmod +x "$STUB_BIN/npm"
+}
+
+write_pnpm_stub() {
+  cat > "$STUB_BIN/pnpm" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$PNPM_ARGS"
+if [ "$1" = "--version" ]; then
+  printf '%s\n' "${PNPM_ACTUAL_VERSION:-9.15.9}"
+  exit 0
+fi
+case "${PNPM_MODE:-ok}" in
+  generate-fail) [ "$1" = "install" ] && [ "$2" = "--lockfile-only" ] && exit 1 ;;
+  generate-mutate-manifest) [ "$1" = "install" ] && [ "$2" = "--lockfile-only" ] && printf '\n' >> package.json ;;
+  frozen-fail) [ "$1" = "install" ] && [ "$2" = "--frozen-lockfile" ] && exit 1 ;;
+  frozen-mutate-manifest) [ "$1" = "install" ] && [ "$2" = "--frozen-lockfile" ] && printf '\n' >> package.json ;;
+  frozen-mutate-lockfile) [ "$1" = "install" ] && [ "$2" = "--frozen-lockfile" ] && printf '\n' >> pnpm-lock.yaml ;;
+  mutate-other) printf 'x\n' > unexpected.txt; git add unexpected.txt ;;
+esac
+exit 0
+STUB
+  chmod +x "$STUB_BIN/pnpm"
+}
+
 # --- drivers ----------------------------------------------------------------
 
 # Copy a manifest fixture into the fake checkout under the given repo-relative
@@ -169,6 +225,9 @@ place_manifest() {
   local fixture="$1" dest="${2:-package.json}"
   mkdir -p "$WORKDIR/$(dirname "$dest")"
   cp "$REPO_ROOT/$fixture" "$WORKDIR/$dest"
+  printf 'lockfileVersion: 9\n' > "$WORKDIR/$(dirname "$dest")/pnpm-lock.yaml"
+  git -C "$WORKDIR" add -- "$dest" "$(dirname "$dest")/pnpm-lock.yaml"
+  git -C "$WORKDIR" commit -qm fixture
 }
 
 run_resolve() {
@@ -181,6 +240,12 @@ run_step() {
   local f="$TEST_TMP/step.sh"
   write_step_script "$1" "$f" || return 1
   PATH="$STUB_BIN:$PATH" run bash "$f"
+}
+
+run_lockfile_validation() {
+  local f="$TEST_TMP/lockfile.sh"
+  write_step_script "Regenerate and validate lockfile" "$f" || return 1
+  PATH="$STUB_BIN:$PATH" run bash -c 'cd "$1" && bash "$2"' bash "$WORKDIR" "$f"
 }
 
 # --- Resolve and update: the happy path ------------------------------------
@@ -385,6 +450,140 @@ run_step() {
   grep -q '"pnpm@9.15.9"' "$WORKDIR/packages/app/package.json"
 }
 
+@test "a missing adjacent tracked lockfile is refused before the manifest rewrite" {
+  place_manifest "$MFX/plain.json"
+  rm "$WORKDIR/pnpm-lock.yaml"
+  git -C "$WORKDIR" rm -q --cached pnpm-lock.yaml
+  map_add "$PACKUMENT_URL" "$REPO_ROOT/$SFX/packument-good.json"
+  export INPUT_MANIFEST_PATH="package.json"
+  export INPUT_MIN_AGE_DAYS=5
+
+  run_resolve
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::required tracked adjacent pnpm lockfile is missing}" != "$output" ]
+  grep -q '"pnpm@9.15.0"' "$WORKDIR/package.json"
+}
+
+@test "an untracked manifest is refused before rewriting" {
+  place_manifest "$MFX/plain.json" "packages/app/package.json"
+  git -C "$WORKDIR" rm -q --cached packages/app/package.json
+  map_add "$PACKUMENT_URL" "$REPO_ROOT/$SFX/packument-good.json"
+  export INPUT_MANIFEST_PATH="packages/app/package.json"
+  export INPUT_MIN_AGE_DAYS=5
+
+  run_resolve
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::manifest must be tracked}" != "$output" ]
+
+}
+
+@test "a workspace configuration beside the selected manifest and lockfile is supported" {
+  place_manifest "$MFX/plain.json"
+  map_add "$PACKUMENT_URL" "$REPO_ROOT/$SFX/packument-good.json"
+  export INPUT_MANIFEST_PATH="package.json"
+  export INPUT_MIN_AGE_DAYS=5
+  printf 'packages:\n  - packages/*\n' > "$WORKDIR/pnpm-workspace.yaml"
+  git -C "$WORKDIR" add pnpm-workspace.yaml
+
+  run_resolve
+  [ "$status" -eq 0 ]
+  grep -qx 'lockfile_path=pnpm-lock.yaml' "$GITHUB_OUTPUT"
+}
+
+@test "an ancestor pnpm workspace layout is refused before rewriting" {
+  place_manifest "$MFX/plain.json" "packages/app/package.json"
+  map_add "$PACKUMENT_URL" "$REPO_ROOT/$SFX/packument-good.json"
+  export INPUT_MANIFEST_PATH="packages/app/package.json"
+  export INPUT_MIN_AGE_DAYS=5
+  printf 'packages:\n  - packages/*\n' > "$WORKDIR/pnpm-workspace.yaml"
+
+  run_resolve
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::ancestor pnpm workspace layouts are not supported}" != "$output" ]
+}
+
+@test "the lockfile validation installs the selected pnpm outside the project and rejects a wrong version" {
+  place_manifest "$MFX/plain.json" "packages/app/package.json"
+  export MANIFEST="packages/app/package.json"
+  export LOCKFILE="packages/app/pnpm-lock.yaml"
+  export PNPM_VERSION="9.15.9"
+  export PNPM_ACTUAL_VERSION="9.15.8"
+
+  run_lockfile_validation
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::provisioned pnpm version does not match selected version}" != "$output" ]
+  grep -qx -- '--ignore-scripts' "$NPM_ARGS"
+}
+
+@test "the lockfile validation rejects a failed lockfile generation" {
+  place_manifest "$MFX/plain.json"
+  export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export PNPM_VERSION="9.15.9"
+  export PNPM_MODE="generate-fail"
+  run_lockfile_validation
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::pnpm lockfile generation failed}" != "$output" ]
+
+}
+
+@test "the lockfile validation rejects a frozen install failure" {
+  place_manifest "$MFX/plain.json"
+  export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export PNPM_VERSION="9.15.9"
+  export PNPM_MODE="frozen-fail"
+  run_lockfile_validation
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::frozen pnpm install failed}" != "$output" ]
+
+}
+
+@test "the lockfile validation rejects a generation mutation to the rewritten manifest" {
+  place_manifest "$MFX/plain.json"
+  export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export PNPM_VERSION="9.15.9"
+  export PNPM_MODE="generate-mutate-manifest"
+  run_lockfile_validation
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::pnpm lockfile generation changed the rewritten manifest}" != "$output" ]
+
+}
+
+@test "the lockfile validation rejects a frozen install mutation to the manifest" {
+  place_manifest "$MFX/plain.json"
+  export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export PNPM_VERSION="9.15.9"
+  export PNPM_MODE="frozen-mutate-manifest"
+  run_lockfile_validation
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::frozen pnpm install changed the validated manifest or lockfile}" != "$output" ]
+}
+
+@test "the lockfile validation rejects a frozen install mutation to the lockfile" {
+  place_manifest "$MFX/plain.json"
+  export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export PNPM_VERSION="9.15.9"
+  export PNPM_MODE="frozen-mutate-lockfile"
+  run_lockfile_validation
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::frozen pnpm install changed the validated manifest or lockfile}" != "$output" ]
+}
+
+@test "the lockfile validation rejects a staged unrelated mutation" {
+  place_manifest "$MFX/plain.json"
+  export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export PNPM_VERSION="9.15.9"
+  export PNPM_MODE="mutate-other"
+  run_lockfile_validation
+  [ "$status" -ne 0 ]
+  [ "${output#*::error::pnpm validation changed an unexpected path}" != "$output" ]
+}
+
 @test "a manifest_path carrying a newline is refused before anything runs" {
   # The value flows into create-pull-request's newline-separated add-paths,
   # where a newline would silently widen the commit's path restriction.
@@ -444,29 +643,33 @@ other.json"
   [ ! -s "$CURL_ARGS" ]
 }
 
-# --- Verify the pull request touches only the manifest ----------------------
+# --- Verify the pull request touches only the manifest and lockfile ---------
 
-@test "the verify step accepts the API's normalized single-file reply" {
+@test "the verify step accepts the manifest with an unchanged or changed adjacent lockfile" {
   export GH_TOKEN="t"
   export GH_REPO="octo/example"
   export PR="7"
   export MANIFEST="package.json"
-  export GH_STDOUT="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
+  export GH_STDOUT="package.json
+pnpm-lock.yaml"
 
-  run_step "Verify the pull request touches only the manifest"
+  run_step "Verify the pull request touches only the manifest and lockfile"
   [ "$status" -eq 0 ]
   grep -qx "repos/octo/example/pulls/7/files" "$GH_ARGS"
 }
 
-@test "the verify step fails when the pull request touches anything else" {
+@test "the verify step fails when the pull request touches an unrelated path" {
   export GH_TOKEN="t"
   export GH_REPO="octo/example"
   export PR="7"
   export MANIFEST="package.json"
+  export LOCKFILE="pnpm-lock.yaml"
   export GH_STDOUT="package.json
-pnpm-lock.yaml"
+pnpm-lock.yaml
+unexpected.txt"
 
-  run_step "Verify the pull request touches only the manifest"
+  run_step "Verify the pull request touches only the manifest and lockfile"
   [ "$status" -ne 0 ]
   [ "${output#*::error::pull request touches unexpected paths}" != "$output" ]
 }
@@ -492,7 +695,7 @@ pnpm-lock.yaml"
   grep -qx "context=pnpm-packageManager / evidence" "$GH_ARGS"
   grep -qx "repos/octo/example/statuses/deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$GH_ARGS"
   grep -qx "target_url=https://github.com/octo/example/actions/runs/123" "$GH_ARGS"
-  grep -q "^description=pnpm 9.15.9: exact published version, not deprecated, 5d+ old" "$GH_ARGS"
+  grep -q "^description=pnpm 9.15.9: exact published version, lockfile frozen-validated, 5d+ old" "$GH_ARGS"
 }
 
 @test "a bypass run says so in the description and stays inside 140 characters" {
