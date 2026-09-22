@@ -18,6 +18,11 @@ on:
         type: string
         required: false
         default: "v"
+      version-bump-config:
+        description: "Version-bump config for this release (repo-root-relative .json; one per tag-prefix in a monorepo)"
+        type: string
+        required: false
+        default: ".version-bump.json"
   workflow_call:
     inputs:
       bump:
@@ -30,6 +35,11 @@ on:
         required: false
         default: "v"
         description: "Tag prefix (e.g. 'v' for v1.2.3, 'tools/v' for tools/v1.2.3)"
+      version-bump-config:
+        type: string
+        required: false
+        default: ".version-bump.json"
+        description: "Version-bump config for this release (repo-root-relative .json; one per tag-prefix in a monorepo)"
     secrets:
       RELEASE_BOT_PRIVATE_KEY:
         required: true
@@ -387,11 +397,13 @@ jobs:
         env:
           NEXT_TAG: ${{ needs.plan.outputs.next_tag }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
+          VERSION_BUMP_CONFIG: ${{ inputs.version-bump-config }}
           PLANNED_SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           PREFIX="${TAG_PREFIX:-v}"
           VERSION="${NEXT_TAG#"${PREFIX}"}"
+          CONFIG="${VERSION_BUMP_CONFIG:-.version-bump.json}"
 
           # --- BEGIN inline:scripts/bump-version-files.sh ---
           bump_version_files() (
@@ -631,7 +643,7 @@ jobs:
           # --- END inline:scripts/bump-version-files.sh ---
 
           set +e
-          bump_version_files .version-bump.json "$VERSION" > /tmp/bump.summary
+          bump_version_files "$CONFIG" "$VERSION" > /tmp/bump.summary
           BUMP_EXIT=$?
           set -e
 
@@ -714,11 +726,13 @@ jobs:
               # the original GITHUB_SHA, recreates a sibling bump commit
               # (different timestamp → different SHA), and this non-force PATCH
               # will 422 (non-fast-forward). Recover with a fresh
-              # `workflow_dispatch` from main, using the SAME `bump` and
-              # `tag-prefix` inputs as the failed run. The plan
+              # `workflow_dispatch` from main, using the SAME `bump`,
+              # `tag-prefix`, and `version-bump-config` inputs as the failed
+              # run. The plan
               # derives the version from the last *tag* — still unchanged,
               # since the tag was never created — so a different `bump` (e.g.
-              # `auto` in place of an explicit override) or `tag-prefix` would
+              # `auto` in place of an explicit override), `tag-prefix`, or
+              # `version-bump-config` would
               # recompute a different version and create a second, wrong bump
               # commit instead of taking the no-bump path. With the same
               # inputs the recomputed version matches the already-bumped
@@ -734,10 +748,10 @@ jobs:
               # below. Set only on this path — case 0 is the only one that
               # advances main, so it is the only partial-failure-recoverable
               # state. See the RECOVERY NOTE on the PATCH above.
-              RECOVERY_HINT="> **Partial-failure recovery:** \`main\` now carries this bump commit. If a later step fails, do NOT use GitHub's \"Re-run failed jobs\" — start a fresh \`workflow_dispatch\` from \`main\` with the **same \`bump\` and \`tag-prefix\` inputs** used for this run."
+              RECOVERY_HINT="> **Partial-failure recovery:** \`main\` now carries this bump commit. If a later step fails, do NOT use GitHub's \"Re-run failed jobs\" — start a fresh \`workflow_dispatch\` from \`main\` with the **same \`bump\`, \`tag-prefix\`, and \`version-bump-config\` inputs** used for this run."
               ;;
             1)
-              echo "::error::Bump version files step failed due to .version-bump.json error"
+              echo "::error::Bump version files step failed due to $CONFIG error"
               exit 1
               ;;
             2)
@@ -762,6 +776,7 @@ jobs:
             echo "### Version file bump"
             echo ""
             echo "**Target version:** \`$VERSION\`"
+            echo "**Config:** \`$CONFIG\`"
             echo ""
             echo "| File | Path | Version | Status |"
             echo "|------|------|---------|--------|"
