@@ -395,9 +395,9 @@ jobs:
 
           # --- BEGIN inline:scripts/bump-version-files.sh ---
           bump_version_files() (
-          # bump-version-files.sh — apply version bumps from .version-bump.json
+          # bump-version-files.sh — apply version bumps from a version-bump config
           #
-          # Reads .version-bump.json and writes the supplied version into each
+          # Reads the config (default .version-bump.json) and writes the supplied version into each
           # entry's target. Supports two per-entry forms (mutually exclusive):
           #
           #   { "path": "X.json", "field": "version" }                 — legacy
@@ -407,10 +407,15 @@ jobs:
           #   ./scripts/bump-version-files.sh <config-path> <version>
           #   VERSION=1.2.3 ./scripts/bump-version-files.sh .version-bump.json
           #
+          # Config path contract: relative to the repository root, no '..' segment,
+          # ends in .json, not a symlink, and canonically inside GITHUB_WORKSPACE
+          # (default $PWD). Entry paths inside the config are always relative to the
+          # repository root (the working directory), not to the config's location.
+          #
           # Exit codes:
           #   0 — at least one entry was modified (caller should commit)
-          #   1 — config error: malformed JSON, missing files array, schema
-          #       violation. Caller MUST fail the workflow.
+          #   1 — config error: unsafe config path, malformed JSON, missing files
+          #       array, schema violation. Caller MUST fail the workflow.
           #   2 — config valid but nothing modified: no config file, or all
           #       entries already up to date, or all entries skipped. Caller
           #       should NOT commit, but workflow continues.
@@ -471,8 +476,8 @@ jobs:
             local disp; disp=$(display_path "$field" "$path_expr")
 
             if [ -n "$path_expr" ] && ! validate_path_expr "$path_expr"; then
-              printf '::error file=.version-bump.json::Entry for %q has invalid path_expr %q\n' \
-                "$file_path" "$path_expr" >&2
+              printf '::error file=%s::Entry for %q has invalid path_expr %q\n' \
+                "$config" "$file_path" "$path_expr" >&2
               printf '| `%s` | `%s` | - | skipped (invalid path_expr) |\n' "$file_path" "$disp"
               return 1
             fi
@@ -520,6 +525,35 @@ jobs:
           version="${2:-${VERSION:-}}"
           : "${version:?usage: $0 <config> <version> | VERSION=X $0 [config]}"
 
+          # --- config path contract ---
+          # Shape checks run before the manifest is truncated; the containment check
+          # below runs before the config is read. Control characters are refused so
+          # the value cannot forge workflow commands in diagnostics.
+          case "$config" in
+            *[[:cntrl:]]*)
+              echo "::error::version-bump config contains a control character" >&2
+              exit 1 ;;
+            /*)
+              echo "::error::version-bump config '$config' is absolute; it must be relative to the repository root" >&2
+              exit 1 ;;
+          esac
+          case "/$config/" in
+            */../*)
+              echo "::error::version-bump config '$config' contains a '..' path segment" >&2
+              exit 1 ;;
+          esac
+          case "$config" in
+            *.json) ;;
+            *)
+              echo "::error::version-bump config '$config' must end in .json" >&2
+              exit 1 ;;
+          esac
+          # pwd -P below resolves directory symlinks; this closes the file itself.
+          if [ -L "$config" ]; then
+            echo "::error::version-bump config '$config' is a symlink" >&2
+            exit 1
+          fi
+
           # Manifest of unique modified paths (consumed by tag-release.yml's
           # Git Data API path to build POST /git/trees). Truncate-or-create at
           # start so the file is always a fresh, well-defined snapshot of THIS
@@ -530,6 +564,19 @@ jobs:
             echo "No $config found, skipping version file bump"
             exit 2
           fi
+
+          workspace="${GITHUB_WORKSPACE:-$PWD}"
+          ws_real=$(cd "$workspace" 2>/dev/null && pwd -P) || {
+            echo "::error::GITHUB_WORKSPACE '$workspace' is not a directory" >&2
+            exit 1
+          }
+          config_dir=$(cd "$(dirname "$config")" && pwd -P)
+          case "$config_dir/" in
+            "$ws_real"/*) ;;
+            *)
+              echo "::error::version-bump config '$config' resolves outside the checkout" >&2
+              exit 1 ;;
+          esac
 
           if ! jq -e '.files | type == "array" and length > 0' "$config" >/dev/null 2>&1; then
             echo "::error::$config is missing or has an invalid 'files' array" >&2
@@ -568,7 +615,7 @@ jobs:
           done < <(jq -c '.files[]' "$config")
 
           # De-dup manifest in place: a single file may appear N times if
-          # .version-bump.json has multiple entries against it (see test
+          # the config has multiple entries against it (see test
           # `multi-entry: two path_expr entries against same file write both`).
           # sort -u keeps the contract that /tmp/bump.modified is a unique set.
           if [ -s "$BUMP_MODIFIED_FILE" ]; then

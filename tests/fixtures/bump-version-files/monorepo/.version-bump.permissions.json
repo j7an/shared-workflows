@@ -1,0 +1,5 @@
+{
+  "files": [
+    { "path": "packages/permissions/package.json", "field": "version" }
+  ]
+}
