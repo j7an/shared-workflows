@@ -302,6 +302,7 @@ Computes the next semver tag from Conventional Commits since the last tag, optio
 |---|---|---|---|---|
 | `bump` | string | no | `auto` | Semver bump (`auto` / `patch` / `minor` / `major`). `auto` infers from Conventional Commits. |
 | `tag-prefix` | string | no | `"v"` | Tag prefix. Use `"v"` for `v1.2.3`, `"tools/v"` for `tools/v1.2.3`, etc. Allowed chars: `[A-Za-z0-9._/-]`. |
+| `version-bump-config` | string | no | `".version-bump.json"` | Version-bump config applied by this release. In a monorepo, pass one config per `tag-prefix`. See [Per-package configs](#per-package-configs-monorepos). |
 
 ### Secrets
 
@@ -381,9 +382,36 @@ the expected, observed, and approved source SHAs. Only reads are retried, never
 branch updates or tag creation. This tolerates an old ref read without changing
 the approved target; it does not make the read and tag creation atomic.
 
-Optional. If a file named `.version-bump.json` exists at the repo root, the workflow updates the listed JSON files with the new version *before* creating the tag. The bumped files are committed and pushed to `main` as a separate `chore(release): bump version files to <version>` commit. The new tag points at that commit.
+Optional. If the selected config (`version-bump-config`, default `.version-bump.json` at the repo root) exists, the workflow updates the listed JSON files with the new version *before* creating the tag. The bumped files are committed and pushed to `main` as a separate `chore(release): bump version files to <version>` commit. The new tag points at that commit.
 
-If `.version-bump.json` is absent, the bumper step is a no-op.
+If the selected config is absent, the bumper step is a no-op.
+
+#### Per-package configs (monorepos)
+
+A repository with several independently versioned packages keeps one config per package and passes it with the matching `tag-prefix`. A release then bumps, commits, and tags only the files that config lists, so `permissions/v0.2.0` never rewrites another package's manifest.
+
+```yaml
+# .github/workflows/release-permissions.yml — permissions stream (permissions/v*.*.*)
+jobs:
+  tag:
+    permissions:
+      contents: read
+    uses: j7an/shared-workflows/.github/workflows/tag-release.yml@v4
+    with:
+      bump: ${{ inputs.bump }}
+      tag-prefix: "permissions/v"
+      version-bump-config: ".version-bump.permissions.json"
+    secrets:
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+```
+
+```json
+{ "files": [ { "path": "packages/permissions/package.json", "field": "version" } ] }
+```
+
+Entry `path` values are always relative to the repository root, wherever the config file lives.
+
+The config path must be relative to the repository root, contain no `..` segment, end in `.json`, and not be a symlink. Its canonical location must stay inside the checkout. A path that breaks this contract fails the bump step before any file is read or changed and before `main` moves. When recovering from a partial failure, re-dispatch with the same `version-bump-config` as the failed run.
 
 #### Schema
 
@@ -462,7 +490,7 @@ The validator rejects pipes (`|`), JSONPath-style wildcards (`[*]`), slices (`[2
 
 #### Step summary
 
-The workflow run summary includes a per-entry table:
+The workflow run summary names the applied config and includes a per-entry table:
 
 | File | Path | Version | Status |
 |---|---|---|---|

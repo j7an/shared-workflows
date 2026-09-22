@@ -15,6 +15,9 @@ setup() {
   # pinning it inside this test's unique TMPDIR keeps parallel/concurrent runs
   # from clobbering one another (teardown's rm -rf cleans it up).
   export BUMP_MODIFIED_FILE="$TMPDIR/bump.modified"
+  # The config must resolve inside GITHUB_WORKSPACE. CI runners export the
+  # real checkout here, so pin it to this test's checkout stand-in.
+  export GITHUB_WORKSPACE="$TMPDIR"
 }
 
 teardown() {
@@ -303,4 +306,95 @@ run_bumper() {
   # file returns 1, and `! grep` would silently succeed without it.
   [ -f "$BUMP_MODIFIED_FILE" ]
   ! grep -q server.json "$BUMP_MODIFIED_FILE"
+}
+
+# === Config path contract (version-bump-config input, #167) ===
+
+run_config() {
+  run bash "$REPO_ROOT/scripts/bump-version-files.sh" "$1" 1.2.3
+}
+
+assert_config_rejected() {
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"::error::"* ]]
+  [ "$(jq -r .version package.json)" = "0.0.0" ]
+  [ ! -s "$BUMP_MODIFIED_FILE" ]
+}
+
+@test "config: default argument still reads root .version-bump.json" {
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" .version-bump.json
+  run bash "$REPO_ROOT/scripts/bump-version-files.sh" "" 1.2.3
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .version package.json)" = "1.2.3" ]
+}
+
+@test "config: absolute path is rejected" {
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" cfg.json
+  run_config "$TMPDIR/cfg.json"
+  assert_config_rejected
+  [[ "$output" == *"absolute"* ]]
+}
+
+@test "config: '..' segment is rejected even when it resolves inside" {
+  mkdir sub
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" cfg.json
+  run_config "sub/../cfg.json"
+  assert_config_rejected
+  [[ "$output" == *"'..'"* ]]
+}
+
+@test "config: non-.json name is rejected" {
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" cfg.yml
+  run_config "cfg.yml"
+  assert_config_rejected
+  [[ "$output" == *".json"* ]]
+}
+
+@test "config: control characters are rejected" {
+  run_config "$(printf 'a\nb.json')"
+  assert_config_rejected
+  [[ "$output" == *"control character"* ]]
+}
+
+@test "config: symlinked config file is rejected" {
+  outside=$(mktemp -d)
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" "$outside/cfg.json"
+  ln -s "$outside/cfg.json" link.json
+  run_config "link.json"
+  rm -rf "$outside"
+  assert_config_rejected
+  [[ "$output" == *"symlink"* ]]
+}
+
+@test "config: directory symlink escaping the workspace is rejected" {
+  outside=$(mktemp -d)
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/valid/legacy-field.json" "$outside/cfg.json"
+  ln -s "$outside" escape
+  run_config "escape/cfg.json"
+  rm -rf "$outside"
+  assert_config_rejected
+  [[ "$output" == *"outside"* ]]
+}
+
+@test "config: absent named config is a no-op" {
+  run_config ".version-bump.missing.json"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"No .version-bump.missing.json found"* ]]
+  [ "$(jq -r .version package.json)" = "0.0.0" ]
+  [ ! -s "$BUMP_MODIFIED_FILE" ]
+}
+
+@test "config: schema errors name the selected config" {
+  cp "$REPO_ROOT/tests/fixtures/bump-version-files/invalid-path-expr/pipe.json" .version-bump.pkg.json
+  run_config ".version-bump.pkg.json"
+  [[ "$output" == *"file=.version-bump.pkg.json::"* ]]
+}
+
+@test "monorepo: each config bumps only its own package manifest" {
+  cp -R "$REPO_ROOT/tests/fixtures/bump-version-files/monorepo/." .
+  run_config ".version-bump.permissions.json"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .version packages/permissions/package.json)" = "1.2.3" ]
+  [ "$(jq -r .version packages/other/package.json)" = "0.3.0" ]
+  [ "$(cat "$BUMP_MODIFIED_FILE")" = "packages/permissions/package.json" ]
 }

@@ -198,3 +198,35 @@ job_permissions_block() {
   assert_contains "$docs" "contents: read"
   assert_contains "$docs" "created tag"
 }
+
+@test "version-bump-config is an optional input on both triggers with the root default" {
+  for trigger in workflow_dispatch workflow_call; do
+    block=$(on_block | awk -v t="  $trigger:" '
+      $0 == t { flag=1; next }
+      flag && /^  [A-Za-z_]+:/ { exit }
+      flag { print }
+    ' | awk '
+      /^      version-bump-config:$/ { flag=1; next }
+      flag && /^      [A-Za-z0-9_-]+:$/ { exit }
+      flag && /^    [A-Za-z]+:$/ { exit }
+      flag { print }
+    ')
+    assert_contains "$block" "type: string"
+    assert_contains "$block" "required: false"
+    assert_contains "$block" 'default: ".version-bump.json"'
+  done
+}
+
+@test "bump step reads the selected config through env indirection" {
+  block=$(step_block "Bump version files")
+  assert_contains "$block" 'VERSION_BUMP_CONFIG: ${{ inputs.version-bump-config }}'
+  assert_contains "$block" 'bump_version_files "$CONFIG" "$VERSION"'
+  assert_lacks "$block" 'bump_version_files .version-bump.json'
+}
+
+@test "bump summary and diagnostics name the applied config" {
+  block=$(step_block "Bump version files")
+  assert_contains "$block" 'echo "**Config:** \`$CONFIG\`"'
+  assert_contains "$block" 'failed due to $CONFIG error'
+  assert_contains "$block" 'version-bump-config'
+}
