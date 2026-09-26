@@ -1,0 +1,11 @@
+[project]
+name = "demo"
+
+[build-system]
+requires = [
+    "hatchling>=1.28.0",
+    "hatch-vcs>=0.4.0",
+    "setuptools>=70.1",
+    "wheel>=0.44.0",
+]
+build-backend = "hatchling.build"

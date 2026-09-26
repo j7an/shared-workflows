@@ -180,9 +180,10 @@ run_chain_with_pyproject() {
 # ---------------------------------------------------------------------------
 
 # Drive the real `npm composition` block over a fixture diff.
-# $1 = fixture path, $2 = optional PR body.
+# $1 = fixture path, $2 = optional PR body, $3 = optional pyproject head dir
+# (the `pyproject head fetch` block's output; empty = no head files).
 #
-# Seeds ONLY the block's free inputs: $DIFF, $PR_BODY, and shims for the six
+# Seeds ONLY the block's free inputs: $DIFF, $PR_BODY, $PYPROJECT_HEAD_DIR, and shims for the six
 # helper functions the workflow step defines above the block. DEPS_TSV,
 # NPM_DEPS_TSV, CLEARED_NPM, CLEARED_ALL, BASE_UNSUPPORTED, UNSUPPORTED_PATHS,
 # EFFECTIVE_TOUCHED and ECO_HINT are all COMPUTED here — pre-seeding any of them
@@ -190,7 +191,7 @@ run_chain_with_pyproject() {
 # self-checking: a forgotten input aborts with `unbound variable` rather than
 # letting the case pass vacuously.
 run_npm_chain() {
-  local fixture="$1" pr_body="${2:-}"
+  local fixture="$1" pr_body="${2:-}" head_dir="${3:-}"
   local block; block=$(extract_named_block "$WF" "npm composition")
   run bash -c "
     set -uo pipefail
@@ -202,6 +203,7 @@ run_npm_chain() {
     npm_bump_extract()       { bash scripts/npm-bump-extract.sh \"\$@\"; }
     DIFF=\$(cat '$fixture')
     PR_BODY='$pr_body'
+    PYPROJECT_HEAD_DIR='$head_dir'
     $block
     printf 'DEPS=[%s]\n'  \"\$DEPS_TSV\"
     printf 'UNSUP=[%s]\n' \"\$UNSUPPORTED_PATHS\"
@@ -212,6 +214,50 @@ run_npm_chain() {
 # ECO_HINT is printed through ${ECO_HINT:-} on purpose: the workflow only
 # assigns it inside `if [ -z "$DEPS_TSV" ]`, so on a clean bump it is never set
 # and a bare "$ECO_HINT" would abort the case under `set -u`.
+
+@test "chain: nexus-mcp#280 pyproject + uv.lock clears with head context (issue #169)" {
+  run_npm_chain "$FIXTURES/nexus-280-pyproject-plus-uvlock.diff" "" \
+    tests/fixtures/pyproject-bump-extract/head/nexus-280
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"anyio	4.15.1	pypi"* ]] || return 1
+  [[ "$output" == *"ruff	0.16.8	pypi"* ]] || return 1
+  [[ "$output" == *"UNSUP=[]"* ]] || return 1
+}
+
+@test "chain: nexus-mcp#280 without head context keeps pyproject.toml unsupported" {
+  run_npm_chain "$FIXTURES/nexus-280-pyproject-plus-uvlock.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UNSUP=[pyproject.toml]"* ]] || return 1
+}
+
+# Drive the real `pyproject head fetch` block with a `gh` shim that serves
+# fixture content for pyproject.toml and fails for everything else.
+@test "pyproject head fetch: fetches head pyproject.toml, drops failed fetches (issue #169)" {
+  local block; block=$(extract_named_block "$WF" "pyproject head fetch")
+  local diff
+  diff=$(printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' '--- a/pyproject.toml' '+++ b/pyproject.toml' \
+    'diff --git a/sub/pyproject.toml b/sub/pyproject.toml' '--- a/sub/pyproject.toml' '+++ b/sub/pyproject.toml' \
+    'diff --git a/uv.lock b/uv.lock' '--- a/uv.lock' '+++ b/uv.lock')
+  run bash -c "
+    set -euo pipefail
+    diff_touches_lockfile() { bash scripts/diff-touches-lockfile.sh \"\$@\"; }
+    gh() {
+      case \"\$*\" in
+        *'repos/o/r/contents/pyproject.toml?ref=abc123') echo 'HEAD CONTENT' ;;
+        *) return 1 ;;
+      esac
+    }
+    GH_REPO=o/r HEAD_SHA=abc123 RUNNER_TEMP='$BATS_TEST_TMPDIR'
+    DIFF='$diff'
+    $block
+    cat \"\$PYPROJECT_HEAD_DIR/pyproject.toml\"
+    [ ! -e \"\$PYPROJECT_HEAD_DIR/sub/pyproject.toml\" ] && echo 'SUB ABSENT'
+    [ ! -e \"\$PYPROJECT_HEAD_DIR/uv.lock\" ] && echo 'LOCK ABSENT'
+  "
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'HEAD CONTENT\nSUB ABSENT\nLOCK ABSENT')" ]
+}
 
 @test "npm chain: clean bump produces tier-1 rows and clears its paths" {
   run_npm_chain "$NPMFX/manifest-and-lock-clean.diff"

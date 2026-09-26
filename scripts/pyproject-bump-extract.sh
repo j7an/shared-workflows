@@ -11,10 +11,18 @@
 #
 # Input:  unified diff on stdin
 # Flag:   --mode=deps  OR  --mode=cleared-paths  (exactly one, required)
+#         --head-dir=DIR  (optional) DIR/<path> is the PR-head copy of each
+#         changed pyproject.toml. Each hunk's table/array context is seeded
+#         from the head file's lines before the hunk's new-side start line,
+#         because 3-line diff context rarely reaches the table header
+#         (issue #169). Seeding requires the hunk's first line to be a context
+#         line equal to that head-file line; otherwise the hunk starts with no
+#         context, as it does without the flag (fail closed).
 # Output (deps):          TSV <name>\t<version>\tpypi, sorted by name, deduped
 # Output (cleared-paths): newline-delimited pyproject.toml paths, sorted, deduped
 # Exit:   0 on success (possibly zero rows / zero paths)
-#         2 on malformed input, missing --mode, unknown mode, or repeated --mode
+#         2 on malformed input, missing --mode, unknown mode, or repeated
+#           --mode / --head-dir
 #
 # Bash 3.2 compatible: no `declare -A`, no `mapfile`/`readarray`. Dedup uses a
 # newline-delimited string sentinel, matching scripts/extract-deps.sh.
@@ -24,8 +32,18 @@
 set -euo pipefail
 
 MODE=""
+HEAD_DIR=""
+head_dir_set=false
 for arg in "$@"; do
   case "$arg" in
+    --head-dir=*)
+      if [ "$head_dir_set" = "true" ]; then
+        echo "pyproject-bump-extract.sh: --head-dir specified more than once" >&2
+        exit 2
+      fi
+      head_dir_set=true
+      HEAD_DIR="${arg#--head-dir=}"
+      ;;
     --mode=deps|--mode=cleared-paths)
       if [ -n "$MODE" ]; then
         echo "pyproject-bump-extract.sh: --mode specified more than once" >&2
@@ -68,6 +86,10 @@ current_table=""        # "" | "project_other" | "project_optional_deps" | "depe
                         # | "build_system" | "other"
 current_key=""          # array-opening key for tables where keys are dep arrays
 verdict="clean"
+seed_armed=false        # true between a seeded @@ line and the hunk's first line
+seed_header=""
+seed_key=""
+seed_line=""
 file_rows=$'\n'
 
 # Global:
@@ -85,6 +107,56 @@ pending_skeleton=""     # entry with version-spec field substituted by sentinel
 pending_minus_version=""
 
 # --- Helpers ---
+
+# table_for_header "$header" — maps a [header] name to a current_table value.
+table_for_header() {
+  case "$1" in
+    project)                          printf '%s' project_other ;;
+    project.optional-dependencies)    printf '%s' project_optional_deps ;;
+    dependency-groups)                printf '%s' dependency_groups ;;
+    tool.uv)                          printf '%s' tool_uv ;;
+    tool.poetry.dependencies)         printf '%s' poetry_main ;;
+    tool.poetry.dev-dependencies)     printf '%s' poetry_dev ;;
+    build-system)                     printf '%s' build_system ;;
+    tool.poetry.group.*.dependencies) printf '%s' poetry_group ;;
+    *)                                printf '%s' other ;;
+  esac
+}
+
+# arm_hunk_seed "$hunk_header" — reads the head file's last [header] and
+# still-open `key = [` array before the hunk's new-side start line c, plus
+# line c itself. The main loop applies them only if the hunk's first line is
+# a context line equal to line c. Header matching mirrors the main loop's
+# regex. H:/K:/L: prefixes keep empty values from being dropped by $(...).
+arm_hunk_seed() {
+  local hunk="$1" head_file="$HEAD_DIR/$current_path" start out
+  seed_armed=false
+  [ -n "$HEAD_DIR" ] && [ -f "$head_file" ] || return 0
+  [[ "$hunk" =~ ^@@\ -[0-9]+(,[0-9]+)?\ \+([0-9]+) ]] || return 0
+  start="${BASH_REMATCH[2]}"
+  [ "$start" -gt 1 ] || return 0
+  out=$(awk -v c="$start" '
+    { sub(/\r$/, "") }
+    NR == c { print "H:" h; print "K:" k; print "L:" $0; exit }
+    /^[[:space:]]*\[[^]]+\]/ {
+      h = $0; sub(/^[[:space:]]*\[/, "", h); sub(/\].*$/, "", h); k = ""; next
+    }
+    /^[[:space:]]*[A-Za-z_][A-Za-z0-9_-]*[[:space:]]*=/ {
+      k = ""
+      if ($0 ~ /=[[:space:]]*\[[[:space:]]*(#.*)?$/) {
+        k = $0; sub(/^[[:space:]]*/, "", k); sub(/[[:space:]]*=.*$/, "", k)
+      }
+      next
+    }
+    /^[[:space:]]*\]/ { k = "" }
+  ' "$head_file")
+  [ -n "$out" ] || return 0
+  { IFS= read -r seed_header; IFS= read -r seed_key; IFS= read -r seed_line; } <<< "$out"
+  seed_header="${seed_header#H:}"
+  seed_key="${seed_key#K:}"
+  seed_line="${seed_line#L:}"
+  seed_armed=true
+}
 
 # extract_target_version "$spec" — §3.3.1. Prints target on stdout, returns 1 on disqualify.
 extract_target_version() {
@@ -187,6 +259,20 @@ extract_operator() {
 emit_bump() {
   local name="$1" plus_spec="$2" minus_spec="$3" target plus_op minus_op
   if [ "$plus_spec" = "$minus_spec" ]; then verdict="disqualified"; return; fi
+  # Compound spec (">=X,<Y", issue #169): both sides must be compound, only the
+  # leading clause may change, and everything after the first comma must be
+  # byte-identical. The leading clauses then take the single-clause checks.
+  # ponytail: leading-clause only; allow any single changed clause if a real
+  # Dependabot PR with a non-leading lower bound gets disqualified.
+  case "$plus_spec$minus_spec" in
+    *,*)
+      case "$plus_spec" in *,*) ;; *) verdict="disqualified"; return ;; esac
+      case "$minus_spec" in *,*) ;; *) verdict="disqualified"; return ;; esac
+      if [ "${plus_spec#*,}" != "${minus_spec#*,}" ]; then verdict="disqualified"; return; fi
+      plus_spec="${plus_spec%%,*}"
+      minus_spec="${minus_spec%%,*}"
+      ;;
+  esac
   plus_op=$(extract_operator "$plus_spec") || { verdict="disqualified"; return; }
   minus_op=$(extract_operator "$minus_spec") || { verdict="disqualified"; return; }
   if [ "$plus_op" != "$minus_op" ]; then verdict="disqualified"; return; fi
@@ -232,6 +318,7 @@ reset_file_state() {
   current_key=""
   verdict="clean"
   file_rows=$'\n'
+  seed_armed=false
   clear_pending
 }
 
@@ -255,6 +342,8 @@ while IFS= read -r line; do
     flush_pending_as_disqualified
     current_table=""
     current_key=""
+    seed_armed=false
+    [ "$current_basename" = "pyproject.toml" ] && arm_hunk_seed "$line"
     continue
   fi
 
@@ -263,6 +352,15 @@ while IFS= read -r line; do
 
   prefix="${line:0:1}"
   content="${line:1}"
+
+  if [ "$seed_armed" = "true" ]; then
+    seed_armed=false
+    if [ "$prefix" = " " ] && [ "$content" = "$seed_line" ]; then
+      current_table=""
+      [ -n "$seed_header" ] && current_table=$(table_for_header "$seed_header")
+      current_key="$seed_key"
+    fi
+  fi
 
   # ---------------- Centralized pending consumption ----------------
   # If pending is set, this line MUST be the matching + (same kind/name/skeleton)
@@ -319,22 +417,8 @@ while IFS= read -r line; do
 
   # Table header detection.
   if [[ "$content" =~ ^[[:space:]]*\[([^]]+)\] ]]; then
-    header="${BASH_REMATCH[1]}"
-    case "$header" in
-      project)                          current_table="project_other"; current_key="" ;;
-      project.optional-dependencies)    current_table="project_optional_deps"; current_key="" ;;
-      dependency-groups)                current_table="dependency_groups"; current_key="" ;;
-      tool.uv)                          current_table="tool_uv"; current_key="" ;;
-      tool.poetry.dependencies)         current_table="poetry_main"; current_key="" ;;
-      tool.poetry.dev-dependencies)     current_table="poetry_dev"; current_key="" ;;
-      build-system)                     current_table="build_system"; current_key="" ;;
-      *)
-        case "$header" in
-          tool.poetry.group.*.dependencies) current_table="poetry_group"; current_key="" ;;
-          *) current_table="other"; current_key="" ;;
-        esac
-        ;;
-    esac
+    current_table=$(table_for_header "${BASH_REMATCH[1]}")
+    current_key=""
     # Changed table header = structural change → disqualify.
     if [ "$prefix" = "+" ] || [ "$prefix" = "-" ]; then verdict="disqualified"; fi
     continue
