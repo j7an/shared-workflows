@@ -505,6 +505,15 @@ PBX=tests/fixtures/pyproject-bump-extract
   [ "$output" = "pyproject.toml" ]
 }
 
+@test "Positive: head-seeded array opener with a trailing comment (dependencies = [ # ...)" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps --head-dir="$PBX/head/comment-opener-far" < "$PBX/comment-opener-far-bump.diff"
+  [ "$status" -eq 0 ]
+  [ "$output" = "requests	2.32	pypi" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths --head-dir="$PBX/head/comment-opener-far" < "$PBX/comment-opener-far-bump.diff"
+  [ "$status" -eq 0 ]
+  [ "$output" = "pyproject.toml" ]
+}
+
 @test "Disqualify: nexus-mcp#280 diff without --head-dir stays fail-closed" {
   assert_disqualified "$PBX/nexus-280-bump.diff"
 }

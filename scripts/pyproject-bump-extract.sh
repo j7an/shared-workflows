@@ -143,7 +143,7 @@ arm_hunk_seed() {
     }
     /^[[:space:]]*[A-Za-z_][A-Za-z0-9_-]*[[:space:]]*=/ {
       k = ""
-      if ($0 ~ /=[[:space:]]*\[[[:space:]]*$/) {
+      if ($0 ~ /=[[:space:]]*\[[[:space:]]*(#.*)?$/) {
         k = $0; sub(/^[[:space:]]*/, "", k); sub(/[[:space:]]*=.*$/, "", k)
       }
       next
