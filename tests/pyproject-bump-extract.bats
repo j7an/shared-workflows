@@ -458,8 +458,78 @@ DIFF
   [ "$output" = "pyproject.toml" ]
 }
 
-@test "Disqualify: PEP 508 compound spec (>=X,<Y)" {
-  assert_disqualified_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff>=0.15.13,<0.16"')"
+@test "Positive: compound spec with unchanged upper bound emits the lower bound (issue #169)" {
+  assert_clean_bump_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff>=0.15.13,<0.16"')" \
+    "ruff	0.15.13	pypi" "pyproject.toml"
+}
+
+@test "Positive: poetry compound string with unchanged upper bound (issue #169)" {
+  assert_clean_bump_diff "$(poetry_main_kv_diff 'pkg = ">=1.2,<2.0"' 'pkg = ">=1.3,<2.0"')" \
+    "pkg	1.3	pypi" "pyproject.toml"
+}
+
+@test "Disqualify: compound spec upper-bound change (issue #169)" {
+  assert_disqualified_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff>=0.15.12,<0.17"')"
+}
+
+@test "Disqualify: compound spec lower and upper bound both change (issue #169)" {
+  assert_disqualified_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff>=0.16.1,<0.17"')"
+}
+
+@test "Disqualify: compound spec clause added (issue #169)" {
+  assert_disqualified_diff "$(pep621_deps_diff '"ruff>=0.15.12"' '"ruff>=0.15.13,<0.16"')"
+}
+
+@test "Disqualify: compound spec clause removed (issue #169)" {
+  assert_disqualified_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff>=0.15.13"')"
+}
+
+@test "Disqualify: compound spec clause reordered (issue #169)" {
+  assert_disqualified_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff<0.16,>=0.15.13"')"
+}
+
+# --- --head-dir table-context seeding (issue #169) ---------------------------
+PBX=tests/fixtures/pyproject-bump-extract
+
+@test "--head-dir specified twice exits 2" {
+  run bash -c 'printf "" | bash scripts/pyproject-bump-extract.sh --mode=deps --head-dir=a --head-dir=b'
+  [ "$status" -eq 2 ]
+}
+
+@test "Positive: nexus-mcp#280 3-line-context diff clears with --head-dir (issue #169)" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps --head-dir="$PBX/head/nexus-280" < "$PBX/nexus-280-bump.diff"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'anyio\t4.15.1\tpypi\nruff\t0.16.8\tpypi')" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths --head-dir="$PBX/head/nexus-280" < "$PBX/nexus-280-bump.diff"
+  [ "$status" -eq 0 ]
+  [ "$output" = "pyproject.toml" ]
+}
+
+@test "Disqualify: nexus-mcp#280 diff without --head-dir stays fail-closed" {
+  assert_disqualified "$PBX/nexus-280-bump.diff"
+}
+
+# Runs both modes with --head-dir; both must emit nothing.
+assert_disqualified_with_head() {
+  local fixture="$1" head_dir="$2"
+  run bash scripts/pyproject-bump-extract.sh --mode=deps --head-dir="$head_dir" < "$fixture"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths --head-dir="$head_dir" < "$fixture"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "Disqualify: stale head file (hunk start line mismatch) is not seeded" {
+  assert_disqualified_with_head "$PBX/nexus-280-bump.diff" "$PBX/head/nexus-280-stale"
+}
+
+@test "Disqualify: head-seeded [build-system] requires bump" {
+  assert_disqualified_with_head "$PBX/build-system-far-bump.diff" "$PBX/head/build-system-far"
+}
+
+@test "Disqualify: head-seeded dependencies array in an unrecognized table" {
+  assert_disqualified_with_head "$PBX/unknown-table-far-bump.diff" "$PBX/head/unknown-table-far"
 }
 
 @test "Disqualify: PEP 508 upper-bound change (<X)" {

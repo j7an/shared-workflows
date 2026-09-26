@@ -1,0 +1,11 @@
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -5,6 +5,6 @@ name = "demo"
+ dependencies = [
+     "coverage>=7.0",
+     "pytest>=8.0",
+-    "pytest-cov>=5.0",
++    "pytest-cov>=5.1",
+     "ruff>=0.5",
+ ]
