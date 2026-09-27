@@ -23,6 +23,11 @@ on:
         type: string
         required: false
         default: ".version-bump.json"
+      paths:
+        description: "Only count commits touching these repo-relative paths (whitespace-separated; empty = all commits)"
+        type: string
+        required: false
+        default: ""
   workflow_call:
     inputs:
       bump:
@@ -40,6 +45,11 @@ on:
         required: false
         default: ".version-bump.json"
         description: "Version-bump config for this release (repo-root-relative .json; one per tag-prefix in a monorepo)"
+      paths:
+        type: string
+        required: false
+        default: ""
+        description: "Only count commits touching these repo-relative paths (whitespace-separated; empty = all commits)"
     secrets:
       RELEASE_BOT_PRIVATE_KEY:
         required: true
@@ -105,6 +115,7 @@ jobs:
         env:
           CHOICE: ${{ inputs.bump }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
+          PATHS: ${{ inputs.paths }}
         run: |
           PREFIX="${TAG_PREFIX:-v}"
 
@@ -114,6 +125,20 @@ jobs:
             echo "::error::Invalid tag-prefix '$PREFIX' (must match [A-Za-z0-9._/-]+)"
             exit 1
           fi
+
+          # Monorepo path filter: only commits touching these paths count toward
+          # the empty-release check and the bump. Same charset as the prefix, so
+          # git pathspec magic (':!x') and globs are rejected. Entries become the
+          # positional params passed after `--`; none means no filter.
+          set -f
+          set -- ${PATHS:-}
+          set +f
+          for p in "$@"; do
+            if ! printf '%s' "$p" | grep -qE '^[A-Za-z0-9._/-]+$'; then
+              echo "::error::Invalid paths entry '$p' (must match [A-Za-z0-9._/-]+)"
+              exit 1
+            fi
+          done
 
           # --- Find previous tag ---
           LATEST=$(git tag -l "${PREFIX}*.*.*" --sort=-version:refname | head -1)
@@ -134,9 +159,9 @@ jobs:
           fi
 
           # Subjects only (for display in the step summary)
-          SUBJECTS=$(git log --format='%s' "$RANGE")
+          SUBJECTS=$(git log --format='%s' "$RANGE" -- "$@")
           # Full messages (subject + body) for BREAKING CHANGE detection
-          FULL=$(git log --format='%s%n%b%n---COMMIT---' "$RANGE")
+          FULL=$(git log --format='%s%n%b%n---COMMIT---' "$RANGE" -- "$@")
 
           COMMIT_COUNT=$(printf '%s\n' "$SUBJECTS" | grep -c . || true)
           echo "Commits since $LATEST: $COMMIT_COUNT"
@@ -146,8 +171,12 @@ jobs:
               echo "### Release blocked: no commits since $LATEST"
               echo ""
               echo "Refusing to create an empty release. Merge some PRs and try again."
+              if [ "$#" -gt 0 ]; then
+                echo ""
+                echo "Only commits touching these paths count: \`$*\`"
+              fi
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::No commits since $LATEST, refusing to create empty release"
+            echo "::error::No commits since $LATEST${*:+ touching $*}, refusing to create empty release"
             exit 1
           fi
 
@@ -227,6 +256,9 @@ jobs:
             echo "**Source:** \`$LATEST\` -> \`$NEXT_TAG\`"
             echo "**Input:** \`$CHOICE\` -> $CHOICE_NOTE"
             echo "**Analysis would have picked:** \`$ANALYSIS_BUMP\` - $ANALYSIS_REASON"
+            if [ "$#" -gt 0 ]; then
+              echo "**Paths:** \`$*\`"
+            fi
             if [ -n "$OVERRIDE_WARN" ]; then
               echo ""
               echo "$OVERRIDE_WARN"
@@ -234,7 +266,7 @@ jobs:
             echo ""
             echo "**Commits since $LATEST** ($COMMIT_COUNT):"
             echo ""
-            git log --format='- %s (%h)' "$RANGE"
+            git log --format='- %s (%h)' "$RANGE" -- "$@"
           } >> "$GITHUB_STEP_SUMMARY"
 
           {
