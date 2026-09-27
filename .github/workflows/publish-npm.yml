@@ -571,8 +571,18 @@ jobs:
           PACKAGE: ${{ inputs.package-name }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>&1; then
-            echo "${PACKAGE}@${VERSION} already exists on npm; skipping npm publish."
+          # A re-run may find this version already published. Skip only when the
+          # registry holds these exact bytes, so the GitHub Release never attaches
+          # a tarball that differs from npm's.
+          set -- ./*.tgz
+          LOCAL="sha512-$(openssl dgst -sha512 -binary "$1" | openssl base64 -A)"
+          REMOTE=$(npm view "${PACKAGE}@${VERSION}" dist.integrity 2>/dev/null || true)
+          if [ -n "$REMOTE" ]; then
+            if [ "$REMOTE" != "$LOCAL" ]; then
+              echo "::error::${PACKAGE}@${VERSION} on npm (${REMOTE}) differs from the built tarball (${LOCAL})"
+              exit 1
+            fi
+            echo "${PACKAGE}@${VERSION} already exists on npm with matching integrity; skipping npm publish."
             exit 0
           fi
           npm publish ./*.tgz
