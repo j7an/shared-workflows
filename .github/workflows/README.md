@@ -303,6 +303,7 @@ Computes the next semver tag from Conventional Commits since the last tag, optio
 | `bump` | string | no | `auto` | Semver bump (`auto` / `patch` / `minor` / `major`). `auto` infers from Conventional Commits. |
 | `tag-prefix` | string | no | `"v"` | Tag prefix. Use `"v"` for `v1.2.3`, `"tools/v"` for `tools/v1.2.3`, etc. Allowed chars: `[A-Za-z0-9._/-]`. |
 | `version-bump-config` | string | no | `".version-bump.json"` | Version-bump config applied by this release. In a monorepo, pass one config per `tag-prefix`. See [Per-package configs](#per-package-configs-monorepos). |
+| `paths` | string | no | `""` | Whitespace-separated repo-relative paths. When set, only commits touching them count toward `auto` bump inference, the empty-release check, and the summary's commit list. Empty counts every commit. Allowed chars per entry: `[A-Za-z0-9._/-]`. |
 
 ### Secrets
 
@@ -401,6 +402,7 @@ jobs:
       bump: ${{ inputs.bump }}
       tag-prefix: "permissions/v"
       version-bump-config: ".version-bump.permissions.json"
+      paths: "packages/permissions"
     secrets:
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 ```
@@ -410,6 +412,8 @@ jobs:
 ```
 
 Entry `path` values are always relative to the repository root, wherever the config file lives.
+
+Pass `paths` so that only the package's own commits drive its release. Without it, a `feat(b)` commit bumps package A by a minor version, and package B's release bump commit alone makes A look releasable. List any shared root files that change the package's build output (for example `paths: "packages/permissions tsconfig.base.json"`).
 
 The config path must be relative to the repository root, contain no `..` segment, end in `.json`, and not be a symlink. Its canonical location must stay inside the checkout. A path that breaks this contract fails the bump step before any file is read or changed and before `main` moves. When recovering from a partial failure, re-dispatch with the same `version-bump-config` as the failed run.
 

@@ -53,12 +53,21 @@ make_history() {
 run_plan() {
   choice=$1
   prefix=$2
+  paths=${3-}
   write_run_script
   source_sha=$(git -C "$TEST_REPO" rev-parse HEAD)
   run --separate-stderr bash -c \
-    'cd "$1" && CHOICE="$2" TAG_PREFIX="$3" GITHUB_SHA="$4" GITHUB_OUTPUT="$5" GITHUB_STEP_SUMMARY="$6" bash "$7"' \
+    'cd "$1" && CHOICE="$2" TAG_PREFIX="$3" GITHUB_SHA="$4" GITHUB_OUTPUT="$5" GITHUB_STEP_SUMMARY="$6" PATHS="$8" bash "$7"' \
     _ "$TEST_REPO" "$choice" "$prefix" "$source_sha" \
-    "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" "$RUN_SCRIPT"
+    "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" "$RUN_SCRIPT" "$paths"
+}
+
+# commit_to <repo-relative file> <subject>
+commit_to() {
+  mkdir -p "$TEST_REPO/$(dirname "$1")"
+  printf '%s\n' "$2" >>"$TEST_REPO/$1"
+  git -C "$TEST_REPO" add "$1"
+  git -C "$TEST_REPO" commit -qm "$2"
 }
 
 output_value() {
@@ -192,4 +201,59 @@ assert_snapshot_outputs() {
   run_plan auto v
   [ "$status" -ne 0 ]
   ! grep -q '^next_tag=' "$GITHUB_OUTPUT"
+}
+
+@test "paths ignores other packages when computing the bump" {
+  init_repo
+  commit_to packages/a/f "fix(a): baseline"
+  git -C "$TEST_REPO" tag a/v1.0.0
+  commit_to packages/b/f "feat(b)!: break b"
+  commit_to packages/a/f "fix(a): patch a"
+  run_plan auto a/v packages/a
+  [ "$status" -eq 0 ]
+  grep -qx "next_tag=a/v1.0.1" "$GITHUB_OUTPUT"
+  grep -qF '**Paths:** `packages/a`' "$GITHUB_STEP_SUMMARY"
+  grep -qF -- '- fix(a): patch a' "$GITHUB_STEP_SUMMARY"
+  ! grep -qF 'break b' "$GITHUB_STEP_SUMMARY"
+  assert_snapshot_outputs a/v
+}
+
+@test "paths blocks a release when only other packages changed" {
+  init_repo
+  commit_to packages/a/f "fix(a): baseline"
+  git -C "$TEST_REPO" tag a/v1.0.0
+  commit_to packages/b/f "feat(b): add b"
+  run_plan auto a/v packages/a
+  [ "$status" -ne 0 ]
+  ! grep -q '^next_tag=' "$GITHUB_OUTPUT"
+  grep -qF 'packages/a' "$GITHUB_STEP_SUMMARY"
+}
+
+@test "paths limits first-release history to the package" {
+  init_repo
+  commit_to packages/b/f "feat(b)!: break b"
+  commit_to packages/a/f "fix(a): first a"
+  run_plan auto a/v packages/a
+  [ "$status" -eq 0 ]
+  grep -qx "next_tag=a/v0.0.1" "$GITHUB_OUTPUT"
+  assert_snapshot_outputs a/v
+}
+
+@test "paths accepts several whitespace-separated entries" {
+  init_repo
+  commit_to packages/a/f "fix(a): baseline"
+  git -C "$TEST_REPO" tag a/v1.0.0
+  commit_to packages/b/f "feat(b)!: break b"
+  commit_to tsconfig.json "feat: shared build config"
+  run_plan auto a/v "packages/a
+tsconfig.json"
+  [ "$status" -eq 0 ]
+  grep -qx "next_tag=a/v1.1.0" "$GITHUB_OUTPUT"
+}
+
+@test "invalid paths entry fails before outputs" {
+  make_history "fix: next"
+  run_plan auto v 'packages/a :!packages/b'
+  [ "$status" -ne 0 ]
+  [ ! -s "$GITHUB_OUTPUT" ]
 }
