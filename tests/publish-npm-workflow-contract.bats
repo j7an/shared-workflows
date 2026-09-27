@@ -225,8 +225,8 @@ run_blocks() {
 @test "publish job publishes the downloaded tarball without explicit provenance config" {
   job="$(publish_job)"
   assert_contains "$job" 'name: npm-dist'
-  assert_contains "$job" 'if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>&1; then'
-  assert_contains "$job" 'already exists on npm; skipping npm publish.'
+  assert_contains "$job" 'npm view "${PACKAGE}@${VERSION}" dist.integrity'
+  assert_contains "$job" 'already exists on npm with matching integrity; skipping npm publish.'
   assert_contains "$job" 'npm publish ./*.tgz'
   ! grep -qE -- '--provenance|NPM_CONFIG_PROVENANCE' "$YAML"
 }
