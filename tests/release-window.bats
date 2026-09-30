@@ -1,9 +1,45 @@
 #!/usr/bin/env bats
 
 HELPER_DIR="$BATS_TEST_DIRNAME/../actions/release-window"
+ACTION='actions/release-window/action.yml'
 
 py() {
   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$HELPER_DIR" python3 - "$@"
+}
+
+input_block() {
+  awk -v wanted="$1" '
+    /^inputs:$/ { in_inputs = 1; next }
+    in_inputs && /^[^[:space:]]/ { exit }
+    in_inputs && /^  [^[:space:]][^:]*:$/ {
+      if (found) exit
+      name = $0
+      sub(/^  /, "", name)
+      sub(/:$/, "", name)
+      if (name == wanted) found = 1
+    }
+    found { print }
+  ' "$ACTION"
+}
+
+step_block() {
+  awk -v wanted="$1" '
+    /^    - id: / {
+      if (found) exit
+      if ($3 == wanted) found = 1
+    }
+    found { print }
+  ' "$ACTION"
+}
+
+reject_input() {
+  local expected="$1"
+  shift
+  run env -i PATH="$PATH" GITHUB_OUTPUT="$BATS_TEST_TMPDIR/out" "$@" python3 "$HELPER_DIR/release_window.py"
+  [ "$status" -eq 1 ] || return 1
+  [ "${#lines[@]}" -eq 1 ] || return 1
+  [[ "$output" == ::error::*"$expected"* ]] || return 1
+  [ ! -s "$BATS_TEST_TMPDIR/out" ] || return 1
 }
 
 @test "window keeps newest minor plus minors replaced within the window" {
@@ -164,4 +200,60 @@ result = window(times, datetime(2026, 9, 29, tzinfo=timezone.utc).timestamp(), 9
 assert result == ["v6.4.2", "v6.3.0"], result
 PY
   [ "$status" -eq 0 ] || return 1
+}
+
+@test "main rejects invalid inputs before fetching" {
+  reject_input 'exactly one' RELEASE_WINDOW_DAYS=30 || return 1
+  reject_input 'exactly one' RELEASE_WINDOW_DAYS=30 RELEASE_WINDOW_NPM_PACKAGE=typescript RELEASE_WINDOW_GIT_URL=https://github.com/obra/superpowers || return 1
+  reject_input 'npm-package' RELEASE_WINDOW_DAYS=30 RELEASE_WINDOW_NPM_PACKAGE='Bad Name' || return 1
+  reject_input 'git-url' RELEASE_WINDOW_DAYS=30 RELEASE_WINDOW_GIT_URL=http://github.com/obra/superpowers || return 1
+  reject_input 'git-url' RELEASE_WINDOW_DAYS=30 RELEASE_WINDOW_GIT_URL=$'https://example.invalid/\n::warning::injected' || return 1
+  for days in '' 0 abc 1.5 -3 ' 30' +30; do
+    reject_input 'positive integer' RELEASE_WINDOW_NPM_PACKAGE=typescript "RELEASE_WINDOW_DAYS=$days" || return 1
+  done
+}
+
+@test "main reports an unreachable git remote as one escaped error line" {
+  run env -i PATH="$PATH" GITHUB_OUTPUT="$BATS_TEST_TMPDIR/out" RUNNER_TEMP="$BATS_TEST_TMPDIR" RELEASE_WINDOW_GIT_URL=https://127.0.0.1:9/x RELEASE_WINDOW_DAYS=30 python3 "$HELPER_DIR/release_window.py"
+  [ "$status" -eq 1 ] || return 1
+  [ "${#lines[@]}" -eq 1 ] || return 1
+  [[ "$output" == ::error::* ]] || return 1
+  [[ "$output" != *Traceback* ]] || return 1
+  [ ! -s "$BATS_TEST_TMPDIR/out" ] || return 1
+  [ -z "$(find "$BATS_TEST_TMPDIR" -mindepth 1 -type d -print)" ] || return 1
+}
+
+@test "error escapes workflow-command separators" {
+  run py <<'PY'
+from release_window import error
+error("a%b\r\n::warning::x")
+PY
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = '::error::a%25b%0D%0A::warning::x' ] || return 1
+}
+
+@test "release-window action exposes three inputs and one output" {
+  run awk '/^inputs:$/ { yes=1; next } yes && /^[^[:space:]]/ { exit } yes && /^  [^[:space:]][^:]*:$/ { sub(/^  /, ""); sub(/:$/, ""); print }' "$ACTION"
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = $'npm-package\ngit-url\nwindow-days' ] || return 1
+  for input in npm-package git-url; do
+    [[ "$(input_block "$input")" != *'required: true'* ]] || return 1
+  done
+  [[ "$(input_block window-days)" == *'required: true'* ]] || return 1
+  [[ "$(input_block window-days)" != *'default:'* ]] || return 1
+  run awk '/^outputs:$/ { yes=1; next } yes && /^[^[:space:]]/ { exit } yes && /^  [^[:space:]][^:]*:$/ { sub(/^  /, ""); sub(/:$/, ""); print }' "$ACTION"
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = versions ] || return 1
+  grep -Fq 'value: ${{ steps.window.outputs.versions }}' "$ACTION" || return 1
+}
+
+@test "release-window action is composite and passes inputs as environment data" {
+  grep -q '^  using: composite$' "$ACTION" || return 1
+  block="$(step_block window)"
+  [[ "$block" == *'shell: bash'* ]] || return 1
+  [[ "$block" == *'run: python3 "$GITHUB_ACTION_PATH/release_window.py"'* ]] || return 1
+  [[ "$block" == *'RELEASE_WINDOW_NPM_PACKAGE: ${{ inputs.npm-package }}'* ]] || return 1
+  [[ "$block" == *'RELEASE_WINDOW_GIT_URL: ${{ inputs.git-url }}'* ]] || return 1
+  [[ "$block" == *'RELEASE_WINDOW_DAYS: ${{ inputs.window-days }}'* ]] || return 1
+  ! grep -E '^[[:space:]]*run:.*inputs\.' "$ACTION" || return 1
 }

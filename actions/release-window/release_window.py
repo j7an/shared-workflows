@@ -1,8 +1,15 @@
 """Recent-minor release window, ported from pi-kit/scripts/pi-window.mjs."""
 
 from datetime import datetime
+import json
+import os
 import re
+import shutil
 import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
 
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
@@ -64,3 +71,58 @@ def git_times(repo_dir: str) -> dict[str, float]:
         tag, published = line.rsplit(" ", 1)
         times[tag] = float(published)
     return times
+
+
+def error(message: str) -> None:
+    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print("::error::" + escaped)
+
+
+def main() -> int:
+    package = os.environ.get("RELEASE_WINDOW_NPM_PACKAGE", "")
+    url = os.environ.get("RELEASE_WINDOW_GIT_URL", "")
+    days_text = os.environ.get("RELEASE_WINDOW_DAYS", "")
+    try:
+        if bool(package) == bool(url):
+            raise ValueError("set exactly one of npm-package or git-url")
+        if package and not re.fullmatch(r"(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*", package):
+            raise ValueError(f"invalid npm-package: {package}")
+        if url and (not url.startswith("https://") or re.search(r"\s", url)):
+            raise ValueError("git-url must start with https:// and contain no whitespace")
+        if not re.fullmatch(r"[1-9][0-9]*", days_text):
+            raise ValueError("window-days must be a positive integer")
+        days = int(days_text)
+
+        if package:
+            with urllib.request.urlopen(npm_url(package), timeout=30) as response:
+                times = npm_times(json.load(response))
+        else:
+            repo = tempfile.mkdtemp(dir=os.environ.get("RUNNER_TEMP"))
+            try:
+                subprocess.run(
+                    ["git", "init", "-q", "--bare", repo],
+                    check=True, capture_output=True, text=True,
+                )
+                subprocess.run(
+                    ["git", "-C", repo, "fetch", "-q", "--depth=1", "--filter=tree:0",
+                     "--", url, "+refs/tags/*:refs/tags/*"],
+                    check=True, capture_output=True, text=True,
+                )
+                times = git_times(repo)
+            finally:
+                shutil.rmtree(repo)
+
+        versions = window(times, time.time(), days)
+        with open(os.environ.get("GITHUB_OUTPUT", ""), "a", encoding="utf-8") as output:
+            output.write("versions=" + json.dumps(versions, separators=(",", ":")) + "\n")
+        print(f"release window ({days} days): {', '.join(versions)}")
+        return 0
+    except subprocess.CalledProcessError as exc:
+        error(f"git failed for {url} with exit status {exc.returncode}")
+    except (WindowError, ValueError, OSError) as exc:
+        error(str(exc))
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
