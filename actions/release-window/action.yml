@@ -1,0 +1,29 @@
+name: Release window
+description: Output the newest patch of each recent minor release from npm or Git tags.
+
+inputs:
+  npm-package:
+    description: npm package name, scoped allowed; set exactly one source.
+    required: false
+  git-url:
+    description: HTTPS repository URL; set exactly one source.
+    required: false
+  window-days:
+    description: Positive integer number of days since a newer minor replaced a release.
+    required: true
+
+outputs:
+  versions:
+    description: JSON array of release identifiers, newest minor first.
+    value: ${{ steps.window.outputs.versions }}
+
+runs:
+  using: composite
+  steps:
+    - id: window
+      shell: bash
+      env:
+        RELEASE_WINDOW_NPM_PACKAGE: ${{ inputs.npm-package }}
+        RELEASE_WINDOW_GIT_URL: ${{ inputs.git-url }}
+        RELEASE_WINDOW_DAYS: ${{ inputs.window-days }}
+      run: python3 "$GITHUB_ACTION_PATH/release_window.py"

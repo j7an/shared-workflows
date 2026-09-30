@@ -6,6 +6,10 @@
 
 YAML=".github/workflows/ci-scripts.yml"
 
+@test "release-window action changes run the test workflow" {
+  grep -Fq -- "- 'actions/release-window/**'" "$YAML" || return 1
+}
+
 step_block() {
   awk -v name="      - name: $1" '
     $0 == name { flag=1; print; next }

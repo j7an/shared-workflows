@@ -1,0 +1,53 @@
+name: Release window canary
+
+on:
+  pull_request:
+    paths:
+      - 'actions/release-window/**'
+      - 'tests/release-window.bats'
+      - '.github/workflows/release-window-canary.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: npm
+        name: Fetch npm release window
+        uses: ./actions/release-window
+        with:
+          npm-package: "@earendil-works/pi-coding-agent"
+          window-days: "3650"
+
+      - id: git
+        name: Fetch Git release window
+        uses: ./actions/release-window
+        with:
+          git-url: https://github.com/obra/superpowers
+          window-days: "3650"
+
+      - name: Check release matrices
+        env:
+          NPM_VERSIONS: ${{ steps.npm.outputs.versions }}
+          GIT_VERSIONS: ${{ steps.git.outputs.versions }}
+        run: |
+          python3 -c '
+          import json, os, re
+          for name in ("NPM_VERSIONS", "GIT_VERSIONS"):
+              versions = json.loads(os.environ[name])
+              assert isinstance(versions, list) and len(versions) >= 2, versions
+              assert all(isinstance(v, str) and re.fullmatch(r"v?\d+\.\d+\.\d+", v) for v in versions), versions
+          '

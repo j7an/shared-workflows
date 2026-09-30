@@ -95,6 +95,62 @@ adoption follows its native TypeScript migration (#113) and remains outside
 this repository change. Write a separate measured-coverage plan, including its
 report collection, subprocess coverage, and threshold, before that integration.
 
+## Release window
+
+`actions/release-window` outputs a compact JSON array containing the newest
+patch of the newest minor and each minor replaced within `window-days`,
+newest minor first. Choose exactly one npm package or HTTPS Git repository;
+stable Git tags may have a leading `v`, and their identifiers are preserved.
+Prereleases are excluded and fewer than two versions fails with guidance to
+increase the window. The action runs on Linux and requires Python 3.10+ and
+Git, both present on `ubuntu-latest`.
+
+```yaml
+jobs:
+  window:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.window.outputs.versions }}
+    steps:
+      - id: window
+        uses: j7an/shared-workflows/actions/release-window@v4
+        with:
+          npm-package: "@earendil-works/pi-coding-agent"
+          window-days: "30"
+          # Alternatively, use git-url: https://github.com/obra/superpowers
+          # with window-days: "90" and omit npm-package.
+
+  test:
+    needs: window
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: ${{ fromJSON(needs.window.outputs.versions) }}
+    steps:
+      # Add your checkout and language setup steps here.
+      - name: Test this upstream version
+        env:
+          PI_VERSION: ${{ matrix.version }}
+        run: |
+          npm ci
+          npm install --no-save "@earendil-works/pi-coding-agent@$PI_VERSION"
+          npm test
+```
+
+Replace the floating `@v4` examples with the reviewed release commit SHA in
+production callers. Callers own checkout, language setup, and per-version
+tests. npm dates come from registry publication times; Git uses the tagger
+date for annotated tags and the commit date for lightweight tags.
+
+Run caller workflows on `schedule` or `workflow_dispatch`: the window moves,
+so a new upstream release could fail an unrelated `pull_request`.
+
+PyPI is not yet supported. Add it when a Python caller's upstream produces
+at least two versions under this policy. That source must skip releases
+whose files are all yanked, date a release by its earliest file
+`upload_time_iso_8601`, and account for PEP 440 forms beyond `X.Y.Z`, including
+`1.2`, `.postN`, epochs, and calendar versions.
+
 ## Quick Start
 
 ### 1. Configure Dependabot cool-down
