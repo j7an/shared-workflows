@@ -3,7 +3,7 @@
 HELPER_DIR="$BATS_TEST_DIRNAME/../actions/release-window"
 
 py() {
-  PYTHONPATH="$HELPER_DIR" python3 - "$@"
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$HELPER_DIR" python3 - "$@"
 }
 
 @test "window keeps newest minor plus minors replaced within the window" {
@@ -93,6 +93,75 @@ for times, found in (
             assert version in str(exc), exc
     else:
         raise AssertionError("expected WindowError")
+PY
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "npm_url encodes scoped names" {
+  run py <<'PY'
+from release_window import npm_url
+assert npm_url("@earendil-works/pi-coding-agent") == "https://registry.npmjs.org/@earendil-works%2fpi-coding-agent"
+assert npm_url("typescript") == "https://registry.npmjs.org/typescript"
+PY
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "npm_times parses Z timestamps and feeds window" {
+  run py <<'PY'
+from datetime import datetime, timezone
+from release_window import npm_times, window
+
+doc = {"time": {
+    "created": "2026-01-01T00:00:00.000Z", "modified": "2026-02-20T00:00:00.000Z",
+    "1.0.0": "2026-01-01T00:00:00.000Z", "1.1.0": "2026-02-10T00:00:00.000Z",
+}}
+times = npm_times(doc)
+assert times["1.1.0"] == datetime(2026, 2, 10, tzinfo=timezone.utc).timestamp(), times
+result = window(times, datetime(2026, 2, 20, tzinfo=timezone.utc).timestamp(), 30)
+assert result == ["1.1.0", "1.0.0"], result
+PY
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "npm_times rejects a document without a time map" {
+  run py <<'PY'
+from release_window import npm_times
+
+for doc in ({}, {"time": None}, {"time": []}, {"time": {"1.0.0": "bad-date"}}):
+    try:
+        npm_times(doc)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"expected ValueError for {doc}")
+PY
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "git_times reads annotated tag dates from a local repo" {
+  repo="$BATS_TEST_TMPDIR/repo"
+  mkdir "$repo" || return 1
+  git_args=(-C "$repo" -c user.name='Release Window Test' -c user.email=release-window@example.invalid -c commit.gpgsign=false -c tag.gpgSign=false)
+  git "${git_args[@]}" init -q || return 1
+  git "${git_args[@]}" commit --allow-empty -qm fixture || return 1
+  while read -r tag date; do
+    GIT_COMMITTER_DATE="$date" git "${git_args[@]}" tag -a "$tag" -m "$tag" || return 1
+  done <<'TAGS'
+v6.3.0 2026-08-12T00:00:00Z
+6.4.0 2026-09-19T00:00:00Z
+v6.4.2 2026-09-25T00:00:00Z
+v7.0.0-rc.1 2026-09-27T00:00:00Z
+latest 2026-09-28T00:00:00Z
+TAGS
+  run py "$repo" <<'PY'
+import sys
+from datetime import datetime, timezone
+from release_window import git_times, window
+
+times = git_times(sys.argv[1])
+assert times["v6.4.2"] == datetime(2026, 9, 25, tzinfo=timezone.utc).timestamp(), times
+result = window(times, datetime(2026, 9, 29, tzinfo=timezone.utc).timestamp(), 90)
+assert result == ["v6.4.2", "v6.3.0"], result
 PY
   [ "$status" -eq 0 ] || return 1
 }
