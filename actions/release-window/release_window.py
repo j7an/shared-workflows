@@ -53,6 +53,8 @@ def npm_times(doc: dict) -> dict[str, float]:
         raise ValueError("npm metadata must contain a time object")
     times = {}
     for version, published in doc["time"].items():
+        if version not in doc.get("versions", {}):
+            continue
         if not isinstance(published, str):
             raise ValueError(f"npm timestamp for {version} must be a string")
         if published.endswith("Z"):

@@ -147,7 +147,7 @@ PY
 from datetime import datetime, timezone
 from release_window import npm_times, window
 
-doc = {"time": {
+doc = {"versions": {"1.0.0": {}, "1.1.0": {}}, "time": {
     "created": "2026-01-01T00:00:00.000Z", "modified": "2026-02-20T00:00:00.000Z",
     "1.0.0": "2026-01-01T00:00:00.000Z", "1.1.0": "2026-02-10T00:00:00.000Z",
 }}
@@ -159,11 +159,35 @@ PY
   [ "$status" -eq 0 ] || return 1
 }
 
+@test "npm_times excludes unpublished patches and minors from the window" {
+  run py <<'PY'
+from datetime import datetime, timezone
+from release_window import npm_times, window
+
+doc = {
+    "versions": {"1.0.0": {}, "1.1.1": {}},
+    "time": {
+        "created": "2026-01-01T00:00:00.000Z",
+        "modified": "2026-02-20T00:00:00.000Z",
+        "1.0.0": "2026-01-01T00:00:00.000Z",
+        "1.1.1": "2026-02-10T00:00:00.000Z",
+        "1.1.2": "2026-02-15T00:00:00.000Z",
+        "1.2.0": "2026-02-16T00:00:00.000Z",
+    },
+}
+times = npm_times(doc)
+assert set(times) == {"1.0.0", "1.1.1"}, times
+result = window(times, datetime(2026, 2, 20, tzinfo=timezone.utc).timestamp(), 30)
+assert result == ["1.1.1", "1.0.0"], result
+PY
+  [ "$status" -eq 0 ] || return 1
+}
+
 @test "npm_times rejects a document without a time map" {
   run py <<'PY'
 from release_window import npm_times
 
-for doc in ({}, {"time": None}, {"time": []}, {"time": {"1.0.0": "bad-date"}}):
+for doc in ({}, {"time": None}, {"time": []}, {"versions": {"1.0.0": {}}, "time": {"1.0.0": "bad-date"}}):
     try:
         npm_times(doc)
     except ValueError:
@@ -197,6 +221,9 @@ from datetime import datetime, timezone
 from release_window import git_times, window
 
 times = git_times(sys.argv[1])
+assert "6.4.0" in times, times
+assert "latest" not in times, times
+assert "v7.0.0-rc.1" not in times, times
 assert "latest-blob" not in times, times
 assert times["v6.4.2"] == datetime(2026, 9, 25, tzinfo=timezone.utc).timestamp(), times
 result = window(times, datetime(2026, 9, 29, tzinfo=timezone.utc).timestamp(), 90)
