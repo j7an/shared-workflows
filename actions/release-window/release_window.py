@@ -1,6 +1,7 @@
 """Recent-minor release window, ported from pi-kit/scripts/pi-window.mjs."""
 
 from datetime import datetime
+from http.client import HTTPException
 import json
 import os
 import re
@@ -69,6 +70,8 @@ def git_times(repo_dir: str) -> dict[str, float]:
     times = {}
     for line in result.stdout.splitlines():
         tag, published = line.rsplit(" ", 1)
+        if not SEMVER.fullmatch(tag):
+            continue
         times[tag] = float(published)
     return times
 
@@ -119,7 +122,7 @@ def main() -> int:
         return 0
     except subprocess.CalledProcessError as exc:
         error(f"git failed for {url} with exit status {exc.returncode}")
-    except (WindowError, ValueError, OSError) as exc:
+    except (WindowError, ValueError, OSError, HTTPException) as exc:
         error(str(exc))
     return 1
 

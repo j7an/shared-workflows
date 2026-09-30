@@ -189,12 +189,15 @@ v6.4.2 2026-09-25T00:00:00Z
 v7.0.0-rc.1 2026-09-27T00:00:00Z
 latest 2026-09-28T00:00:00Z
 TAGS
+  blob=$(printf 'not a release' | git "${git_args[@]}" hash-object -w --stdin) || return 1
+  git "${git_args[@]}" tag latest-blob "$blob" || return 1
   run py "$repo" <<'PY'
 import sys
 from datetime import datetime, timezone
 from release_window import git_times, window
 
 times = git_times(sys.argv[1])
+assert "latest-blob" not in times, times
 assert times["v6.4.2"] == datetime(2026, 9, 25, tzinfo=timezone.utc).timestamp(), times
 result = window(times, datetime(2026, 9, 29, tzinfo=timezone.utc).timestamp(), 90)
 assert result == ["v6.4.2", "v6.3.0"], result
@@ -230,6 +233,34 @@ error("a%b\r\n::warning::x")
 PY
   [ "$status" -eq 0 ] || return 1
   [ "$output" = '::error::a%25b%0D%0A::warning::x' ] || return 1
+}
+
+@test "main reports a truncated npm response as one error line" {
+  run py "$BATS_TEST_TMPDIR/out" <<'PY'
+from contextlib import redirect_stdout
+from http.client import HTTPResponse
+import io
+import os
+import sys
+from unittest.mock import patch
+from release_window import main
+
+class Socket:
+    def makefile(self, mode):
+        return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{}")
+
+response = HTTPResponse(Socket())
+response.begin()
+output = io.StringIO()
+env = {"RELEASE_WINDOW_NPM_PACKAGE": "typescript", "RELEASE_WINDOW_DAYS": "30", "GITHUB_OUTPUT": sys.argv[1]}
+with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen", return_value=response), redirect_stdout(output):
+    result = main()
+assert result == 1, result
+lines = output.getvalue().splitlines()
+assert len(lines) == 1 and lines[0].startswith("::error::IncompleteRead"), lines
+assert not os.path.exists(sys.argv[1]), sys.argv[1]
+PY
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "release-window action exposes three inputs and one output" {
