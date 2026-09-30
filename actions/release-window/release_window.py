@@ -111,7 +111,7 @@ def main() -> int:
                 subprocess.run(
                     ["git", "-C", repo, "fetch", "-q", "--depth=1", "--filter=tree:0",
                      "--", url, "+refs/tags/*:refs/tags/*"],
-                    check=True, capture_output=True, text=True,
+                    check=True, capture_output=True, text=True, timeout=30,
                 )
                 times = git_times(repo)
             finally:
@@ -122,6 +122,8 @@ def main() -> int:
             output.write("versions=" + json.dumps(versions, separators=(",", ":")) + "\n")
         print(f"release window ({days} days): {', '.join(versions)}")
         return 0
+    except subprocess.TimeoutExpired as exc:
+        error(f"git fetch timed out for {url} after {exc.timeout} seconds")
     except subprocess.CalledProcessError as exc:
         error(f"git failed for {url} with exit status {exc.returncode}")
     except (WindowError, ValueError, OSError, HTTPException) as exc:

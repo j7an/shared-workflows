@@ -262,6 +262,37 @@ PY
   [ "$output" = '::error::a%25b%0D%0A::warning::x' ] || return 1
 }
 
+@test "main bounds git fetch at 30 seconds and reports timeout after cleanup" {
+  run py "$BATS_TEST_TMPDIR" <<'PY'
+from contextlib import redirect_stdout
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+from unittest.mock import patch
+from release_window import main
+
+scratch = Path(sys.argv[1])
+real_run = subprocess.run
+
+def run_git(command, **options):
+    if "fetch" in command:
+        assert options.get("timeout") == 30, options
+        raise subprocess.TimeoutExpired(command, options["timeout"], stderr="\n::warning::untrusted stderr")
+    return real_run(command, **options)
+
+env = {"RELEASE_WINDOW_GIT_URL": "https://example.invalid/repo", "RELEASE_WINDOW_DAYS": "30", "GITHUB_OUTPUT": str(scratch / "out"), "RUNNER_TEMP": str(scratch), "PATH": os.environ["PATH"]}
+output = io.StringIO()
+with patch.dict(os.environ, env, clear=True), patch("subprocess.run", side_effect=run_git), redirect_stdout(output):
+    result = main()
+assert result == 1, result
+assert output.getvalue() == "::error::git fetch timed out for https://example.invalid/repo after 30 seconds\n", output.getvalue()
+assert list(scratch.iterdir()) == [], list(scratch.iterdir())
+PY
+  [ "$status" -eq 0 ] || return 1
+}
+
 @test "main reports a truncated npm response as one error line" {
   run py "$BATS_TEST_TMPDIR/out" <<'PY'
 from contextlib import redirect_stdout
