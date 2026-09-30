@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'actions/coverage/**'
+      - 'actions/release-window/**'
       - 'scripts/**'
       - 'tests/**'
       - '.github/dependabot.yml'
