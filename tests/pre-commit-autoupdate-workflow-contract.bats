@@ -179,7 +179,18 @@ title'
   assert_eq "$(input_type restrict_paths)" "boolean"
   assert_eq "$(input_default restrict_paths)" "true"
   assert_eq "$(input_type pre_commit_version)" "string"
-  assert_eq "$(input_default pre_commit_version)" '""'
+  version=$(input_default pre_commit_version)
+  version=${version#\"}
+  version=${version%\"}
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+@test "Install uv pins an exact uv version" {
+  block=$(step_block "Install uv")
+  version=$(printf "%s\n" "$block" | awk '/^          version:/ { sub(/^          version: */, ""); print; exit }')
+  version=${version#\"}
+  version=${version%\"}
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 @test "Release Bot private key secret is optional" {

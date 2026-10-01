@@ -33,8 +33,8 @@ on:
         description: "Restrict the PR commit to config_path."
       pre_commit_version:
         type: string
-        default: ""
-        description: "Optional pre-commit runner version. Empty uses latest."
+        default: "4.6.2"
+        description: "Pre-commit runner version. Defaults to a pinned version bumped automatically after a 5-day minimum age; set \"\" for latest."
     secrets:
       RELEASE_BOT_PRIVATE_KEY:
         required: false
@@ -181,6 +181,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.19"
 
       - name: Run pre-commit autoupdate
         env:
