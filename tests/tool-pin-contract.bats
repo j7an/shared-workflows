@@ -145,9 +145,9 @@ SH
   prepare_bump_step
   run bash -e -o pipefail bump.sh
   [ "$status" -eq 0 ]
-  rg -q '^new=2.0.0$' "$GITHUB_OUTPUT"
-  rg -q 'version: "2.0.0"' security-scan.yml
-  rg -q 'version: "2.0.0"' security.yml
+  grep -q '^new=2.0.0$' "$GITHUB_OUTPUT"
+  grep -q 'version: "2.0.0"' security-scan.yml
+  grep -q 'version: "2.0.0"' security.yml
 }
 
 @test "updating zizmor action refs admits newly supported releases" {
@@ -157,7 +157,7 @@ SH
   cp security.yml security-scan.yml
   run bash -e -o pipefail bump.sh
   [ "$status" -eq 0 ]
-  rg -q '^new=3.0.0$' "$GITHUB_OUTPUT"
+  grep -q '^new=3.0.0$' "$GITHUB_OUTPUT"
 }
 
 @test "different zizmor action refs intersect supported releases" {
@@ -166,9 +166,9 @@ SH
   cp updated.yml security.yml
   run bash -e -o pipefail bump.sh
   [ "$status" -eq 0 ]
-  rg -q '^new=2.0.0$' "$GITHUB_OUTPUT"
-  rg -q "support/versions[?]ref=$OLD_REF" "$API_FIXTURES/calls"
-  rg -q "support/versions[?]ref=$NEW_REF" "$API_FIXTURES/calls"
+  grep -q '^new=2.0.0$' "$GITHUB_OUTPUT"
+  grep -q "support/versions[?]ref=$OLD_REF" "$API_FIXTURES/calls"
+  grep -q "support/versions[?]ref=$NEW_REF" "$API_FIXTURES/calls"
 }
 
 @test "zizmor support fetch failure precedes edits and outputs" {
@@ -192,7 +192,7 @@ SH
   [ "$status" -ne 0 ]
   cmp security.yml before.yml
   [ ! -s "$GITHUB_OUTPUT" ]
-  ! rg -q 'support/versions' "$API_FIXTURES/calls"
+  ! grep -q 'support/versions' "$API_FIXTURES/calls"
 }
 
 @test "non-zizmor release selection is unaffected by action support" {
@@ -200,8 +200,8 @@ SH
   export REPO=astral-sh/uv
   run bash -e -o pipefail bump.sh
   [ "$status" -eq 0 ]
-  rg -q '^new=3.0.0$' "$GITHUB_OUTPUT"
-  ! rg -q 'support/versions' "$API_FIXTURES/calls"
+  grep -q '^new=3.0.0$' "$GITHUB_OUTPUT"
+  ! grep -q 'support/versions' "$API_FIXTURES/calls"
 }
 
 @test "README documents intentional tool floats and their controls" {
