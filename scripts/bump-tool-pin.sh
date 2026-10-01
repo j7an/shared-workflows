@@ -23,7 +23,7 @@ for file in "$@"; do
   [ -f "$file" ] || exit 2
 done
 
-pattern="^[[:space:]]+${key}: \"[0-9]+\\.[0-9]+\\.[0-9]+\"[[:space:]]*$"
+pattern="^[[:space:]]+${key}: \"[0-9]+[.][0-9]+[.][0-9]+\"[[:space:]]*$"
 cur=$(grep -hE -- "$pattern" "$@" | sed 's/^[^"]*"//; s/".*$//' | sort -u) || exit 2
 [ -n "$cur" ] || exit 2
 [[ "$cur" != *$'\n'* ]] || exit 2

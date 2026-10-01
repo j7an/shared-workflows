@@ -154,3 +154,11 @@ JSON
   [ -z "$output" ]
   cmp "$pin" "$fixture/pinned.yml"
 }
+
+@test "preserves non-semver lines under the matching key" {
+  printf '      version: "1x26y1"\n' >> "$pin"
+  sed 's/^      version: "1[.]26[.]1"$/      version: "1.30.1"/' "$pin" > "$BATS_TEST_TMPDIR/expected.yml"
+  run bash scripts/bump-tool-pin.sh version 5 "$pin" < "$fixture/releases.json"
+  [ "$status" -eq 0 ]
+  cmp "$pin" "$BATS_TEST_TMPDIR/expected.yml"
+}
