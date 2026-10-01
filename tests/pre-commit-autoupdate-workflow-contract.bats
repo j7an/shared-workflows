@@ -322,3 +322,15 @@ title'
   assert_contains "$root_docs" "App-token"
   assert_contains "$root_docs" "GITHUB_TOKEN"
 }
+
+
+@test "pre-commit default documentation points to the maintained workflow pin" {
+  local row default_cell
+  row=$(workflow_readme_section | awk '/^\| `pre_commit_version` \|/ { print }')
+  default_cell=$(printf '%s\n' "$row" | awk -F '|' '{ print $5 }')
+  [[ ! "$default_cell" =~ [0-9]+\.[0-9]+\.[0-9]+ ]]
+  assert_contains "$default_cell" "pinned"
+  assert_contains "$default_cell" "pre-commit-autoupdate.yml"
+  assert_contains "$row" "5-day"
+  assert_contains "$row" 'set `""` for latest'
+}
