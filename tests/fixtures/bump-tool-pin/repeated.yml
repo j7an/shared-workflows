@@ -1,0 +1,9 @@
+jobs:
+  first:
+    steps:
+      - with:
+          bats-version: "1.14.0"
+  second:
+    steps:
+      - with:
+          bats-version: "1.14.0"
