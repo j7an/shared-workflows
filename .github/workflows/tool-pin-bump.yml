@@ -1,0 +1,107 @@
+name: Tool Pin Bump
+
+on:
+  schedule:
+    - cron: "0 17 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  MIN_AGE_DAYS: 5
+
+jobs:
+  bump:
+    name: Bump ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: zizmor
+            key: version
+            files:
+              - .github/workflows/security-scan.yml
+              - .github/workflows/security.yml
+            repo: zizmorcore/zizmor
+          - name: bats
+            key: bats-version
+            files:
+              - .github/workflows/ci-scripts.yml
+            repo: bats-core/bats-core
+          - name: pre-commit
+            key: default
+            files:
+              - .github/workflows/pre-commit-autoupdate.yml
+            repo: pre-commit/pre-commit
+          - name: uv
+            key: version
+            files:
+              - .github/workflows/pre-commit-autoupdate.yml
+            repo: astral-sh/uv
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Bump tool pin
+        id: bump
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ matrix.repo }}
+          KEY: ${{ matrix.key }}
+          FILES: ${{ join(matrix.files, ' ') }}
+        run: |
+          # shellcheck disable=SC2086
+          result=$(gh api "repos/$REPO/releases?per_page=100" | scripts/bump-tool-pin.sh "$KEY" "$MIN_AGE_DAYS" $FILES)
+          if [ -n "$result" ]; then
+            IFS=$'\t' read -r old new tag published <<<"$result"
+            {
+              printf 'old=%s\n' "$old"
+              printf 'new=%s\n' "$new"
+              printf 'tag=%s\n' "$tag"
+              printf 'published=%s\n' "$published"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint GitHub App token
+        id: app-token
+        if: steps.bump.outputs.new != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Open tool pin PR
+        if: steps.bump.outputs.new != ''
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: deps/tool-pin-${{ matrix.name }}
+          title: "deps: bump ${{ matrix.name }} from ${{ steps.bump.outputs.old }} to ${{ steps.bump.outputs.new }}"
+          commit-message: "deps: bump ${{ matrix.name }} from ${{ steps.bump.outputs.old }} to ${{ steps.bump.outputs.new }}"
+          labels: dependencies
+          add-paths: ${{ join(matrix.files, ',') }}
+          sign-commits: true
+          delete-branch: true
+          body: |
+            Bumps `${{ matrix.name }}` from `${{ steps.bump.outputs.old }}` to `${{ steps.bump.outputs.new }}`.
+
+            - Release: https://github.com/${{ matrix.repo }}/releases/tag/${{ steps.bump.outputs.tag }}
+            - Published: ${{ steps.bump.outputs.published }}
+            - Held for the ${{ env.MIN_AGE_DAYS }}-day minimum release age (`cooldown.default-days` in `.github/dependabot.yml`).
+
+            ${{ matrix.name == 'zizmor' && '> [!WARNING]
+            > New zizmor audits can fail consumer CI once this ships in a `security-scan.yml` release. Check this PR''s Security run for new findings before merging.' || '' }}

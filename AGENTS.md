@@ -70,7 +70,7 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 - For TestPyPI plus PyPI verification with uv, use an ephemeral project with a TestPyPI source pin for the package under test. Do not use `uv pip install --index-url TestPyPI --extra-index-url PyPI` for this check.
 - Require downstream canary evidence before declaring release workflow changes fixed.
 
-**CI:** `ci-scripts.yml` (bats + inline-sync + workflow-call lint), `ci-safety.yml` (dogfoods `dependency-safety.yml` on this repo's own Dependabot PRs), `security.yml` (zizmor workflow analysis).
+**CI:** `ci-scripts.yml` (bats + inline-sync + workflow-call lint), `ci-safety.yml` (dogfoods `dependency-safety.yml` on this repo's own Dependabot PRs), `security.yml` (zizmor workflow analysis), `tool-pin-bump.yml` (weekly tool-version bump PRs with a 5-day minimum release age).
 
 ## Conventions
 
