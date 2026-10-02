@@ -139,7 +139,7 @@ jobs:
 |---|---|---|---|---|
 | `run_codeql` | boolean | no | `true` | Run CodeQL analysis. Set to `false` for repos using CodeQL default setup or another CodeQL workflow. |
 | `run_trufflehog` | boolean | no | `true` | Run TruffleHog verified-secret scanning. |
-| `run_zizmor` | boolean | no | `true` | Run Zizmor workflow analysis as a blocking console gate. |
+| `run_zizmor` | boolean | no | `true` | Run Zizmor workflow analysis as a blocking gate; also uploads SARIF to the Security tab (category `zizmor`). |
 | `run_trivy` | boolean | no | `true` | Run Trivy filesystem vulnerability scanning. |
 | `run_osv_full` | boolean | no | `true` | Run OSV full scans on `push` and `schedule`. |
 | `run_osv_pr` | boolean | no | `true` | Run OSV PR diff scans on `pull_request`. Never runs on `merge_group`. |
@@ -280,7 +280,7 @@ expected check that will never report.
 
 Use `pull_request`, not `pull_request_target`, for this scanner workflow. Fork
 PRs should not run untrusted code under a privileged token. GitHub may restrict
-`security-events: write` on fork PRs, so SARIF upload from CodeQL, Trivy, and
+`security-events: write` on fork PRs, so SARIF upload from CodeQL, Zizmor, Trivy, and
 OSV can be limited on those runs.
 
 ## `dependency-safety-non-bot-gate.yml`

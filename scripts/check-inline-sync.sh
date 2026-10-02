@@ -26,6 +26,7 @@ INLINE_PAIRS=(
   ".github/workflows/pnpm-packagemanager-update.yml:scripts/packagemanager-integrity.sh"
   ".github/workflows/publish-npm.yml:scripts/npm-package-preflight.sh"
   ".github/workflows/publish-npm.yml:scripts/assert-packed-manifest.sh"
+  ".github/workflows/security-scan.yml:scripts/zizmor-sarif-gate.sh"
 )
 
 YAML_INDENT="          "  # exactly 10 spaces — matches the `run: |` indent
