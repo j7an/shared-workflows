@@ -33,3 +33,4 @@ jobs:
           # repository-scoped GITHUB_TOKEN returns 401 for public actions
           # (e.g. astral-sh/setup-uv). Keep this required gate deterministic.
           online-audits: false
+          version: "1.30.1"

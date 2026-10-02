@@ -4,6 +4,13 @@ This directory hosts reusable workflows under `j7an/shared-workflows`. Consumers
 
 > **Note:** `@v3` and `@v2` continue to work at their last-released revisions, but receive no further updates. See the root README's "v3 → v4 migration" section.
 
+### Intentional floats
+
+- Node stays within its configured major version.
+- Trivy uses the action-managed default version, which moves with SHA-pinned action updates.
+- diff-cover uses a supported version range; coverage tests verify its lower bound.
+- pnpm is an updater target: selected releases undergo integrity verification before changing the package-manager pin.
+
 ## `pre-commit-autoupdate.yml`
 
 Runs `pre-commit autoupdate` for consumer repos, detects changes to the
@@ -96,7 +103,7 @@ checks.
 | `labels` | string | no | `dependencies` | Labels passed to `create-pull-request`. |
 | `sign_commits` | boolean | no | `true` | Whether `create-pull-request` signs commits. |
 | `restrict_paths` | boolean | no | `true` | When true, passes `add-paths: config_path` so only the pre-commit config is committed. |
-| `pre_commit_version` | string | no | `""` | Optional pre-commit runner version. Empty uses latest; set it as a regression circuit-breaker. |
+| `pre_commit_version` | string | no | [Maintained pinned version](pre-commit-autoupdate.yml) | Pre-commit runner version. Defaults to a pinned version that `tool-pin-bump.yml` bumps automatically after a 5-day minimum release age; set `""` for latest. |
 
 `delete-branch: true` is standardized by the reusable workflow, so recurring
 automation branches are cleaned up after merge.

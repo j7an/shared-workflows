@@ -179,7 +179,18 @@ title'
   assert_eq "$(input_type restrict_paths)" "boolean"
   assert_eq "$(input_default restrict_paths)" "true"
   assert_eq "$(input_type pre_commit_version)" "string"
-  assert_eq "$(input_default pre_commit_version)" '""'
+  version=$(input_default pre_commit_version)
+  version=${version#\"}
+  version=${version%\"}
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+@test "Install uv pins an exact uv version" {
+  block=$(step_block "Install uv")
+  version=$(printf "%s\n" "$block" | awk '/^          version:/ { sub(/^          version: */, ""); print; exit }')
+  version=${version#\"}
+  version=${version%\"}
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 @test "Release Bot private key secret is optional" {
@@ -310,4 +321,16 @@ title'
   assert_contains "$root_docs" "uvx"
   assert_contains "$root_docs" "App-token"
   assert_contains "$root_docs" "GITHUB_TOKEN"
+}
+
+
+@test "pre-commit default documentation points to the maintained workflow pin" {
+  local row default_cell
+  row=$(workflow_readme_section | awk '/^\| `pre_commit_version` \|/ { print }')
+  default_cell=$(printf '%s\n' "$row" | awk -F '|' '{ print $5 }')
+  [[ ! "$default_cell" =~ [0-9]+\.[0-9]+\.[0-9]+ ]]
+  assert_contains "$default_cell" "pinned"
+  assert_contains "$default_cell" "pre-commit-autoupdate.yml"
+  assert_contains "$row" "5-day"
+  assert_contains "$row" 'set `""` for latest'
 }

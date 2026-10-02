@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 
-@test "GitHub Actions minor and patch version updates are grouped together" {
+@test "GitHub Actions updater covers root and composite actions, with minor and patch grouped" {
   config="$BATS_TEST_DIRNAME/../.github/dependabot.yml"
 
   run ruby - "$config" <<'RUBY'
@@ -9,10 +9,11 @@ require "yaml"
 config = YAML.safe_load(File.read(ARGV.fetch(0)))
 updates = config.fetch("updates")
 actions = updates.select do |update|
-  update["package-ecosystem"] == "github-actions" && update["directory"] == "/"
+  update["package-ecosystem"] == "github-actions" && update["directories"] == ["/", "/actions/*"]
 end
 
 abort "expected exactly one root GitHub Actions updater" unless actions.length == 1
+abort "directory and directories are mutually exclusive" if actions.first.key?("directory")
 
 groups = actions.first.fetch("groups", {})
 abort "expected all-actions to be the only GitHub Actions group" unless groups.keys == ["all-actions"]

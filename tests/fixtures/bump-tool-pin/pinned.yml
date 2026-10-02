@@ -1,0 +1,8 @@
+steps:
+  - uses: example/tool@v1
+    with:
+      version: "1.26.1"
+      other-version: ${{ inputs.v }}
+  - uses: example/tool@v1
+    with:
+      version: ${{ inputs.zizmor }}

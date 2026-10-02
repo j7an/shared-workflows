@@ -278,14 +278,17 @@ codeql_queries'
   assert_lacks "$block" "--only-verified"
 }
 
-@test "Zizmor is blocking with medium thresholds, online-audits input, and pinned CLI" {
+@test "Zizmor is blocking with medium thresholds, online-audits input, and an exact CLI version" {
   block=$(job_block zizmor)
   assert_action_pin "$block" "zizmorcore/zizmor-action"
   assert_contains "$block" 'online-audits: ${{ inputs.zizmor_online_audits }}'
   assert_contains "$block" "advanced-security: false"
   assert_contains "$block" "min-severity: medium"
   assert_contains "$block" "min-confidence: medium"
-  assert_contains "$block" 'version: "1.26.1"'
+  version=$(printf "%s\n" "$block" | awk '/^          version:/ { sub(/^          version: */, ""); print; exit }')
+  version=${version#\"}
+  version=${version%\"}
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 @test "Trivy is one fs SARIF run with fail-on-findings and explicit SARIF category" {
