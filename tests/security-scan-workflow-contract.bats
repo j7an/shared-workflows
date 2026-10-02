@@ -60,6 +60,14 @@ job_block() {
   ' "$YAML"
 }
 
+zizmor_gate_run_body() {
+  job_block zizmor | awk '
+    /^      - name: Fail on Zizmor findings$/ { gate=1; next }
+    gate && /^        run: \|$/ { body=1; next }
+    body { print }
+  '
+}
+
 input_block() {
   awk -v key="      $1:" '
     $0 == key { flag=1; print; next }
@@ -235,7 +243,7 @@ codeql_queries'
   assert_eq "$(job_permissions_block validate-event)" "    permissions: {}"
   assert_eq "$(job_permissions_block codeql)" $'    permissions:\n      actions: read\n      contents: read\n      security-events: write'
   assert_eq "$(job_permissions_block trufflehog)" $'    permissions:\n      contents: read'
-  assert_eq "$(job_permissions_block zizmor)" $'    permissions:\n      contents: read'
+  assert_eq "$(job_permissions_block zizmor)" $'    permissions:\n      actions: read\n      contents: read\n      security-events: write'
   assert_eq "$(job_permissions_block trivy)" $'    permissions:\n      actions: read\n      contents: read\n      security-events: write'
   assert_eq "$(job_permissions_block osv-full)" $'    permissions:\n      actions: read\n      contents: read\n      security-events: write'
   assert_eq "$(job_permissions_block osv-pr)" $'    permissions:\n      actions: read\n      contents: read\n      security-events: write'
@@ -278,11 +286,24 @@ codeql_queries'
   assert_lacks "$block" "--only-verified"
 }
 
-@test "Zizmor is blocking with medium thresholds, online-audits input, and an exact CLI version" {
+@test "Zizmor uploads SARIF and stays blocking with medium thresholds, online-audits input, and an exact CLI version" {
   block=$(job_block zizmor)
   assert_action_pin "$block" "zizmorcore/zizmor-action"
   assert_contains "$block" 'online-audits: ${{ inputs.zizmor_online_audits }}'
-  assert_contains "$block" "advanced-security: false"
+  assert_contains "$block" "advanced-security: true"
+  assert_lacks "$block" "advanced-security: false"
+  assert_contains "$block" "id: zizmor"
+  assert_contains "$block" "name: Fail on Zizmor findings"
+  action_line=$(printf '%s\n' "$block" | awk '/uses: zizmorcore\/zizmor-action@/ { print NR; exit }')
+  gate_line=$(printf '%s\n' "$block" | awk '/name: Fail on Zizmor findings/ { print NR; exit }')
+  [ "$gate_line" -gt "$action_line" ]
+  assert_contains "$block" 'SARIF_FILE: ${{ steps.zizmor.outputs.output-file }}'
+  gate_run=$(zizmor_gate_run_body)
+  [ -n "$gate_run" ]
+  assert_contains "$gate_run" '# --- BEGIN inline:scripts/zizmor-sarif-gate.sh ---'
+  assert_contains "$gate_run" '# --- END inline:scripts/zizmor-sarif-gate.sh ---'
+  assert_contains "$gate_run" 'zizmor_sarif_gate "$SARIF_FILE"'
+  assert_lacks "$gate_run" '${{'
   assert_contains "$block" "min-severity: medium"
   assert_contains "$block" "min-confidence: medium"
   version=$(printf "%s\n" "$block" | awk '/^          version:/ { sub(/^          version: */, ""); print; exit }')
@@ -332,7 +353,7 @@ codeql_queries'
   assert_contains "$block" "### Inputs"
   assert_contains "$block" '| `run_codeql` | boolean | no | `true` | Run CodeQL analysis. Set to `false` for repos using CodeQL default setup or another CodeQL workflow. |'
   assert_contains "$block" '| `run_trufflehog` | boolean | no | `true` | Run TruffleHog verified-secret scanning. |'
-  assert_contains "$block" '| `run_zizmor` | boolean | no | `true` | Run Zizmor workflow analysis as a blocking console gate. |'
+  assert_contains "$block" '| `run_zizmor` | boolean | no | `true` | Run Zizmor workflow analysis as a blocking gate; also uploads SARIF to the Security tab (category `zizmor`). |'
   assert_contains "$block" '| `run_trivy` | boolean | no | `true` | Run Trivy filesystem vulnerability scanning. |'
   assert_contains "$block" '| `run_osv_full` | boolean | no | `true` | Run OSV full scans on `push` and `schedule`. |'
   assert_contains "$block" '| `run_osv_pr` | boolean | no | `true` | Run OSV PR diff scans on `pull_request`. Never runs on `merge_group`. |'
