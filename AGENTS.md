@@ -23,6 +23,8 @@ actionlint -shellcheck= -pyflakes= .github/workflows/*.yml # actionlint structur
 The coverage tests require `DIFF_COVER_PATH` to name an executable from the
 supported `diff-cover >=10.2.0,<11.0` range. Use the temporary venv setup above,
 or export the path to an existing supported installation before running Bats.
+Workflow contract tests parse YAML with mikefarah `yq` v4 (preinstalled on
+GitHub-hosted Ubuntu runners; not the Python `yq` wrapper).
 
 The bats, inline-sync, and workflow-call checks run in `ci-scripts.yml` on every PR touching `scripts/`, `tests/`, or `.github/workflows/`. Direct actionlint is **local-only** and is not installed by `ci-scripts.yml`. Disable actionlint's ShellCheck and Pyflakes integrations for structural checks: the large inline dependency-safety Bash block has caused the integrated analysis to hang. Run ShellCheck separately against `scripts/*.sh` when useful; it remains an optional signal with known info-level findings. Tests are [bats](https://github.com/bats-core/bats-core); fixtures live under `tests/fixtures/<script-name>/`.
 

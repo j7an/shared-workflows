@@ -1,28 +1,19 @@
 #!/usr/bin/env bats
 
 @test "GitHub Actions updater covers root and composite actions, with minor and patch grouped" {
-  config="$BATS_TEST_DIRNAME/../.github/dependabot.yml"
+  local config="$BATS_TEST_DIRNAME/../.github/dependabot.yml" actions group
+  # Values are compared as compact JSON: yq's own == is neither deep nor type-strict.
+  actions='[.updates[] | select(.["package-ecosystem"] == "github-actions" and (.directories | to_json(0)) == "[\"/\",\"/actions/*\"]")]'
 
-  run ruby - "$config" <<'RUBY'
-require "yaml"
+  # expected exactly one root GitHub Actions updater
+  [ "$(yq "$actions | length" "$config")" = 1 ]
+  # directory and directories are mutually exclusive
+  [ "$(yq "$actions | .[0] | has(\"directory\")" "$config")" = false ]
+  # expected all-actions to be the only GitHub Actions group
+  [ "$(yq -o=json -I=0 "$actions | .[0].groups // {} | keys" "$config")" = '["all-actions"]' ]
 
-config = YAML.safe_load(File.read(ARGV.fetch(0)))
-updates = config.fetch("updates")
-actions = updates.select do |update|
-  update["package-ecosystem"] == "github-actions" && update["directories"] == ["/", "/actions/*"]
-end
-
-abort "expected exactly one root GitHub Actions updater" unless actions.length == 1
-abort "directory and directories are mutually exclusive" if actions.first.key?("directory")
-
-groups = actions.first.fetch("groups", {})
-abort "expected all-actions to be the only GitHub Actions group" unless groups.keys == ["all-actions"]
-
-group = groups.fetch("all-actions")
-abort "all-actions must apply only to version updates" unless group["applies-to"] == "version-updates"
-abort "all-actions must match every action" unless group["patterns"] == ["*"]
-abort "all-actions must group only minor and patch updates" unless group.fetch("update-types", []).sort == %w[minor patch]
-RUBY
-
-  [ "$status" -eq 0 ]
+  group="$actions | .[0].groups[\"all-actions\"]"
+  [ "$(yq -o=json -I=0 "$group | .[\"applies-to\"]" "$config")" = '"version-updates"' ]
+  [ "$(yq -o=json -I=0 "$group | .patterns" "$config")" = '["*"]' ]
+  [ "$(yq -o=json -I=0 "$group | .[\"update-types\"] // [] | sort" "$config")" = '["minor","patch"]' ]
 }
