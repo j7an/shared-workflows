@@ -6,92 +6,66 @@ setup() {
   cd "$BATS_TEST_DIRNAME/.."
 }
 
+WORKFLOW=.github/workflows/tool-pin-bump.yml
+# One "key file" line per file each updater matrix entry pins.
+MATRIX_PINS='.jobs.bump.strategy.matrix.include[] | .key as $k | .files[] | $k + " " + .'
+
 @test "version inputs are exact and tracked" {
-  run ruby -r ./tests/helpers/tool-pins.rb - <<'RUBY'
-ALLOWLIST = { 'node-version' => 'floats within a major on purpose' }
-entries = matrix_entries
-each_with_block do |file, uses, inputs|
-  inputs.each do |key, value|
-    next unless key == 'version' || key.end_with?('-version')
-    next if ALLOWLIST.key?(key)
-    abort "#{file}: #{key} must be an exact version string" unless value.is_a?(String) && value.match?(/\A\d+\.\d+\.\d+\z/)
-    abort "#{file}: #{key} is not tracked by the updater" unless entries.any? { |entry| entry['key'] == key && entry['files'].include?(file) }
-  end
-end
-RUBY
-  [ "$status" -eq 0 ]
+  local tracked inputs path key type value
+  tracked=$(yq "$MATRIX_PINS" "$WORKFLOW")
+  # node-version floats within a major on purpose.
+  inputs=$(yq ea -N '((.jobs[]? | select(.uses) | .with // {}), (.jobs[]?.steps[]? | .with // {}), (.runs.steps[]? | .with // {})) | to_entries[] | select((.key == "version" or (.key | test("-version$"))) and .key != "node-version") | [filename, .key, (.value | tag), .value] | @tsv' .github/workflows/*.yml actions/*/action.yml)
+  while IFS=$'\t' read -r path key type value; do
+    [[ $type == '!!str' && $value =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "$path: $key must be an exact version string"; return 1; }
+    grep -qxF "$key $path" <<< "$tracked" || { echo "$path: $key is not tracked by the updater"; return 1; }
+  done <<< "$inputs"
 }
 
 @test "tool-installing actions set their version" {
-  run ruby -r ./tests/helpers/tool-pins.rb - <<'RUBY'
-REQUIRED = { 'zizmorcore/zizmor-action' => 'version', 'astral-sh/setup-uv' => 'version', 'bats-core/bats-action' => 'bats-version' }
-each_with_block do |file, uses, inputs|
-  REQUIRED.each do |action, key|
-    next unless uses.to_s.start_with?("#{action}@")
-    abort "#{file}: #{action} must set #{key}" unless inputs.key?(key)
-  end
-end
-RUBY
-  [ "$status" -eq 0 ]
+  local pair offenders
+  for pair in zizmorcore/zizmor-action:version astral-sh/setup-uv:version bats-core/bats-action:bats-version; do
+    offenders=$(ACTION=${pair%%:*} KEY=${pair#*:} yq ea -N '((.jobs[]? | select(.uses)), .jobs[]?.steps[]?, .runs.steps[]?) | select(((.uses // "") | test("^" + strenv(ACTION) + "@")) and ((.with // {}) | has(strenv(KEY)) | not)) | filename' .github/workflows/*.yml actions/*/action.yml)
+    [ -z "$offenders" ] || { echo "$offenders: ${pair%%:*} must set ${pair#*:}"; return 1; }
+  done
 }
 
 @test "matrix entries match a pin in every file" {
-  run ruby -r ./tests/helpers/tool-pins.rb - <<'RUBY'
-matrix_entries.each do |entry|
-  entry['files'].each do |file|
-    abort "#{file}: no exact #{entry['key']} pin" unless File.read(file).match?(PIN_LINE.(entry['key']))
-  end
-end
-RUBY
-  [ "$status" -eq 0 ]
+  local pins key file
+  pins=$(yq "$MATRIX_PINS" "$WORKFLOW")
+  # ponytail: keys are interpolated unescaped; escape them if a key ever holds regex metacharacters.
+  while read -r key file; do
+    grep -qE "^[[:space:]]+$key: \"[0-9]+\.[0-9]+\.[0-9]+\"[[:space:]]*\$" "$file" || { echo "$file: no exact $key pin"; return 1; }
+  done <<< "$pins"
 }
 
+# Values are compared as compact JSON: yq's own == is neither deep nor type-strict.
 @test "minimum age equals Dependabot cooldown" {
-  run ruby -r ./tests/helpers/tool-pins.rb - <<'RUBY'
-file = '.github/workflows/tool-pin-bump.yml'
-workflow = YAML.safe_load(File.read(file))
-updates = YAML.safe_load(File.read('.github/dependabot.yml'))['updates']
-actions = updates.find { |update| update['package-ecosystem'] == 'github-actions' }
-abort "#{file}: minimum age differs from Dependabot cooldown" unless workflow.dig('env', 'MIN_AGE_DAYS') == actions.dig('cooldown', 'default-days')
-RUBY
-  [ "$status" -eq 0 ]
+  local age cooldown
+  age=$(yq -o=json -I=0 '.env.MIN_AGE_DAYS' "$WORKFLOW")
+  cooldown=$(yq -o=json -I=0 '[.updates[] | select(.["package-ecosystem"] == "github-actions")][0].cooldown["default-days"]' .github/dependabot.yml)
+  [ "$age" = "$cooldown" ]
 }
 
 @test "workflow permissions are minimal" {
-  run ruby -r ./tests/helpers/tool-pins.rb - <<'RUBY'
-file = '.github/workflows/tool-pin-bump.yml'
-workflow = YAML.safe_load(File.read(file))
-job = workflow['jobs']['bump']
-abort "#{file}: top-level permissions must deny all" unless workflow['permissions'] == {}
-abort "#{file}: job permissions must only read contents" unless job['permissions'] == { 'contents' => 'read' }
-token = job['steps'].find { |step| step['id'] == 'app-token' }
-abort "#{file}: App token must allow workflow updates" unless token.dig('with', 'permission-workflows') == 'write'
-RUBY
-  [ "$status" -eq 0 ]
+  [ "$(yq -o=json -I=0 '.permissions' "$WORKFLOW")" = '{}' ]
+  [ "$(yq -o=json -I=0 '.jobs.bump.permissions' "$WORKFLOW")" = '{"contents":"read"}' ]
+  [ "$(yq -o=json -I=0 '[.jobs.bump.steps[] | select(.id == "app-token")][0].with["permission-workflows"]' "$WORKFLOW")" = '"write"' ]
 }
 
 @test "bump step fails on API errors" {
-  run ruby -r ./tests/helpers/tool-pins.rb - <<'RUBY'
-file = '.github/workflows/tool-pin-bump.yml'
-workflow = YAML.safe_load(File.read(file))
-bump = workflow['jobs']['bump']['steps'].find { |step| step['id'] == 'bump' }
-abort "#{file}: bump must use explicit bash for pipefail" unless bump['shell'] == 'bash'
-RUBY
-  [ "$status" -eq 0 ]
+  # bump must use explicit bash for pipefail.
+  [ "$(yq -o=json -I=0 '[.jobs.bump.steps[] | select(.id == "bump")][0].shell' "$WORKFLOW")" = '"bash"' ]
 }
 
 @test "PR branch is fixed per tool" {
-  run ruby -r ./tests/helpers/tool-pins.rb - <<'RUBY'
-file = '.github/workflows/tool-pin-bump.yml'
-workflow = YAML.safe_load(File.read(file))
-pr = workflow['jobs']['bump']['steps'].find { |step| step['uses'].to_s.start_with?('peter-evans/create-pull-request@') }['with']
-abort "#{file}: PR branch must be fixed per tool" unless pr['branch'] == 'deps/tool-pin-${{ matrix.name }}'
-abort "#{file}: PR commits must be signed" unless pr['sign-commits'] == true
-abort "#{file}: PR branch must be cleaned up" unless pr['delete-branch'] == true
-token = pr['token'].to_s
-abort "#{file}: PR must use only the App token" unless token.include?('steps.app-token.outputs.token') && !token.include?('github.token')
-RUBY
-  [ "$status" -eq 0 ]
+  local pr token
+  pr='[.jobs.bump.steps[] | select((.uses // "") | test("^peter-evans/create-pull-request@"))][0].with'
+  [ "$(yq -o=json -I=0 "$pr.branch" "$WORKFLOW")" = '"deps/tool-pin-${{ matrix.name }}"' ]
+  [ "$(yq -o=json -I=0 "$pr[\"sign-commits\"]" "$WORKFLOW")" = true ]
+  [ "$(yq -o=json -I=0 "$pr[\"delete-branch\"]" "$WORKFLOW")" = true ]
+  token=$(yq "$pr.token // \"\"" "$WORKFLOW")
+  # PR must use only the App token.
+  [[ $token == *steps.app-token.outputs.token* && $token != *github.token* ]]
 }
 
 @test "actions are SHA-pinned" {
@@ -109,7 +83,7 @@ prepare_bump_step() {
   export API_FIXTURES="$BATS_TEST_TMPDIR/api"
   mkdir -p "$API_FIXTURES" "$BATS_TEST_TMPDIR/bin" "$BATS_TEST_TMPDIR/scripts"
   cp scripts/bump-tool-pin.sh "$BATS_TEST_TMPDIR/scripts/"
-  ruby -r yaml -e 'puts YAML.safe_load(File.read(ARGV[0])).dig("jobs", "bump", "steps").find { |s| s["id"] == "bump" }["run"]' .github/workflows/tool-pin-bump.yml > "$BATS_TEST_TMPDIR/bump.sh"
+  yq '.jobs.bump.steps[] | select(.id == "bump") | .run' "$WORKFLOW" > "$BATS_TEST_TMPDIR/bump.sh"
   export OLD_REF NEW_REF
   OLD_REF=$(printf '%040d' 1)
   NEW_REF=$(printf '%040d' 2)
@@ -205,13 +179,10 @@ SH
 }
 
 @test "README documents intentional tool floats and their controls" {
-  run ruby - <<'RUBY'
-text = File.read('.github/workflows/README.md').split(/^### Intentional floats\s*$/, 2)[1]
-abort 'missing intentional floats note' unless text
-text = text.split(/^## /, 2)[0]
-[/Node.*major/i, /Trivy.*action.*default/i, /diff-cover.*range/i, /diff-cover.*lower.bound/i, /pnpm.*integrity/i].each do |pattern|
-  abort "missing float policy: #{pattern}" unless text.match?(pattern)
-end
-RUBY
-  [ "$status" -eq 0 ]
+  local text pattern
+  text=$(awk '/^### Intentional floats[[:space:]]*$/ { found = 1; next } found && /^## / { exit } found' .github/workflows/README.md)
+  [ -n "$text" ] || { echo 'missing intentional floats note'; return 1; }
+  for pattern in 'Node.*major' 'Trivy.*action.*default' 'diff-cover.*range' 'diff-cover.*lower.bound' 'pnpm.*integrity'; do
+    grep -qiE "$pattern" <<< "$text" || { echo "missing float policy: $pattern"; return 1; }
+  done
 }
