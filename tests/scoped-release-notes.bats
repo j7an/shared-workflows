@@ -216,6 +216,65 @@ MD
   [[ "$output" == *"/pull/2" ]]
 }
 
+@test "a nested stream sharing the prefix is not a base candidate" {
+  # Prefix "v" must not adopt "v2/v1.0.0" (stream "v2/v") as its base.
+  commit "feat: a (#1)" pkg/a
+  tag v1.0.0
+  commit "feat: b (#2)" pkg/b
+  tag v2/v1.0.0
+  commit "feat: c (#3)" pkg/c
+  tag v1.1.0
+  printf '%s\n' '**Full Changelog**: x' >"$FAKE_NOTES_FILE"
+
+  run_script v1.1.0 pkg
+  [ "$status" -eq 0 ]
+  grep -qx 'previous_tag_name=v1.0.0' "$GH_ARGS"
+}
+
+@test "base search follows every parent of a merge" {
+  # main: v1.0.0 -> #3 -> merge(release) = v1.2.0; release: #2 = v1.1.0.
+  # v1.1.0 is reachable only through the merge's second parent.
+  commit "feat: a (#1)" pkg/a
+  tag pkg/v1.0.0
+  git -C "$TEST_REPO" checkout -qb release
+  commit "feat: b (#2)" pkg/b
+  tag pkg/v1.1.0
+  git -C "$TEST_REPO" checkout -q -
+  commit "feat: c (#3)" pkg/c
+  git -C "$TEST_REPO" merge -q --no-ff -m "Merge release" release
+  tag pkg/v1.2.0
+  cat >"$FAKE_NOTES_FILE" <<'MD'
+## What's Changed
+* b in https://github.com/example/project/pull/2
+* c in https://github.com/example/project/pull/3
+MD
+
+  run_script pkg/v1.2.0 pkg
+  [ "$status" -eq 0 ]
+  grep -qx 'previous_tag_name=pkg/v1.1.0' "$GH_ARGS"
+  [[ "$output" == *"/pull/3"* ]]
+  [[ "$output" != *"/pull/2"* ]]
+}
+
+@test "a stream tag on an unmerged branch is not a base candidate" {
+  # maint/v1.0.1 forks after #2 and is never merged; it is nearer to
+  # pkg/v1.1.0 by commit count than the true ancestor pkg/v1.0.0.
+  commit "feat: a (#1)" pkg/a
+  tag pkg/v1.0.0
+  commit "feat: b (#2)" pkg/b
+  git -C "$TEST_REPO" checkout -qb maint
+  commit "fix: d (#4)" pkg/d
+  tag pkg/v1.0.1
+  git -C "$TEST_REPO" checkout -q -
+  commit "feat: c (#3)" pkg/c
+  tag pkg/v1.1.0
+  printf '%s\n' '**Full Changelog**: x' >"$FAKE_NOTES_FILE"
+
+  run_script pkg/v1.1.0 pkg
+  [ "$status" -eq 0 ]
+  grep -qx 'previous_tag_name=pkg/v1.0.0' "$GH_ARGS"
+}
+
 @test "rejects a path outside the repository with exit 2" {
   pi_kit_history
   run_script permissions/v0.3.0 ../packages/permissions

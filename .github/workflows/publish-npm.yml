@@ -763,18 +763,37 @@ jobs:
           fi
           prefix="${tag%"$version"}"
 
-          # Nearest ancestor tag in the stream, starting from <tag>'s parent. Version
-          # order is not used: it can name a tag that is not an ancestor (SemVer ranks
-          # beta10 below beta2), leaving <base>..<tag> empty. The digit after the prefix
-          # keeps prefix "v" from matching "vendor/v1.5.0". No match, or a root-commit
-          # tag, leaves base empty: the first release in the stream.
-          nearest_tag() {
-            git describe --tags --abbrev=0 --match "${prefix}[0-9]*" "$@" "${tag}^" 2>/dev/null || true
-          }
+          # Candidates are this stream's tags that are strict ancestors of <tag>, through
+          # every parent: --merged keeps tags reachable from <tag>, --no-contains drops
+          # <tag>'s own commit. The awk keeps only exact <prefix><semver> names, so
+          # prefix "v" ignores "vendor/v1.5.0" and the nested stream "v2/v1.0.0"; a
+          # stable release also skips prereleases. Version order is not used: it can
+          # name a non-ancestor (SemVer ranks beta10 below beta2), emptying the range.
           case "$version" in
-            *-*) base=$(nearest_tag) ;;
-            *) base=$(nearest_tag --exclude "${prefix}[0-9]*-*") ;;
+            *-*) skip_pre=0 ;;
+            *) skip_pre=1 ;;
           esac
+          candidates=$(git tag -l "${prefix}*" --merged "$tag" --no-contains "$tag" \
+            | awk -v p="$prefix" -v skip_pre="$skip_pre" '
+                substr($0, 1, length(p)) != p { next }
+                { v = substr($0, length(p) + 1) }
+                v !~ /^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$/ { next }
+                skip_pre && v ~ /-/ { next }
+                { print }
+              ')
+
+          # The base is the nearest candidate: fewest commits in <candidate>..<tag>.
+          # No candidate means the first release in the stream.
+          # ponytail: one rev-list per candidate tag; fine for per-package tag counts.
+          base=""
+          best=""
+          for c in $candidates; do
+            n=$(git rev-list --count "${c}..${tag}")
+            if [ -z "$best" ] || [ "$n" -lt "$best" ]; then
+              base="$c"
+              best="$n"
+            fi
+          done
 
           server="${GITHUB_SERVER_URL:-https://github.com}"
           if [ -z "$base" ]; then
