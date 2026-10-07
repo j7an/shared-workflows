@@ -42,7 +42,7 @@ A reusable workflow cannot reliably check out *its own* repo's scripts: in a `wo
 - `tag-release.yml` embeds `bump-version-files.sh`
 - `pre-commit-autoupdate.yml` embeds `pre-commit-autoupdate-preflight.sh`
 - `pnpm-packagemanager-update.yml` embeds `packagemanager-bump.sh` and `packagemanager-integrity.sh`
-- `publish-npm.yml` embeds `npm-package-preflight.sh` and `assert-packed-manifest.sh`
+- `publish-npm.yml` embeds `npm-package-preflight.sh`, `assert-packed-manifest.sh`, and `scoped-release-notes.sh`
 
 `lint-workflow-call.sh` is the partner guard: it fails CI if any `workflow_call` file reintroduces a caller-scoped ref as a checkout `ref:`.
 
