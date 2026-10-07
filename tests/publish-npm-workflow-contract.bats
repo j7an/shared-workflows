@@ -325,3 +325,28 @@ run_blocks() {
   assert_contains "$desc" 'pack.json for a root package'
   assert_contains "$desc" '<package-dir>/pack.json otherwise'
 }
+
+@test "paths input is optional and defaults to empty" {
+  assert_contains "$(input_block paths)" 'default: ""'
+  assert_contains "$(input_block paths)" 'required: false'
+}
+
+@test "paths is validated in the build job, before anything is published" {
+  job="$(build_job)"
+  assert_contains "$job" 'PATHS: ${{ inputs.paths }}'
+  assert_contains "$job" 'Invalid paths entry'
+}
+
+@test "GitHub Release keeps --generate-notes when paths is empty and scopes notes otherwise" {
+  job="$(github_release_job)"
+  assert_contains "$job" 'PATHS: ${{ inputs.paths }}'
+  assert_contains "$job" 'NOTES_ARGS=( --generate-notes )'
+  assert_contains "$job" 'if [ -n "$PATHS" ]; then'
+  assert_contains "$job" 'scoped_release_notes "$TAG" "$@" > "$NOTES"'
+  assert_contains "$job" 'NOTES_ARGS=( --notes-file "$NOTES" )'
+}
+
+@test "scoped release notes logic is embedded inline, not fetched at runtime" {
+  grep -qF '# --- BEGIN inline:scripts/scoped-release-notes.sh ---' "$YAML"
+  grep -qF '# --- END inline:scripts/scoped-release-notes.sh ---' "$YAML"
+}

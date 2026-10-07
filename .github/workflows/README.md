@@ -544,6 +544,7 @@ template.
 | `test-command` | string | no | `""` | Optional pre-pack command run in the caller checkout. |
 | `pack-contents-script` | string | no | `""` | Optional script run as `sh <script> <metadata-path>` after packing; `<metadata-path>` is `pack.json` for a root package, `<package-dir>/pack.json` otherwise. |
 | `verify-command` | string | no | `""` | Optional post-registry verification command run with `PACKAGE` and `VERSION` in the environment. |
+| `paths` | string | no | `""` | Whitespace-separated repo-relative paths. When set, the GitHub Release notes list only PRs that touched them. See [Release notes in a monorepo](#release-notes-in-a-monorepo). |
 
 If `npm pack` depends on installed dependencies, generated files, or lifecycle
 scripts such as `prepare` or `prepack`, include the required setup in
@@ -573,6 +574,31 @@ tags never collide. Configure a trusted publisher separately for every npm
 package, using the actual calling workflow filename, the `npm` environment and
 the `npm publish` allowed action. Both the caller and this reusable workflow
 need `id-token: write`.
+
+### Release notes in a monorepo
+
+By default the GitHub Release uses GitHub's generated notes unchanged. Those
+list every PR merged between the previous tag and this one across the whole
+repository, and with no explicit base GitHub starts from the newest release in
+any tag stream, not just this package's.
+
+Set `paths` to the same value as the package's `tag-release.yml` `paths` to
+scope the notes:
+
+- The previous tag is the nearest lower version with the same prefix (for
+  `permissions/v0.3.0`, the newest earlier `permissions/v*` tag). A stable
+  release skips prereleases, so its notes cover everything since the previous
+  stable release.
+- Only PR lines whose number appears in `git log <previous>..<tag> -- <paths>`
+  are kept, along with the Full Changelog link. Sections left empty, such as
+  New Contributors, are dropped. If no PR matches, the notes say so.
+- The first release in a stream has no previous tag GitHub can be given, so its
+  notes say it is the first release and link the tag's commit history. Edit
+  them by hand if you want more.
+
+PR numbers are read from the `(#N)` GitHub appends to squash-merge commit
+subjects, so this needs squash merging. Entries must match `[A-Za-z0-9._/-]+`,
+and the workflow rejects anything else before publishing.
 
 ### pnpm workspaces
 
@@ -688,6 +714,7 @@ jobs:
       package-dir: packages/permissions
       test-command: pnpm install --frozen-lockfile && pnpm test
       pack-command: pnpm pack --json
+      paths: packages/permissions packages/shared
 ```
 
 The workspace package's manifest should also carry a `repository.directory`
