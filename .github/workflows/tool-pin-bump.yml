@@ -8,7 +8,7 @@ on:
 permissions: {}
 
 env:
-  MIN_AGE_DAYS: 5
+  MIN_AGE_DAYS: 7
 
 jobs:
   bump:

@@ -325,12 +325,14 @@ title'
 
 
 @test "pre-commit default documentation points to the maintained workflow pin" {
-  local row default_cell
+  local row default_cell min_age_days
+  min_age_days=$(sed -nE 's/^  MIN_AGE_DAYS: ([0-9]+)$/\1/p' .github/workflows/tool-pin-bump.yml)
+  [ -n "$min_age_days" ]
   row=$(workflow_readme_section | awk '/^\| `pre_commit_version` \|/ { print }')
   default_cell=$(printf '%s\n' "$row" | awk -F '|' '{ print $5 }')
   [[ ! "$default_cell" =~ [0-9]+\.[0-9]+\.[0-9]+ ]]
   assert_contains "$default_cell" "pinned"
   assert_contains "$default_cell" "pre-commit-autoupdate.yml"
-  assert_contains "$row" "5-day"
+  assert_contains "$row" "${min_age_days}-day"
   assert_contains "$row" 'set `""` for latest'
 }

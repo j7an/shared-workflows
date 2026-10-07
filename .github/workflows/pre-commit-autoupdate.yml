@@ -34,7 +34,7 @@ on:
       pre_commit_version:
         type: string
         default: "4.6.2"
-        description: "Pre-commit runner version. Defaults to a pinned version bumped automatically after a 5-day minimum age; set \"\" for latest."
+        description: "Pre-commit runner version. Defaults to a pinned version bumped automatically after a 7-day minimum age; set \"\" for latest."
     secrets:
       RELEASE_BOT_PRIVATE_KEY:
         required: false

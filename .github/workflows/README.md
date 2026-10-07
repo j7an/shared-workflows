@@ -103,7 +103,7 @@ checks.
 | `labels` | string | no | `dependencies` | Labels passed to `create-pull-request`. |
 | `sign_commits` | boolean | no | `true` | Whether `create-pull-request` signs commits. |
 | `restrict_paths` | boolean | no | `true` | When true, passes `add-paths: config_path` so only the pre-commit config is committed. |
-| `pre_commit_version` | string | no | [Maintained pinned version](pre-commit-autoupdate.yml) | Pre-commit runner version. Defaults to a pinned version that `tool-pin-bump.yml` bumps automatically after a 5-day minimum release age; set `""` for latest. |
+| `pre_commit_version` | string | no | [Maintained pinned version](pre-commit-autoupdate.yml) | Pre-commit runner version. Defaults to a pinned version that `tool-pin-bump.yml` bumps automatically after a 7-day minimum release age; set `""` for latest. |
 
 `delete-branch: true` is standardized by the reusable workflow, so recurring
 automation branches are cleaned up after merge.
