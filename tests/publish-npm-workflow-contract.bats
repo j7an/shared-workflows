@@ -341,7 +341,7 @@ run_blocks() {
   job="$(github_release_job)"
   assert_contains "$job" 'PATHS: ${{ inputs.paths }}'
   assert_contains "$job" 'NOTES_ARGS=( --generate-notes )'
-  assert_contains "$job" 'if [ -n "$PATHS" ]; then'
+  assert_contains "$job" 'if [ "$#" -gt 0 ]; then'
   assert_contains "$job" 'scoped_release_notes "$TAG" "$@" > "$NOTES"'
   assert_contains "$job" 'NOTES_ARGS=( --notes-file "$NOTES" )'
 }

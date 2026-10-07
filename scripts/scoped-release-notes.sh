@@ -9,8 +9,10 @@
 # prefix stream, asks GitHub for notes over that range, and keeps only the PR
 # lines whose number appears in `git log <base>..<tag> -- <paths>`.
 #
-# The base is the nearest lower version in the stream; a stable release skips
-# prereleases so its notes cover everything since the previous stable release.
+# The base is the nearest earlier tag in the stream that is an ancestor of
+# <tag>, so <base>..<tag> is exactly the history this release adds. A stable
+# release skips prereleases so its notes cover everything since the previous
+# stable release.
 # With no base (first release in the stream) the API cannot be given a range,
 # so the notes say so and link the tag's history instead.
 #
@@ -56,6 +58,13 @@ if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
   exit 1
 fi
 
+# The charset allows '..' and absolute paths; let git reject any outside the
+# repository rather than fail later inside `git log`.
+if ! git log -n1 --format= "$tag" -- "$@" >/dev/null; then
+  echo "::error::paths must name locations inside the repository: $*" >&2
+  exit 2
+fi
+
 # Same trailing-semver anchor as npm-package-preflight.sh; what precedes it is
 # the stream's prefix (e.g. "permissions/v").
 version=$(printf '%s' "$tag" \
@@ -65,21 +74,19 @@ if [ -z "$version" ]; then
   exit 2
 fi
 prefix="${tag%"$version"}"
-case "$version" in
-  *-*) skip_pre=0 ;;
-  *) skip_pre=1 ;;
-esac
 
-# versionsort.suffix=- sorts 1.0.0-rc.1 below 1.0.0. The awk keeps only tags
-# that are exactly <prefix><semver>, so prefix "v" ignores "vendor/v1.5.0".
-base=$(git -c versionsort.suffix=- tag -l "${prefix}*" --sort=-version:refname \
-  | awk -v p="$prefix" -v t="$tag" -v skip_pre="$skip_pre" '
-      substr($0, 1, length(p)) != p { next }
-      { v = substr($0, length(p) + 1) }
-      v !~ /^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$/ { next }
-      seen && !found && !(skip_pre && v ~ /-/) { print; found = 1 }
-      $0 == t { seen = 1 }
-    ')
+# Nearest ancestor tag in the stream, starting from <tag>'s parent. Version
+# order is not used: it can name a tag that is not an ancestor (SemVer ranks
+# beta10 below beta2), leaving <base>..<tag> empty. The digit after the prefix
+# keeps prefix "v" from matching "vendor/v1.5.0". No match, or a root-commit
+# tag, leaves base empty: the first release in the stream.
+nearest_tag() {
+  git describe --tags --abbrev=0 --match "${prefix}[0-9]*" "$@" "${tag}^" 2>/dev/null || true
+}
+case "$version" in
+  *-*) base=$(nearest_tag) ;;
+  *) base=$(nearest_tag --exclude "${prefix}[0-9]*-*") ;;
+esac
 
 server="${GITHUB_SERVER_URL:-https://github.com}"
 if [ -z "$base" ]; then

@@ -197,3 +197,99 @@ MD
   run_script permissions/v0.3.0
   [ "$status" -eq 2 ]
 }
+
+@test "base is the nearest earlier tag in history, not in version-sort order" {
+  # SemVer ranks beta10 below beta2 (alphanumeric identifiers compare
+  # lexically); git's version sort ranks it above. Either way the base must be
+  # an ancestor, or <base>..<tag> is empty and #2 is silently lost.
+  commit "feat: a (#1)" pkg/a
+  tag pkg/v1.0.0-beta1
+  commit "feat: b (#2)" pkg/b
+  tag pkg/v1.0.0-beta10
+  commit "feat: c (#3)" pkg/c
+  tag pkg/v1.0.0-beta2
+  printf '%s\n' '* b in https://github.com/example/project/pull/2' >"$FAKE_NOTES_FILE"
+
+  run_script pkg/v1.0.0-beta10 pkg
+  [ "$status" -eq 0 ]
+  grep -qx 'previous_tag_name=pkg/v1.0.0-beta1' "$GH_ARGS"
+  [[ "$output" == *"/pull/2" ]]
+}
+
+@test "rejects a path outside the repository with exit 2" {
+  pi_kit_history
+  run_script permissions/v0.3.0 ../packages/permissions
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"outside"* ]]
+}
+
+# --- publish-npm.yml run blocks --------------------------------------------
+
+WF="$BATS_TEST_DIRNAME/../.github/workflows/publish-npm.yml"
+
+extract_step_block() {
+  awk -v want="      - name: $1" '
+    $0 == want { found=1; next }
+    found && /^        run: \|$/ { inrun=1; next }
+    inrun && /^      - / { exit }
+    inrun && /^  [a-z-]+:$/ { exit }
+    inrun { sub(/^          /, ""); print }
+  ' "$WF"
+}
+
+run_step() {
+  local script="$BATS_TEST_TMPDIR/step.sh"
+  { echo 'set -e'; extract_step_block "$1"; } >"$script"
+  run --separate-stderr bash -c 'cd "$1" && bash "$2"' _ "$TEST_REPO" "$script"
+}
+
+@test "build step rejects paths that leave the repository, before publish" {
+  pi_kit_history
+  export TAG=permissions/v0.3.0 PATHS="packages/permissions ../packages/shared"
+  run_step "Validate paths input"
+  [ "$status" -ne 0 ]
+  [[ "$output$stderr" == *"::error::"* ]]
+}
+
+@test "build step accepts in-repo paths and whitespace-only paths" {
+  pi_kit_history
+  export TAG=permissions/v0.3.0
+  PATHS="packages/permissions packages/shared" run_step "Validate paths input"
+  [ "$status" -eq 0 ]
+  PATHS="   " run_step "Validate paths input"
+  [ "$status" -eq 0 ]
+}
+
+# gh stub for the release step: no existing release; record `release create`.
+release_gh_stub() {
+  cat >"$FAKE_BIN/gh" <<'SH'
+#!/bin/sh
+case "$*" in
+  "release view"*) exit 1 ;;
+  "release create"*) printf '%s\n' "$@" >"$GH_ARGS" ;;
+  *releases/generate-notes*) cat "$FAKE_NOTES_FILE" ;;
+  *) exit 97 ;;
+esac
+SH
+  touch "$TEST_REPO/pkg-1.0.0.tgz"
+  export RUNNER_TEMP="$BATS_TEST_TMPDIR" TAG=permissions/v0.3.0 VERSION=0.3.0
+}
+
+@test "release step treats whitespace-only paths as unset" {
+  pi_kit_history
+  release_gh_stub
+  PATHS="   " run_step "Create or update GitHub Release"
+  [ "$status" -eq 0 ]
+  grep -qx -- '--generate-notes' "$GH_ARGS"
+  ! grep -qx -- '--notes-file' "$GH_ARGS"
+}
+
+@test "release step scopes notes when paths is set" {
+  pi_kit_history
+  release_gh_stub
+  printf '%s\n' '**Full Changelog**: x' >"$FAKE_NOTES_FILE"
+  PATHS="packages/permissions" run_step "Create or update GitHub Release"
+  [ "$status" -eq 0 ]
+  grep -qx -- '--notes-file' "$GH_ARGS"
+  ! grep -qx -- '--generate-notes' "$GH_ARGS"
+}

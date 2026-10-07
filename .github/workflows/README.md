@@ -585,10 +585,11 @@ any tag stream, not just this package's.
 Set `paths` to the same value as the package's `tag-release.yml` `paths` to
 scope the notes:
 
-- The previous tag is the nearest lower version with the same prefix (for
-  `permissions/v0.3.0`, the newest earlier `permissions/v*` tag). A stable
-  release skips prereleases, so its notes cover everything since the previous
-  stable release.
+- The previous tag is the nearest earlier tag with the same prefix in the
+  tag's own history (for `permissions/v0.3.0`, the closest `permissions/v*`
+  tag it descends from), so the range is exactly what this release adds. A
+  stable release skips prereleases, so its notes cover everything since the
+  previous stable release.
 - Only PR lines whose number appears in `git log <previous>..<tag> -- <paths>`
   are kept, along with the Full Changelog link. Sections left empty, such as
   New Contributors, are dropped. If no PR matches, the notes say so.
@@ -597,8 +598,9 @@ scope the notes:
   them by hand if you want more.
 
 PR numbers are read from the `(#N)` GitHub appends to squash-merge commit
-subjects, so this needs squash merging. Entries must match `[A-Za-z0-9._/-]+`,
-and the workflow rejects anything else before publishing.
+subjects, so this needs squash merging. Entries must match `[A-Za-z0-9._/-]+`
+and stay inside the repository; the workflow rejects anything else before
+publishing. Whitespace-only `paths` counts as empty.
 
 ### pnpm workspaces
 
