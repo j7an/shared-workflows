@@ -2158,10 +2158,30 @@ jobs:
           esac
 
           # --- BEGIN tier-1 scanner ---
+          # Returns 0 when version $1 is inside GHSA vulnerableVersionRange $2
+          # (comma-joined "op version" parts), 1 when outside, 2 when unparseable.
+          in_vulnerable_range() {
+            local target="$1" rest="$2" part op ver extra
+            [ -n "$rest" ] || return 2
+            while [ -n "$rest" ]; do
+              part=${rest%%,*}
+              if [ "$part" = "$rest" ]; then rest=; else rest=${rest#*,}; fi
+              read -r op ver extra <<< "$part"
+              [ -n "$ver" ] && [ -z "$extra" ] || return 2
+              case "$op" in
+                '=') [ "$target" = "$ver" ] ;;
+                '<') ! printf '%s\n%s\n' "$ver" "$target" | sort -V -C ;;
+                '<=') printf '%s\n%s\n' "$target" "$ver" | sort -V -C ;;
+                '>') ! printf '%s\n%s\n' "$target" "$ver" | sort -V -C ;;
+                '>=') printf '%s\n%s\n' "$ver" "$target" | sort -V -C ;;
+                *) return 2 ;;
+              esac || return 1
+            done
+          }
           scan_dependency() {
             local eco="$1" name="$2" target="$3" ghsa_eco osv_eco display nodes patched
             local ghsa_result ghsa_err ghsa_vulns ghsa_count osv_body osv_result osv_vulns osv_count
-            local gid severity summary fixed lowest is_fixed
+            local gid severity summary fixed lowest is_fixed vrange range range_status
             case "$eco" in
               actions) ghsa_eco=ACTIONS; osv_eco='GitHub Actions'; display="v$target" ;;
               pypi) ghsa_eco=PIP; osv_eco=PyPI; display="v$target" ;;
@@ -2201,17 +2221,24 @@ jobs:
               ghsa_result=
             fi
             nodes='.data.securityVulnerabilities.nodes[]'
+            # "-" keeps an absent range from leaving an empty, collapsible TSV field.
+            vrange='((.vulnerableVersionRange // "-") | gsub("(?<=[<>=] )v"; ""))'
             patched='((.firstPatchedVersion.identifier // "") | ltrimstr("v"))'
             if [ "$eco" = npm ]; then
               nodes="${nodes}?"
+              vrange='(.vulnerableVersionRange // "-")'
               patched='(.firstPatchedVersion.identifier // "")'
             fi
             if [ -n "$ghsa_result" ]; then
               if [ -n "$target" ]; then
-                while IFS=$'\t' read -r gid severity summary fixed; do
+                while IFS=$'\t' read -r gid severity summary range fixed; do
                   [ -z "$gid" ] && continue
                   is_fixed=false
-                  if [ "$eco" = npm ]; then
+                  range_status=0
+                  in_vulnerable_range "$target" "$range" || range_status=$?
+                  if [ "$range_status" -ne 2 ]; then
+                    [ "$range_status" -eq 0 ] || is_fixed=true
+                  elif [ "$eco" = npm ]; then
                     if [ -n "$fixed" ] && [ "$fixed" != null ] &&
                        printf '%s\n%s\n' "$fixed" "$target" | sort -V -C 2>/dev/null; then
                       is_fixed=true
@@ -2221,14 +2248,14 @@ jobs:
                     [ "$lowest" != "$fixed" ] || is_fixed=true
                   fi
                   if [ "$is_fixed" = true ]; then
-                    FILTERED_RESULTS="${FILTERED_RESULTS}| ${gid} | ${severity} | ${summary} | GHSA | ${fixed} |"$'\n'
+                    FILTERED_RESULTS="${FILTERED_RESULTS}| ${gid} | ${severity} | ${summary} | GHSA | ${fixed:-none (vulnerable ${range})} |"$'\n'
                     FILTERED_TOTAL=$((FILTERED_TOTAL + 1))
                   else
                     SCAN_RESULTS="${SCAN_RESULTS}| ${gid} | ${severity} | ${summary} | GHSA |"$'\n'
                     GHSA_TOTAL=$((GHSA_TOTAL + 1))
                   fi
                 done <<< "$(echo "$ghsa_result" | jq -r \
-                  "$nodes | [.advisory.ghsaId, .advisory.severity, .advisory.summary, $patched] | @tsv" \
+                  "$nodes | [.advisory.ghsaId, .advisory.severity, .advisory.summary, $vrange, $patched] | @tsv" \
                   2>/dev/null || true)"
               else
                 ghsa_vulns=$(echo "$ghsa_result" | jq -r "$nodes"' |
@@ -2730,7 +2757,7 @@ jobs:
           if [ "$FILTERED_TOTAL" -gt 0 ]; then
             HIST_HDR="| ID | Severity | Summary | Source | Patched In |"
             HIST_SEP="|----|----------|---------|--------|------------|"
-            HISTORICAL_SECTION="$(printf '\n\n<details>\n<summary>%d historical advisory/ies (patched at or before target version — not blocking)</summary>\n\n%s\n%s\n%s</details>' \
+            HISTORICAL_SECTION="$(printf '\n\n<details>\n<summary>%d historical advisory/ies (target version outside vulnerable range — not blocking)</summary>\n\n%s\n%s\n%s</details>' \
               "$FILTERED_TOTAL" "$HIST_HDR" "$HIST_SEP" "$FILTERED_RESULTS")"
           fi
 
