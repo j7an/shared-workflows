@@ -77,6 +77,10 @@ if ! grep -qE '^(\+\+\+|---|@@|diff --git)' <<< "$input"; then
   exit 2
 fi
 
+# Lockfile paths in the diff, newline-wrapped for exact-line matching. A cap
+# raise emits no row and relies on its sibling lockfile's rows (issue #188).
+changed_locks=$'\n'$(grep -E '^diff --git a/[^[:space:]]+ b/([^[:space:]]+/)?(uv|poetry)\.lock$' <<< "$input" | sed 's#^.* b/##' || true)$'\n'
+
 # --- Parser state ---
 # Per-file (reset on each diff --git boundary):
 current_path=""
@@ -256,19 +260,59 @@ extract_operator() {
   return 0
 }
 
+# cap_operator "$clause" — prints "<" or "<=" for an upper-bound clause with a
+# valid version; returns 1 for any other clause.
+cap_operator() {
+  local clause="$1" op
+  clause="${clause#"${clause%%[![:space:]]*}"}"
+  case "$clause" in
+    \<=*) op="<=" ;;
+    \<*)  op="<" ;;
+    *)    return 1 ;;
+  esac
+  clause="${clause#"$op"}"
+  clause="${clause#"${clause%%[![:space:]]*}"}"
+  case "$clause" in [0-9]*) ;; *) return 1 ;; esac
+  extract_target_version "$clause" >/dev/null || return 1
+  printf '%s' "$op"
+}
+
+# cap_raise_ok "$plus_spec" "$minus_spec" — succeeds for a two-clause spec
+# whose lower bound is unchanged and valid, whose cap keeps its < or <=
+# operator, and whose sibling uv.lock or poetry.lock also changed (issue #188).
+cap_raise_ok() {
+  local plus_cap="${1#*,}" minus_cap="${2#*,}" plus_op minus_op dir=""
+  [ "${1%%,*}" = "${2%%,*}" ] || return 1
+  extract_target_version "${1%%,*}" >/dev/null || return 1
+  plus_op=$(cap_operator "$plus_cap") || return 1
+  minus_op=$(cap_operator "$minus_cap") || return 1
+  [ "$plus_op" = "$minus_op" ] || return 1
+  case "$current_path" in */*) dir="${current_path%/*}/" ;; esac
+  case "$changed_locks" in
+    *$'\n'"${dir}uv.lock"$'\n'*|*$'\n'"${dir}poetry.lock"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
 emit_bump() {
   local name="$1" plus_spec="$2" minus_spec="$3" target plus_op minus_op
   if [ "$plus_spec" = "$minus_spec" ]; then verdict="disqualified"; return; fi
-  # Compound spec (">=X,<Y", issue #169): both sides must be compound, only the
-  # leading clause may change, and everything after the first comma must be
-  # byte-identical. The leading clauses then take the single-clause checks.
+  # Compound spec (">=X,<Y", issue #169): both sides must be compound. Either
+  # only the leading clause changed (everything after the first comma is
+  # byte-identical), and the leading clauses take the single-clause checks; or
+  # only the cap changed (issue #188), which Dependabot does when the new
+  # version is outside the range. A cap raise names no target version, so it
+  # emits no row; cap_raise_ok requires a changed sibling lockfile for the rows.
   # ponytail: leading-clause only; allow any single changed clause if a real
   # Dependabot PR with a non-leading lower bound gets disqualified.
   case "$plus_spec$minus_spec" in
     *,*)
       case "$plus_spec" in *,*) ;; *) verdict="disqualified"; return ;; esac
       case "$minus_spec" in *,*) ;; *) verdict="disqualified"; return ;; esac
-      if [ "${plus_spec#*,}" != "${minus_spec#*,}" ]; then verdict="disqualified"; return; fi
+      if [ "${plus_spec#*,}" != "${minus_spec#*,}" ]; then
+        cap_raise_ok "$plus_spec" "$minus_spec" || verdict="disqualified"
+        return
+      fi
       plus_spec="${plus_spec%%,*}"
       minus_spec="${minus_spec%%,*}"
       ;;
