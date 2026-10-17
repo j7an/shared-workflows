@@ -153,6 +153,27 @@ CASES
   done
 }
 
+@test "range bounds treat trailing zero release components as equal" {
+  local eco target range expected
+  for eco in actions pypi npm; do
+    while IFS='|' read -r target range expected; do
+      ghsa_advisory '' "$range"
+      run_scan "$eco" example "$target"
+      [ "$status" -eq 0 ] || { echo "ecosystem=$eco target=$target range=$range: scanner failed: $output"; return 1; }
+      printf '%s\n' "$output" | jq -e --argjson n "$expected" \
+        '.filtered_count==$n and .ghsa==(1-$n)' >/dev/null || { echo "ecosystem=$eco target=$target range=$range: verdict mismatch"; return 1; }
+    done <<'CASES'
+6.0|>= 6.0.0, < 6.0.6|0
+6.0.0|>= 6.0.0, < 6.0.6|0
+6.0|= 6.0.0|0
+6.0.0|< 6.0|1
+6.0|<= 6.0.0|0
+6.0.6|>= 6.0.0, < 6.0.6|1
+6.0.10|< 6.0.6|1
+CASES
+  done
+}
+
 @test "range-filtered advisories without a patch show their range in the historical row" {
   ghsa_advisory '' '<= 0.23.0'
   run_scan npm example 0.162.1

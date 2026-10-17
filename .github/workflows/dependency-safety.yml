@@ -2160,14 +2160,18 @@ jobs:
           # --- BEGIN tier-1 scanner ---
           # Returns 0 when version $1 is inside GHSA vulnerableVersionRange $2
           # (comma-joined "op version" parts), 1 when outside, 2 when unparseable.
+          # Trailing ".0" components are dropped before comparing so 6.0 == 6.0.0
+          # (PEP 440 zero-pads release segments; sort -V would order 6.0 first).
           in_vulnerable_range() {
             local target="$1" rest="$2" part op ver extra
             [ -n "$rest" ] || return 2
+            while [ "$target" != "${target%.0}" ]; do target=${target%.0}; done
             while [ -n "$rest" ]; do
               part=${rest%%,*}
               if [ "$part" = "$rest" ]; then rest=; else rest=${rest#*,}; fi
               read -r op ver extra <<< "$part"
               [ -n "$ver" ] && [ -z "$extra" ] || return 2
+              while [ "$ver" != "${ver%.0}" ]; do ver=${ver%.0}; done
               case "$op" in
                 '=') [ "$target" = "$ver" ] ;;
                 '<') ! printf '%s\n%s\n' "$ver" "$target" | sort -V -C ;;
