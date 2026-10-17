@@ -468,8 +468,39 @@ DIFF
     "pkg	1.3	pypi" "pyproject.toml"
 }
 
-@test "Disqualify: compound spec upper-bound change (issue #169)" {
+@test "Disqualify: compound spec upper-bound change without a lockfile change (issue #188)" {
   assert_disqualified_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff>=0.15.12,<0.17"')"
+}
+
+# Appends a header-only diff for lockfile path $2 to diff $1.
+with_lock_diff() {
+  printf '%s\n%s\n' "$1" "diff --git a/$2 b/$2"
+}
+
+@test "Positive: compound spec cap raise with uv.lock clears the path and emits no row (issue #188)" {
+  assert_clean_bump_diff "$(with_lock_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff>=0.15.12,<0.17"')" uv.lock)" \
+    "" "pyproject.toml"
+}
+
+@test "Positive: poetry compound cap raise with poetry.lock (issue #188)" {
+  assert_clean_bump_diff "$(with_lock_diff "$(poetry_main_kv_diff 'pkg = ">=1.2,<2.0"' 'pkg = ">=1.2,<3.0"')" poetry.lock)" \
+    "" "pyproject.toml"
+}
+
+@test "Disqualify: compound spec lower and upper bound both change with uv.lock (issue #188)" {
+  assert_disqualified_diff "$(with_lock_diff "$(pep621_deps_diff '"fastmcp>=4.0.10,<4.1"' '"fastmcp>=4.1.0,<4.2"')" uv.lock)"
+}
+
+@test "Disqualify: compound spec cap operator change with uv.lock (issue #188)" {
+  assert_disqualified_diff "$(with_lock_diff "$(pep621_deps_diff '"fastmcp>=4.0.10,<4.1"' '"fastmcp>=4.0.10,<=4.2"')" uv.lock)"
+}
+
+@test "Disqualify: compound spec cap raise with uv.lock in another directory (issue #188)" {
+  assert_disqualified_diff "$(with_lock_diff "$(pep621_deps_diff '"ruff>=0.15.12,<0.16"' '"ruff>=0.15.12,<0.17"')" other/uv.lock)"
+}
+
+@test "Disqualify: three-clause spec cap change with uv.lock (issue #188)" {
+  assert_disqualified_diff "$(with_lock_diff "$(pep621_deps_diff '"ruff>=0.15.12,!=0.15.20,<0.16"' '"ruff>=0.15.12,!=0.15.20,<0.17"')" uv.lock)"
 }
 
 @test "Disqualify: compound spec lower and upper bound both change (issue #169)" {
@@ -501,6 +532,15 @@ PBX=tests/fixtures/pyproject-bump-extract
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'anyio\t4.15.1\tpypi\nruff\t0.16.8\tpypi')" ]
   run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths --head-dir="$PBX/head/nexus-280" < "$PBX/nexus-280-bump.diff"
+  [ "$status" -eq 0 ]
+  [ "$output" = "pyproject.toml" ]
+}
+
+@test "Positive: nexus-mcp#302 cap raise with uv.lock clears pyproject.toml with no row (issue #188)" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps --head-dir="$PBX/head/nexus-302" < "$PBX/nexus-302-cap-raise.diff"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths --head-dir="$PBX/head/nexus-302" < "$PBX/nexus-302-cap-raise.diff"
   [ "$status" -eq 0 ]
   [ "$output" = "pyproject.toml" ]
 }
