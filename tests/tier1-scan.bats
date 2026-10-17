@@ -153,7 +153,7 @@ CASES
   done
 }
 
-@test "pypi range bounds treat trailing zero release components as equal; actions tags do not" {
+@test "pypi range bounds zero-pad releases; actions tags stay distinct and bare majors fall back" {
   local eco target range expected
   while IFS='|' read -r eco target range expected; do
     ghsa_advisory '' "$range"
@@ -171,6 +171,8 @@ pypi|6.0.6|>= 6.0.0, < 6.0.6|1
 pypi|6.0.10|< 6.0.6|1
 actions|1.0.0|= 1|1
 actions|1|= 1|0
+actions|5|>= 5.0.0, < 5.0.1|0
+actions|5.0.2|>= 5.0.0, < 5.0.1|1
 CASES
 }
 
