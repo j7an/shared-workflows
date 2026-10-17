@@ -72,8 +72,9 @@ run_scan() {
 }
 
 ghsa_advisory() {
-  jq -n --arg patched "$1" '{data:{securityVulnerabilities:{nodes:[{
+  jq -n --arg patched "$1" --arg range "${2:-}" '{data:{securityVulnerabilities:{nodes:[{
     advisory:{ghsaId:"GHSA-fixture",severity:"HIGH",summary:"fixture advisory"},
+    vulnerableVersionRange:(if $range=="" then null else $range end),
     firstPatchedVersion:(if $patched=="" then null else {identifier:$patched} end)
   }]}}}' > "$SCAN_GHSA_FILE"
 }
@@ -127,6 +128,61 @@ CASES
 |0
 CASES
   done
+}
+
+@test "vulnerable version ranges decide verdicts before patched versions" {
+  local eco range patched expected
+  for eco in actions pypi npm; do
+    while IFS='|' read -r range patched expected; do
+      ghsa_advisory "$patched" "$range"
+      run_scan "$eco" example 2.0.0
+      [ "$status" -eq 0 ] || { echo "ecosystem=$eco range=$range: scanner failed: $output"; return 1; }
+      printf '%s\n' "$output" | jq -e --argjson n "$expected" \
+        '.filtered_count==$n and .ghsa==(1-$n)' >/dev/null || { echo "ecosystem=$eco range=$range: verdict mismatch"; return 1; }
+    done <<'CASES'
+<= 1.0.0||1
+< 2.0.0||1
+> 2.0.0||1
+>= 1.0.0, < 3.0.0||0
+>= 1.0.0, <= 2.0.0||0
+= 2.0.0||0
+>= 2.0.0|1.0.0|0
+~> 1.0||0
+~> 1.0|1.0.0|1
+CASES
+  done
+}
+
+@test "pypi range bounds zero-pad releases; actions tags stay distinct and bare majors fall back" {
+  local eco target range expected
+  while IFS='|' read -r eco target range expected; do
+    ghsa_advisory '' "$range"
+    run_scan "$eco" example "$target"
+    [ "$status" -eq 0 ] || { echo "ecosystem=$eco target=$target range=$range: scanner failed: $output"; return 1; }
+    printf '%s\n' "$output" | jq -e --argjson n "$expected" \
+      '.filtered_count==$n and .ghsa==(1-$n)' >/dev/null || { echo "ecosystem=$eco target=$target range=$range: verdict mismatch"; return 1; }
+  done <<'CASES'
+pypi|6.0|>= 6.0.0, < 6.0.6|0
+pypi|6.0.0|>= 6.0.0, < 6.0.6|0
+pypi|6.0|= 6.0.0|0
+pypi|6.0.0|< 6.0|1
+pypi|6.0|<= 6.0.0|0
+pypi|6.0.6|>= 6.0.0, < 6.0.6|1
+pypi|6.0.10|< 6.0.6|1
+actions|1.0.0|= 1|1
+actions|1|= 1|0
+actions|5|>= 5.0.0, < 5.0.1|0
+actions|5.0.2|>= 5.0.0, < 5.0.1|1
+CASES
+}
+
+@test "range-filtered advisories without a patch show their range in the historical row" {
+  ghsa_advisory '' '<= 0.23.0'
+  run_scan npm example 0.162.1
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e \
+    '.filtered_count==1 and .ghsa==0 and .verdict[1]=="true"
+     and (.filtered|contains("| none (vulnerable <= 0.23.0) |"))' >/dev/null
 }
 
 @test "npm retains its distinct prefixed patched-version handling" {

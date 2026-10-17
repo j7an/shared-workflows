@@ -474,7 +474,8 @@ dependency-safety.yml fires on pull_request
 
 PR #23 added filtering so that advisories Dependabot has already fixed don't block the PR:
 
-- If GHSA reports `firstPatchedVersion` and the target version is ≥ that value, the advisory is moved into a collapsed `<details>` block labeled "historical advisory/ies (patched at or before target version — not blocking)".
+- If the target version falls outside GHSA's `vulnerableVersionRange`, the advisory is moved into a collapsed `<details>` block labeled "historical advisory/ies (target version outside vulnerable range — not blocking)". This applies even when GHSA reports no patched version.
+- If the range is missing or unparseable, GHSA's `firstPatchedVersion` decides instead: a target version ≥ that value is historical.
 - Only advisories affecting the *target* version count toward the blocking total.
 - When the target version can't be determined (no inline comment and no match in the PR body), the workflow falls back to reporting all advisories for the package — safer default.
 
