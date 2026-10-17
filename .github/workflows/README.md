@@ -848,7 +848,6 @@ jobs:
       url: https://test.pypi.org/p/example-pkg
     permissions:
       id-token: write
-      attestations: write
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
@@ -962,7 +961,6 @@ jobs:
       url: https://pypi.org/p/example-pkg
     permissions:
       id-token: write
-      attestations: write
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
