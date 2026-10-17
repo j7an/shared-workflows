@@ -21,13 +21,18 @@ This file provides repository guidance for AI coding agents working in this repo
 COVERAGE_TEST_VENV=$(mktemp -d)
 python3 -m venv "$COVERAGE_TEST_VENV" && "$COVERAGE_TEST_VENV/bin/python" -m pip install 'diff-cover>=10.2,<11'
 export DIFF_COVER_PATH="$COVERAGE_TEST_VENV/bin/diff-cover"
-bats tests/                                  # run the full test suite
+printf '%s\n' tests/*.bats | xargs -P "$(getconf _NPROCESSORS_ONLN)" -n 1 sh -c 'out=$(bats --formatter tap "$1" 2>&1); rc=$?; [ "$rc" -eq 0 ] && echo "ok   $1" || printf "FAIL %s\n%s\n" "$1" "$out"; exit "$rc"' _   # run the full test suite, one file per core
 bats tests/extract-deps.bats                 # run one test file
 bats tests/extract-deps.bats --filter "name" # run tests whose name matches a substring
 ./scripts/check-inline-sync.sh               # verify embedded inline bash == scripts/*.sh
 ./scripts/lint-workflow-call.sh              # verify workflow_call files use no caller-context refs
 actionlint -shellcheck= -pyflakes= .github/workflows/*.yml # actionlint structural lint
 ```
+
+The full-suite command prints one `ok` line per passing file, or `FAIL <file>`
+followed by that file's TAP output, and exits nonzero if any file fails. Two
+large failures finishing together can rarely interleave; rerun a failing file
+alone with `bats tests/<file>.bats`.
 
 The coverage tests require `DIFF_COVER_PATH` to name an executable from the
 supported `diff-cover >=10.2.0,<11.0` range. Use the temporary venv setup above,
