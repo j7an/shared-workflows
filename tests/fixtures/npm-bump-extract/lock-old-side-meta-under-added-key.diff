@@ -1,0 +1,10 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -449,3 +449,4 @@ packages:
+   lodash@4.17.21:
+     resolution: {integrity: sha512-AAAA==}
++  terser@5.48.0:
++    resolution: {integrity: sha512-CCCC==}
+-    engines: {node: '>=4'}
