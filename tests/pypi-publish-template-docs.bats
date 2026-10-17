@@ -41,7 +41,14 @@ template_job() {
   if printf '%s\n' "$root_permissions" | grep -q 'id-token:'; then return 1; fi
   for job in publish-testpypi publish-pypi; do
     block=$(template_job "$job")
-    printf '%s\n' "$block" | grep -qx '      id-token: write' || return 1
+    # Deliberate exact literal: the permission ceiling is the contract.
+    [ "$(printf '%s\n' "$block" | awk '
+      /^    permissions:$/ { found=1; next }
+      found && /^    [^[:space:]]/ { exit }
+      found { print }
+    ')" = '      id-token: write' ] || {
+      printf '%s publish job must grant only id-token: write\n' "$job" >&2; return 1;
+    }
     printf '%s\n' "$block" | grep -qx '    environment:' || return 1
   done
   for job in build verify-testpypi github-release; do
