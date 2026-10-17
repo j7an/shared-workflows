@@ -124,7 +124,8 @@ set_section() {
   current_section="$1"
   current_disposition=$(section_disposition "$1")
   seen_column0=1
-  tier2_key_prefix=""
+  tier2_old_changed=0
+  tier2_new_changed=0
 }
 
 # base_version <version-string> — strip pnpm's peer-dependency suffix.
@@ -383,7 +384,7 @@ pass1_lock() {
   local section=""
   local declared=""
   local entry_name="" minus_ver="" plus_ver="" spec_changed=0
-  local tier2_key_prefix=""
+  local tier2_old_changed=0 tier2_new_changed=0
   while IFS= read -r line; do
     line="${line%$'\r'}"
     if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
@@ -506,11 +507,19 @@ pass1_lock() {
     fi
 
     if [ "$current_disposition" = "tier2" ]; then
-      # Package-key line. A legitimate version replacement changes the key AND
-      # its metadata on the same side, which is why the side is still recorded.
-      if [[ "$line" =~ ^([+\ -])[[:space:]]+\'?([^\'[:space:]]+)\'?:[[:space:]]*$ ]]; then
-        tier2_key_prefix="${BASH_REMATCH[1]}"
-        if [ "$tier2_key_prefix" = "+" ]; then
+      # Package-key line: exactly pnpm's 2-space package indent. Deeper keys
+      # (peerDependencies:, peerDependenciesMeta children) are metadata.
+      # Each side's metadata belongs to the last key on THAT side, so track
+      # whether the old-side owner (context or `-` key) and the new-side owner
+      # (context or `+` key) changed. git can place a replaced entry's `-`
+      # metadata after its `+` key, so a single last-key side is too strict.
+      if [[ "$line" =~ ^([+\ -])\ \ \'?([^\'[:space:]]+)\'?:[[:space:]]*$ ]]; then
+        case "${BASH_REMATCH[1]}" in
+          -) tier2_old_changed=1 ;;
+          +) tier2_new_changed=1 ;;
+          *) tier2_old_changed=0; tier2_new_changed=0 ;;
+        esac
+        if [ "${BASH_REMATCH[1]}" = "+" ]; then
           if split_package_key "${BASH_REMATCH[2]}"; then
             emit_tier2 "$_pkg_name" "$_pkg_version"
           else
@@ -519,11 +528,12 @@ pass1_lock() {
         fi
         continue
       fi
-      # A changed metadata line is only accounted for when the enclosing
-      # package key changed on the SAME side. Under a CONTEXT key it means the
-      # version did not move but its tarball did. Fail closed.
+      # A changed metadata line is only accounted for when its owning package
+      # key on the same side changed. Under a CONTEXT key it means the version
+      # did not move but its tarball did. Fail closed.
       if [[ "$line" =~ ^([+-]) ]]; then
-        if [ "${BASH_REMATCH[1]}" != "$tier2_key_prefix" ]; then
+        if { [ "${BASH_REMATCH[1]}" = "-" ] && [ "$tier2_old_changed" -eq 0 ]; } \
+           || { [ "${BASH_REMATCH[1]}" = "+" ] && [ "$tier2_new_changed" -eq 0 ]; }; then
           disqualify_lock "changed metadata for an unchanged package version under packages:: ${line}"
         fi
       fi

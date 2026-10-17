@@ -99,6 +99,12 @@ assert_disqualified() {
   assert_disqualified tests/fixtures/npm-bump-extract/lock-integrity-only.diff
 }
 
+@test "removed metadata under an unchanged key disqualifies after an added key" {
+  # The removed engines line belongs to lodash@4.17.21 on the old side, even
+  # though it follows the added terser key. Only a removed key may own it.
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-old-side-meta-under-added-key.diff
+}
+
 @test "settings change disqualifies" {
   assert_disqualified tests/fixtures/npm-bump-extract/lock-settings-change.diff
 }
@@ -229,4 +235,21 @@ assert_disqualified() {
   run_fixture cleared-paths tests/fixtures/npm-bump-extract/real-lockfile-only.diff
   [ "$status" -eq 0 ]
   [ "$output" = "pnpm-lock.yaml" ]
+}
+
+@test "version bump that changes peerDependencies: rows extracted, both paths cleared" {
+  # From j7an/superpowers-manager#192: git interleaves openai@6.40.0's removed
+  # peer lines after the added openai@7.19.0 key, and the new nested
+  # peerDependenciesMeta keys must not be read as package keys.
+  run_fixture deps tests/fixtures/npm-bump-extract/real-peer-deps-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '@earendil-works/pi-coding-agent\t1.1.0\tnpm')" ]
+
+  run_fixture lockfile-entries tests/fixtures/npm-bump-extract/real-peer-deps-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '@earendil-works/pi-coding-agent\t1.1.0\tnpm\nopenai\t7.19.0\tnpm')" ]
+
+  run_fixture cleared-paths tests/fixtures/npm-bump-extract/real-peer-deps-bump.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'tests/container/package.json\ntests/container/pnpm-lock.yaml')" ]
 }
