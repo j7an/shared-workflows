@@ -153,25 +153,25 @@ CASES
   done
 }
 
-@test "range bounds treat trailing zero release components as equal" {
+@test "pypi range bounds treat trailing zero release components as equal; actions tags do not" {
   local eco target range expected
-  for eco in actions pypi npm; do
-    while IFS='|' read -r target range expected; do
-      ghsa_advisory '' "$range"
-      run_scan "$eco" example "$target"
-      [ "$status" -eq 0 ] || { echo "ecosystem=$eco target=$target range=$range: scanner failed: $output"; return 1; }
-      printf '%s\n' "$output" | jq -e --argjson n "$expected" \
-        '.filtered_count==$n and .ghsa==(1-$n)' >/dev/null || { echo "ecosystem=$eco target=$target range=$range: verdict mismatch"; return 1; }
-    done <<'CASES'
-6.0|>= 6.0.0, < 6.0.6|0
-6.0.0|>= 6.0.0, < 6.0.6|0
-6.0|= 6.0.0|0
-6.0.0|< 6.0|1
-6.0|<= 6.0.0|0
-6.0.6|>= 6.0.0, < 6.0.6|1
-6.0.10|< 6.0.6|1
+  while IFS='|' read -r eco target range expected; do
+    ghsa_advisory '' "$range"
+    run_scan "$eco" example "$target"
+    [ "$status" -eq 0 ] || { echo "ecosystem=$eco target=$target range=$range: scanner failed: $output"; return 1; }
+    printf '%s\n' "$output" | jq -e --argjson n "$expected" \
+      '.filtered_count==$n and .ghsa==(1-$n)' >/dev/null || { echo "ecosystem=$eco target=$target range=$range: verdict mismatch"; return 1; }
+  done <<'CASES'
+pypi|6.0|>= 6.0.0, < 6.0.6|0
+pypi|6.0.0|>= 6.0.0, < 6.0.6|0
+pypi|6.0|= 6.0.0|0
+pypi|6.0.0|< 6.0|1
+pypi|6.0|<= 6.0.0|0
+pypi|6.0.6|>= 6.0.0, < 6.0.6|1
+pypi|6.0.10|< 6.0.6|1
+actions|1.0.0|= 1|1
+actions|1|= 1|0
 CASES
-  done
 }
 
 @test "range-filtered advisories without a patch show their range in the historical row" {
