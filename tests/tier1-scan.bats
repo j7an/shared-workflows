@@ -223,6 +223,34 @@ CASES
     '.errors==1 and .verdict[0]=="error" and (.rows|contains("fixture failure"))' >/dev/null
 }
 
+@test "GHSA pages are all classified in targeted and whole-package scans" {
+  local eco version
+  ghsa_advisory ''
+  jq -c '.data.securityVulnerabilities.nodes[0].advisory.ghsaId="GHSA-page1"' "$SCAN_GHSA_FILE" > "$BATS_TEST_TMPDIR/p1"
+  jq -c '.data.securityVulnerabilities.nodes[0].advisory.ghsaId="GHSA-page2"' "$SCAN_GHSA_FILE" > "$BATS_TEST_TMPDIR/p2"
+  cat "$BATS_TEST_TMPDIR/p1" "$BATS_TEST_TMPDIR/p2" > "$SCAN_GHSA_FILE"
+  for eco in actions pypi npm; do
+    for version in '' 2.0.0; do
+      : > "$SCAN_GH_ARGS"
+      run_scan "$eco" example "$version"
+      [ "$status" -eq 0 ] || { echo "ecosystem=$eco version=${version:-none}: scanner failed: $output"; return 1; }
+      printf '%s\n' "$output" | jq -e '.ghsa==2 and (.rows|contains("GHSA-page2")) and .errors==0' >/dev/null || { echo "ecosystem=$eco version=${version:-none}: page-2 advisory not counted"; return 1; }
+      grep -qx -- --paginate "$SCAN_GH_ARGS" || { echo "ecosystem=$eco: --paginate not passed"; return 1; }
+      grep -qF 'after: $endCursor' "$SCAN_GH_ARGS" || { echo "ecosystem=$eco: query lacks endCursor"; return 1; }
+    done
+  done
+}
+
+@test "GraphQL errors on any GHSA page become scan errors" {
+  { printf '%s\n' '{"errors":[{"message":"page one failure"}]}'
+    printf '%s\n' '{"data":{"securityVulnerabilities":{"nodes":[]}}}'
+  } > "$SCAN_GHSA_FILE"
+  run_scan pypi example 2.0.0
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e \
+    '.errors==1 and .verdict[0]=="error" and (.rows|contains("GHSA error for `example`: page one failure) |"))' >/dev/null
+}
+
 @test "a handled first dependency failure does not skip the next dependency" {
   export SCAN_FAIL_FIRST=true SCAN_SECOND=true
   run_scan pypi first 2.0.0
