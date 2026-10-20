@@ -52,6 +52,12 @@ MATRIX_PINS='.jobs.bump.strategy.matrix.include[] | .key as $k | .files[] | $k +
   [ "$(yq -o=json -I=0 '[.jobs.bump.steps[] | select(.id == "app-token")][0].with["permission-workflows"]' "$WORKFLOW")" = '"write"' ]
 }
 
+@test "App key comes from the tool-pin-bump environment" {
+  # Exact literal is the contract: the key is an environment secret, and
+  # no deployment record is wanted for a scheduled updater.
+  [ "$(yq -o=json -I=0 '.jobs.bump.environment' "$WORKFLOW")" = '{"name":"tool-pin-bump","deployment":false}' ]
+}
+
 @test "bump step fails on API errors" {
   # bump must use explicit bash for pipefail.
   [ "$(yq -o=json -I=0 '[.jobs.bump.steps[] | select(.id == "bump")][0].shell' "$WORKFLOW")" = '"bash"' ]

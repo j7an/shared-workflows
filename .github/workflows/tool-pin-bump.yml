@@ -14,6 +14,11 @@ jobs:
   bump:
     name: Bump ${{ matrix.name }}
     runs-on: ubuntu-latest
+    # RELEASE_BOT_PRIVATE_KEY is an environment secret; this environment
+    # limits it to main without the release environment's manual approval.
+    environment:
+      name: tool-pin-bump
+      deployment: false
     permissions:
       contents: read
     strategy:
