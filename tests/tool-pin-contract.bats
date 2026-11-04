@@ -97,8 +97,12 @@ prepare_bump_step() {
   for file in security-scan security; do
     sed -E "s#(zizmorcore/zizmor-action@)[0-9a-f]+#\1$OLD_REF#; s@version: \"[0-9]+[.][0-9]+[.][0-9]+\"@version: \"1.0.0\"@" "$root/.github/workflows/$file.yml" > "$BATS_TEST_TMPDIR/$file.yml"
   done
-  printf 'latest digest\n2.0.0 digest\n' > "$API_FIXTURES/$OLD_REF"
-  printf 'latest digest\n2.0.0 digest\n3.0.0 digest\n' > "$API_FIXTURES/$NEW_REF"
+  cat > "$API_FIXTURES/$OLD_REF" <<'JSON'
+[{"name":"zizmor-2.0.0.txt"},{"name":"zizmor-3.0.0rc1.txt"},{"name":"zizmor-latest.txt"},{"name":"zizmor-prerelease.txt"}]
+JSON
+  cat > "$API_FIXTURES/$NEW_REF" <<'JSON'
+[{"name":"zizmor-2.0.0.txt"},{"name":"zizmor-3.0.0.txt"},{"name":"zizmor-latest.txt"},{"name":"zizmor-prerelease.txt"}]
+JSON
   cat > "$API_FIXTURES/releases" <<'JSON'
 [{"tag_name":"v3.0.0","published_at":"2020-01-01T00:00:00Z"},{"tag_name":"2.0.0","published_at":"2020-01-01T00:00:00Z"}]
 JSON
@@ -108,7 +112,7 @@ set -eu
 printf '%s\n' "$*" >> "$API_FIXTURES/calls"
 case "$*" in
   *'/releases?per_page=100') cat "$API_FIXTURES/releases" ;;
-  *'Accept: application/vnd.github.raw+json'*'/contents/support/versions?ref='*)
+  *'/contents/support/locks?ref='*)
     ref=${*: -1}
     cat "$API_FIXTURES/${ref##*ref=}" ;;
   *) exit 91 ;;
@@ -147,8 +151,8 @@ SH
   run bash -e -o pipefail bump.sh
   [ "$status" -eq 0 ]
   grep -q '^new=2.0.0$' "$GITHUB_OUTPUT"
-  grep -q "support/versions[?]ref=$OLD_REF" "$API_FIXTURES/calls"
-  grep -q "support/versions[?]ref=$NEW_REF" "$API_FIXTURES/calls"
+  grep -q "support/locks[?]ref=$OLD_REF" "$API_FIXTURES/calls"
+  grep -q "support/locks[?]ref=$NEW_REF" "$API_FIXTURES/calls"
 }
 
 @test "zizmor support fetch failure precedes edits and outputs" {
@@ -163,6 +167,34 @@ SH
   [ ! -s "$GITHUB_OUTPUT" ]
 }
 
+@test "zizmor stops when the support listing has no stable versions" {
+  prepare_bump_step
+  cat > "$API_FIXTURES/$OLD_REF" <<'JSON'
+[{"name":"zizmor-2.0.0rc1.txt"},{"name":"zizmor-latest.txt"},{"name":"zizmor-prerelease.txt"}]
+JSON
+  cp security-scan.yml before-scan.yml
+  cp security.yml before.yml
+  run bash -e -o pipefail bump.sh
+  [ "$status" -ne 0 ]
+  cmp security.yml before.yml
+  cmp security-scan.yml before-scan.yml
+  [ ! -s "$GITHUB_OUTPUT" ]
+  grep -q "support/locks[?]ref=$OLD_REF" "$API_FIXTURES/calls"
+}
+
+@test "zizmor stops when the support listing is not an array" {
+  prepare_bump_step
+  printf '{"message":"Not Found","status":"404"}' > "$API_FIXTURES/$OLD_REF"
+  cp security-scan.yml before-scan.yml
+  cp security.yml before.yml
+  run bash -e -o pipefail bump.sh
+  [ "$status" -ne 0 ]
+  cmp security.yml before.yml
+  cmp security-scan.yml before-scan.yml
+  [ ! -s "$GITHUB_OUTPUT" ]
+  grep -q "support/locks[?]ref=$OLD_REF" "$API_FIXTURES/calls"
+}
+
 @test "zizmor rejects unpinned action refs before fetching support" {
   prepare_bump_step
   sed "s/$OLD_REF/main/" security.yml > updated.yml
@@ -172,7 +204,7 @@ SH
   [ "$status" -ne 0 ]
   cmp security.yml before.yml
   [ ! -s "$GITHUB_OUTPUT" ]
-  ! grep -q 'support/versions' "$API_FIXTURES/calls"
+  ! grep -q 'support/locks' "$API_FIXTURES/calls"
 }
 
 @test "non-zizmor release selection is unaffected by action support" {
@@ -181,7 +213,7 @@ SH
   run bash -e -o pipefail bump.sh
   [ "$status" -eq 0 ]
   grep -q '^new=3.0.0$' "$GITHUB_OUTPUT"
-  ! grep -q 'support/versions' "$API_FIXTURES/calls"
+  ! grep -q 'support/locks' "$API_FIXTURES/calls"
 }
 
 @test "README documents intentional tool floats and their controls" {

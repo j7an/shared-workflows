@@ -78,8 +78,9 @@ jobs:
               refs="$refs $ref"
             done
             for ref in $refs; do
-              table=$(gh api -H 'Accept: application/vnd.github.raw+json' "repos/zizmorcore/zizmor-action/contents/support/versions?ref=$ref")
-              supported=$(printf '%s\n' "$table" | awk '$1 ~ /^[0-9]+[.][0-9]+[.][0-9]+$/ { print $1 }' | jq -Rsc 'split("\n") | map(select(length > 0))')
+              # ponytail: the Contents API lists at most 1,000 files per directory; use the Git Trees API if support/locks approaches that.
+              locks=$(gh api "repos/zizmorcore/zizmor-action/contents/support/locks?ref=$ref")
+              supported=$(printf '%s' "$locks" | jq -c '[.[].name | capture("^zizmor-(?<v>[0-9]+[.][0-9]+[.][0-9]+)[.]txt$").v]')
               printf '%s' "$supported" | jq -e 'length > 0' >/dev/null
               releases=$(printf '%s' "$releases" | jq --argjson supported "$supported" '
                 if type != "array" then error("Expected releases array") else
