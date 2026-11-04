@@ -1,0 +1,14 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -100,6 +100,10 @@ packages:
+   a-pkg@1.0.0:
+     resolution: {integrity: sha512-AAAA==}
+ 
++  new-pkg@2.0.0:
++    resolution: {integrity: sha512-NEWW==}
++    deprecated: Already deprecated.
++
+   next-pkg@1.0.0:
+     resolution: {integrity: sha512-BBBB==}

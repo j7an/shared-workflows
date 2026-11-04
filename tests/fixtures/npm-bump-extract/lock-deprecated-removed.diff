@@ -1,0 +1,12 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -670,7 +670,6 @@ packages:
+   '@smithy/core@3.34.1':
+     resolution: {integrity: sha512-AAAA==}
+     engines: {node: '>=18.0.0'}
+-    deprecated: No longer maintained.
+ 
+   next-pkg@1.0.0:
+     resolution: {integrity: sha512-BBBB==}

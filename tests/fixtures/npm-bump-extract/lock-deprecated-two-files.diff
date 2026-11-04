@@ -1,0 +1,19 @@
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 1111111..2222222 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -100,4 +100,5 @@ packages:
+   a-pkg@1.0.0:
+     resolution: {integrity: sha512-AAAA==}
++    deprecated: First file.
+ 
+diff --git a/sub/pnpm-lock.yaml b/sub/pnpm-lock.yaml
+index 3333333..4444444 100644
+--- a/sub/pnpm-lock.yaml
++++ b/sub/pnpm-lock.yaml
+@@ -200,6 +200,7 @@ packages:
+     resolution: {integrity: sha512-CCCC==}
+     engines: {node: '>=4.0'}
+     os: [darwin]
++    deprecated: Second file.
+ 
