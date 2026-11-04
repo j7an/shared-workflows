@@ -963,15 +963,20 @@ jobs:
           #
           # Owns all npm-ecosystem diff semantics for the dependency-safety workflow.
           # Emits tier-1 declared dependency rows (mode=deps), tier-2 newly introduced
-          # lockfile versions (mode=lockfile-entries), or the paths it proved parseable
-          # (mode=cleared-paths). Files with any unrecognized changed line are
+          # lockfile versions (mode=lockfile-entries), the paths it proved parseable
+          # (mode=cleared-paths), or packages gaining a deprecated: line
+          # (mode=deprecated). Files with any unrecognized changed line are
           # disqualified and left unsupported so the fail-loud guard fires.
           #
           # Input:  unified diff on stdin
-          # Flag:   --mode=deps | --mode=lockfile-entries | --mode=cleared-paths (exactly one)
+          # Flag:   --mode=deps | --mode=lockfile-entries | --mode=cleared-paths | --mode=deprecated (exactly one)
           # Output (deps):             TSV <name>\t<version>\tnpm, sorted by name, deduped
           # Output (lockfile-entries): TSV <name>\t<version>\tnpm, sorted by name, deduped
           # Output (cleared-paths):    newline-delimited paths, sorted, deduped
+          # Output (deprecated):       TSV <name>\t<version>, sorted, deduped, then one final
+          #                            \t<count> line when any added deprecated: line had no
+          #                            package key in the diff. The empty first field cannot
+          #                            be forged: split_package_key rejects an empty name.
           # Exit:   0 on success (possibly zero rows)
           #         2 on malformed input, missing --mode, repeated --mode, unknown argument
           #
@@ -997,7 +1002,7 @@ jobs:
           MODE=""
           for arg in "$@"; do
             case "$arg" in
-              --mode=deps|--mode=lockfile-entries|--mode=cleared-paths)
+              --mode=deps|--mode=lockfile-entries|--mode=cleared-paths|--mode=deprecated)
                 if [ -n "$MODE" ]; then
                   echo "npm-bump-extract.sh: --mode specified more than once" >&2
                   exit 2
@@ -1012,7 +1017,7 @@ jobs:
           done
 
           if [ -z "$MODE" ]; then
-            echo "npm-bump-extract.sh: --mode=deps, --mode=lockfile-entries, or --mode=cleared-paths required" >&2
+            echo "npm-bump-extract.sh: --mode=deps, --mode=lockfile-entries, --mode=cleared-paths, or --mode=deprecated required" >&2
             exit 2
           fi
 
@@ -1051,6 +1056,9 @@ jobs:
           corroborate=$'\n'              # "\n<name>\n" for names whose lock entry changed
           seen_tier1=$'\n'
           seen_tier2=$'\n'
+          deprecated_rows=()
+          seen_deprecated=$'\n'
+          deprecated_unnamed=0
 
           # disqualify_lock <reason> — mark the lockfile unusable and explain why.
           disqualify_lock() {
@@ -1141,6 +1149,20 @@ jobs:
             esac
             seen_tier2="${seen_tier2}${key}"$'\n'
             tier2_rows+=("$1"$'\t'"$2"$'\t'"npm")
+          }
+
+          # note_deprecated <'name\tversion' or empty> — record an added deprecated: line.
+          # An empty owner means the package key is outside the diff's context lines.
+          note_deprecated() {
+            if [ -z "$1" ]; then
+              deprecated_unnamed=$((deprecated_unnamed + 1))
+              return 0
+            fi
+            case "$seen_deprecated" in
+              *$'\n'"$1"$'\n'*) return 0 ;;
+            esac
+            seen_deprecated="${seen_deprecated}${1}"$'\n'
+            deprecated_rows+=("$1")
           }
 
           # split_package_key <'name@version'> — sets _pkg_name and _pkg_version.
@@ -1345,6 +1367,7 @@ jobs:
             local declared=""
             local entry_name="" minus_ver="" plus_ver="" spec_changed=0
             local tier2_old_changed=0 tier2_new_changed=0
+            local tier2_new_owner=""
             while IFS= read -r line; do
               line="${line%$'\r'}"
               if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
@@ -1369,6 +1392,14 @@ jobs:
               [[ "$line" == +++* ]] && continue
               [[ "$line" == ---[[:space:]]* ]] && continue
 
+              # A lone CR is a YAML line break, so one changed diff line could carry a
+              # second key this parser never examined. Only the trailing CR stripped above
+              # is a line ending.
+              if [[ "$line" == [+-]*$'\r'* ]]; then
+                disqualify_lock "changed line contains a carriage return: ${line}"
+                continue
+              fi
+
               # A document separator means sections may repeat, which the completeness
               # reasoning does not cover. Distinguished from the diff's own file header
               # (`--- a/path`), which always carries a path after the marker.
@@ -1381,6 +1412,9 @@ jobs:
               # the nearest column-0 line, which for pnpm-lock.yaml is a section name.
               # Verified across 1004 hunk headers in three real Dependabot PRs.
               if [[ "$line" =~ ^@@ ]]; then
+                # Reset here rather than in set_section: a hunk header can carry no
+                # section text, and a stale owner would name the wrong package.
+                tier2_new_owner=""
                 # Take the section from the text AFTER the closing "@@" only.
                 # `${line##*@@ }` is WRONG here: on a whole-file-add header
                 # `@@ -0,0 +1,8 @@` the closing "@@" has no trailing space, so the glob
@@ -1479,12 +1513,29 @@ jobs:
                     +) tier2_new_changed=1 ;;
                     *) tier2_old_changed=0; tier2_new_changed=0 ;;
                   esac
+                  if [ "${BASH_REMATCH[1]}" != "-" ]; then
+                    if split_package_key "${BASH_REMATCH[2]}"; then
+                      tier2_new_owner="$_pkg_name"$'\t'"$_pkg_version"
+                    else
+                      tier2_new_owner=""
+                    fi
+                  fi
                   if [ "${BASH_REMATCH[1]}" = "+" ]; then
                     if split_package_key "${BASH_REMATCH[2]}"; then
                       emit_tier2 "$_pkg_name" "$_pkg_version"
                     else
                       disqualify_lock "unparseable package key under packages:: ${BASH_REMATCH[2]}"
                     fi
+                  fi
+                  continue
+                fi
+                # A deprecated: line does not move the tarball, so it is exempt under any
+                # key. Safe because a changed resolution is its own changed line, which
+                # still disqualifies below. Exactly 4 spaces: a peer dependency named
+                # `deprecated` sits deeper and must still fail closed.
+                if [[ "$line" =~ ^([+-])\ \ \ \ deprecated:[[:space:]] ]]; then
+                  if [ "${BASH_REMATCH[1]}" = "+" ]; then
+                    note_deprecated "$tier2_new_owner"
                   fi
                   continue
                 fi
@@ -1539,6 +1590,16 @@ jobs:
             lockfile-entries)
               if [ "$lock_verdict" = "clean" ] && [ ${#tier2_rows[@]} -gt 0 ]; then
                 printf '%s\n' "${tier2_rows[@]}" | sort -u
+              fi
+              ;;
+            deprecated)
+              if [ "$lock_verdict" = "clean" ]; then
+                if [ ${#deprecated_rows[@]} -gt 0 ]; then
+                  printf '%s\n' "${deprecated_rows[@]}" | sort -u
+                fi
+                if [ "$deprecated_unnamed" -gt 0 ]; then
+                  printf '\t%s\n' "$deprecated_unnamed"
+                fi
               fi
               ;;
             cleared-paths)
@@ -2051,7 +2112,25 @@ jobs:
           TOUCHED_PATHS=$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)
           BASE_UNSUPPORTED=$(printf '%s\n' "$TOUCHED_PATHS" | classify_touched_paths 2>/dev/null || true)
           CLEARED_PYPROJECT=$(printf '%s' "$DIFF" | pyproject_bump_extract --mode=cleared-paths --head-dir="$PYPROJECT_HEAD_DIR" 2>/dev/null || true)
-          CLEARED_NPM=$(printf '%s' "$DIFF" | npm_bump_extract --mode=cleared-paths 2>/dev/null || true)
+          # Keep the parser's reasons instead of discarding them: they tell a reviewer
+          # why a lockfile was rejected. Each line starts with the fixed script
+          # prefix and has its CRs removed, because the runner treats a lone CR as a
+          # line break, so PR-supplied text cannot start a log line and act as a
+          # workflow command. The first reason goes in the PR comment as inline code
+          # with backticks removed, which keeps PR-supplied text inert.
+          npm_reasons_file=$(mktemp "${RUNNER_TEMP:-/tmp}/npm-reasons.XXXXXX")
+          CLEARED_NPM=$(printf '%s' "$DIFF" | npm_bump_extract --mode=cleared-paths 2>"$npm_reasons_file" || true)
+          NPM_REJECTION=""
+          if [ -s "$npm_reasons_file" ]; then
+            echo "npm-bump-extract rejection reasons:"
+            tr -d '\r' < "$npm_reasons_file"
+            NPM_REJECTION="\`$(head -n 1 "$npm_reasons_file" | sed 's/^npm-bump-extract\.sh: //' | tr -d '`\r' | cut -c1-300)\`"
+            npm_reason_count=$(wc -l < "$npm_reasons_file" | tr -d ' ')
+            if [ "$npm_reason_count" -gt 1 ]; then
+              NPM_REJECTION="${NPM_REJECTION} (+$((npm_reason_count - 1)) more, see workflow log)"
+            fi
+          fi
+          rm -f "$npm_reasons_file"
           CLEARED_ALL=$(printf '%s\n%s\n' "$CLEARED_PYPROJECT" "$CLEARED_NPM" | sed '/^$/d' | sort -u)
 
           # Subtract cleared paths from BOTH the unsupported set and the touched
@@ -2112,6 +2191,16 @@ jobs:
             GUARD_TRIGGERED=true
             UNSUPPORTED_LIST=$(echo "$UNSUPPORTED_PATHS" | paste -sd, -)
             EXTRACTION_WARNING="⚠️ Diff touches dependency files the parser does not support (${UNSUPPORTED_LIST}). Manual review required; the dependency-safety gate cannot scan these."
+            # npm paths the parser rejected are supported files, so report the
+            # parser's reason for them. Anything else really is unsupported.
+            NPM_PATHS=$(printf '%s\n' "$UNSUPPORTED_PATHS" | grep -E '(^|/)(package\.json|pnpm-lock\.yaml)$' || true)
+            if [ -n "${NPM_REJECTION:-}" ] && [ -n "$NPM_PATHS" ]; then
+              EXTRACTION_WARNING="⚠️ Dependency parser rejected this diff: ${NPM_REJECTION}. Manual review required; the dependency-safety gate cannot scan these files."
+              OTHER_LIST=$(printf '%s\n' "$UNSUPPORTED_PATHS" | grep -vE '(^|/)(package\.json|pnpm-lock\.yaml)$' | paste -sd, - || true)
+              if [ -n "$OTHER_LIST" ]; then
+                EXTRACTION_WARNING="${EXTRACTION_WARNING} Also touches dependency files the parser does not support (${OTHER_LIST})."
+              fi
+            fi
           elif [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ] && [ -n "$EFFECTIVE_TOUCHED" ]; then
             GUARD_TRIGGERED=true
             TOUCHED_LIST=$(echo "$EFFECTIVE_TOUCHED" | paste -sd, -)
@@ -2548,6 +2637,26 @@ jobs:
           fi
           # --- END tier-2 sweep ---
 
+          # --- BEGIN deprecated section ---
+          # Informational only: a listed package never affects the verdict. Package
+          # names come from the PR's lockfile, so backticks are removed to keep them
+          # inside their inline code.
+          DEPRECATED_SECTION=""
+          DEPRECATED_TSV=$(printf '%s' "$DIFF" | npm_bump_extract --mode=deprecated 2>/dev/null || true)
+          if [ -n "$DEPRECATED_TSV" ]; then
+            DEPRECATED_LIST=$(printf '%s\n' "$DEPRECATED_TSV" | awk -F'\t' '$1 != "" { gsub(/`/, "", $1); gsub(/`/, "", $2); printf "- `%s@%s`\n", $1, $2 }')
+            DEPRECATED_HIDDEN=$(printf '%s\n' "$DEPRECATED_TSV" | awk -F'\t' '$1 == "" { print $2 }')
+            if [ -n "$DEPRECATED_HIDDEN" ]; then
+              if [ -n "$DEPRECATED_LIST" ]; then
+                DEPRECATED_LIST="${DEPRECATED_LIST}"$'\n'"- ${DEPRECATED_HIDDEN} more, see the lockfile diff"
+              else
+                DEPRECATED_LIST="- ${DEPRECATED_HIDDEN} package(s), see the lockfile diff"
+              fi
+            fi
+            DEPRECATED_SECTION=$(printf '\n### Deprecated packages\n\nDeprecated upstream. Shown for review; this does not affect the gate.\n\n%s\n' "$DEPRECATED_LIST")
+          fi
+          # --- END deprecated section ---
+
           # --- OpenSSF Scorecard (GitHub Actions only) ---
           SCORECARD_TABLE=""
           if [[ "$ENABLE_SCORECARD" == "true" ]]; then
@@ -2883,7 +2992,7 @@ jobs:
             EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
           fi
 
-          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s' \
+          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s%s' \
             "## Dependency Safety Scan" \
             "$EXTRACTION_WARNING_SECTION" \
             "**Packages scanned:** ${DEPS}" \
@@ -2894,6 +3003,7 @@ jobs:
             "$HISTORICAL_SECTION" \
             "$RELEASE_AGE_SECTION" \
             "$TIER2_SECTION" \
+            "$DEPRECATED_SECTION" \
             "$SCORECARD_SECTION")"
 
           # --- Comment management: update-or-create with change detection ---

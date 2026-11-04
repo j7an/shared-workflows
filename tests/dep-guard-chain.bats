@@ -209,6 +209,7 @@ run_npm_chain() {
     printf 'UNSUP=[%s]\n' \"\$UNSUPPORTED_PATHS\"
     printf 'EFF=[%s]\n'   \"\$EFFECTIVE_TOUCHED\"
     printf 'HINT=[%s]\n'  \"\${ECO_HINT:-}\"
+    printf 'REJECTION=[%s]\n' \"\$NPM_REJECTION\"
   "
 }
 # ECO_HINT is printed through ${ECO_HINT:-} on purpose: the workflow only
@@ -644,4 +645,116 @@ age_tsv() {
   eval "$(extract_named_block "$WF" 'release age section')"
   [[ "$AGE_FOOTER" == *'2026-04-06'* ]] || return 1
   [[ "$AGE_FOOTER" != *'2026-09-06'* ]] || return 1
+}
+
+# --- npm rejection reason (issue #205) ---------------------------------------
+
+@test "chain: rejected lockfile reports first reason and logs all of them" {
+  run_npm_chain "$NPMFX/lock-integrity-only.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'REJECTION=[`pnpm-lock.yaml: changed metadata for an unchanged package version under packages:: -    resolution: {integrity: sha512-AAAA==}` (+1 more, see workflow log)]'* ]] || return 1
+  [[ "$output" == *'sha512-EVIL=='* ]] || return 1
+}
+
+@test "chain: deprecated-only lockfile clears with no rejection and an empty touched set" {
+  run_npm_chain "$NPMFX/lock-deprecated-only-hidden.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REJECTION=[]"* ]] || return 1
+  [[ "$output" == *"UNSUP=[]"* ]] || return 1
+  [[ "$output" == *"EFF=[]"* ]] || return 1
+}
+
+@test "chain: PR-supplied Markdown in a reason stays inside one code span" {
+  run_npm_chain "$NPMFX/lock-reason-markdown.diff"
+  [ "$status" -eq 0 ]
+  local r; r=$(printf '%s\n' "$output" | grep '^REJECTION=')
+  [[ "$r" == *'![p](https://example.invalid/i.png)'* ]] || return 1
+  local ticks="${r//[^\`]/}"
+  [ "${#ticks}" -eq 2 ]
+}
+
+@test "chain: a very long rejected line is capped in the comment but not the log" {
+  local long; long=$(printf 'x%.0s' {1..500})
+  cat > "$BATS_TEST_TMPDIR/long.diff" <<EOF
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -1,2 +1,3 @@ packages:
+   a-pkg@1.0.0:
++    engines: {node: '$long'}
+EOF
+  run_npm_chain "$BATS_TEST_TMPDIR/long.diff"
+  [ "$status" -eq 0 ]
+  local r; r=$(printf '%s\n' "$output" | grep '^REJECTION=')
+  [[ "$r" != *"$long"* ]] || return 1
+  [ "${#r}" -le 315 ]
+  [[ "$output" == *"$long"* ]] || return 1
+}
+
+# --- deprecated section (issue #205) -----------------------------------------
+
+# $1 = fixture diff. `set -u` makes the driver self-checking, as run_npm_chain does.
+run_deprecated_section() {
+  local fixture="$1"
+  local block; block=$(extract_named_block "$WF" "deprecated section")
+  run bash -c "
+    set -uo pipefail
+    npm_bump_extract() { bash scripts/npm-bump-extract.sh \"\$@\"; }
+    DIFF=\$(cat '$fixture')
+    $block
+    printf 'SECTION<<%s>>\n' \"\$DEPRECATED_SECTION\"
+  "
+}
+
+@test "deprecated section block extracts non-empty from the workflow" {
+  local block; block=$(extract_named_block "$WF" "deprecated section")
+  [ -n "$block" ]
+}
+
+@test "deprecated section names the package and states it does not affect the gate" {
+  run_deprecated_section "$NPMFX/real-deprecated-added.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"### Deprecated packages"* ]] || return 1
+  [[ "$output" == *"this does not affect the gate"* ]] || return 1
+  [[ "$output" == *'- `@smithy/core@3.34.1`'* ]] || return 1
+}
+
+@test "deprecated section adds a count for hidden names" {
+  run_deprecated_section "$NPMFX/lock-deprecated-hidden-key.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'- `a-pkg@1.0.0`'* ]] || return 1
+  [[ "$output" == *"- 1 more, see the lockfile diff"* ]] || return 1
+}
+
+@test "deprecated section with only hidden names does not say more" {
+  run_deprecated_section "$NPMFX/lock-deprecated-only-hidden.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"- 1 package(s), see the lockfile diff"* ]] || return 1
+  [[ "$output" != *"more"* ]] || return 1
+}
+
+@test "deprecated section strips backticks from package names" {
+  run_deprecated_section "$NPMFX/lock-deprecated-backtick-key.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'- `ab@1.0.0`'* ]] || return 1
+}
+
+@test "deprecated section is empty when nothing was added or the lockfile was rejected" {
+  run_deprecated_section "$NPMFX/lock-deprecated-removed.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SECTION<<>>"* ]] || return 1
+  run_deprecated_section "$NPMFX/lock-deprecated-with-resolution.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SECTION<<>>"* ]] || return 1
+}
+
+@test "chain: a carriage return in a rejected line cannot start a log line" {
+  # The Actions runner treats a lone CR as a line break, so a CR followed by
+  # `::` in the log could act as a workflow command.
+  printf 'diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -1,3 +1,3 @@\n {\n+  "engines": {}\r::error::injected\n }\n' \
+    > "$BATS_TEST_TMPDIR/cr-manifest.diff"
+  run_npm_chain "$BATS_TEST_TMPDIR/cr-manifest.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"::error::injected"* ]] || return 1
+  [[ "$output" != *$'\r'* ]] || return 1
 }

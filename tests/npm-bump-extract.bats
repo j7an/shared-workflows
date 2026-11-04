@@ -72,7 +72,7 @@ run_fixture() {
 # suppressed. Verified on bats 1.14.0; --separate-stderr exists since 1.5.0.
 assert_disqualified() {
   local fixture="$1"
-  for mode in deps lockfile-entries cleared-paths; do
+  for mode in deps lockfile-entries cleared-paths deprecated; do
     run --separate-stderr bash scripts/npm-bump-extract.sh "--mode=$mode" < "$fixture"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -252,4 +252,90 @@ assert_disqualified() {
   run_fixture cleared-paths tests/fixtures/npm-bump-extract/real-peer-deps-bump.diff
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'tests/container/package.json\ntests/container/pnpm-lock.yaml')" ]
+}
+
+# --- deprecated: metadata (issue #205) -------------------------------------
+
+@test "deprecated added: real pi-kit#53 diff clears, scans, and lists the package" {
+  local f=tests/fixtures/npm-bump-extract/real-deprecated-added.diff
+  run_fixture cleared-paths "$f"
+  [ "$output" = "$(printf 'package.json\npnpm-lock.yaml')" ]
+  run_fixture deps "$f"
+  [ "$output" = "$(printf '@earendil-works/pi-coding-agent\t1.4.0\tnpm\n@earendil-works/pi-tui\t1.4.0\tnpm')" ]
+  run_fixture lockfile-entries "$f"
+  [ "${#lines[@]}" -eq 8 ]
+  run_fixture deprecated "$f"
+  [ "$output" = "$(printf '@smithy/core\t3.34.1')" ]
+}
+
+@test "deprecated removed: clears and lists nothing" {
+  run_fixture cleared-paths tests/fixtures/npm-bump-extract/lock-deprecated-removed.diff
+  [ "$output" = "pnpm-lock.yaml" ]
+  run_fixture deprecated tests/fixtures/npm-bump-extract/lock-deprecated-removed.diff
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "deprecated reworded: clears and lists the package" {
+  run_fixture cleared-paths tests/fixtures/npm-bump-extract/lock-deprecated-reworded.diff
+  [ "$output" = "pnpm-lock.yaml" ]
+  run_fixture deprecated tests/fixtures/npm-bump-extract/lock-deprecated-reworded.diff
+  [ "$output" = "$(printf '@smithy/core\t3.34.1')" ]
+}
+
+@test "deprecated under a new key: clears, swept, and listed" {
+  local f=tests/fixtures/npm-bump-extract/lock-deprecated-new-key.diff
+  run_fixture cleared-paths "$f"
+  [ "$output" = "pnpm-lock.yaml" ]
+  run_fixture lockfile-entries "$f"
+  [ "$output" = "$(printf 'new-pkg\t2.0.0\tnpm')" ]
+  run_fixture deprecated "$f"
+  [ "$output" = "$(printf 'new-pkg\t2.0.0')" ]
+}
+
+@test "deprecated with hidden key: counted, never given the previous hunk's package" {
+  # The last key before the second hunk is b-pkg. A stale owner would list it.
+  local f=tests/fixtures/npm-bump-extract/lock-deprecated-hidden-key.diff
+  run_fixture cleared-paths "$f"
+  [ "$output" = "pnpm-lock.yaml" ]
+  run_fixture deprecated "$f"
+  [ "$output" = "$(printf 'a-pkg\t1.0.0\n\t1')" ]
+}
+
+@test "deprecated with hidden key in a second lockfile: owner does not carry across files" {
+  run_fixture deprecated tests/fixtures/npm-bump-extract/lock-deprecated-two-files.diff
+  [ "$output" = "$(printf 'a-pkg\t1.0.0\n\t1')" ]
+}
+
+@test "peer dependency named deprecated at 6 spaces disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-deprecated-peer-name.diff
+}
+
+@test "deprecated added alongside a changed resolution disqualifies" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-deprecated-with-resolution.diff
+}
+
+@test "multi-line deprecated message fails closed" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-deprecated-multiline.diff
+}
+
+@test "deprecated under importers stays disqualified" {
+  assert_disqualified tests/fixtures/npm-bump-extract/lock-deprecated-importers.diff
+}
+
+@test "embedded carriage return in a changed lockfile line disqualifies" {
+  # A lone CR is a YAML line break, so this one diff line would reach pnpm as a
+  # second key the parser never examined. Written here rather than as a fixture
+  # file so the raw CR cannot be normalized in a checkout.
+  printf 'diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml\n--- a/pnpm-lock.yaml\n+++ b/pnpm-lock.yaml\n@@ -100,4 +100,5 @@ packages:\n   a-pkg@1.0.0:\n     resolution: {integrity: sha512-AAAA==}\n+    deprecated: x\r    resolution: {integrity: sha512-EVIL==}\n \n' \
+    > "$BATS_TEST_TMPDIR/cr.diff"
+  assert_disqualified "$BATS_TEST_TMPDIR/cr.diff"
+}
+
+@test "trailing carriage return on a deprecated line still clears" {
+  # A CRLF line ending is not an embedded break and must not cause a false red.
+  printf 'diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml\n--- a/pnpm-lock.yaml\n+++ b/pnpm-lock.yaml\n@@ -100,4 +100,5 @@ packages:\n   a-pkg@1.0.0:\n     resolution: {integrity: sha512-AAAA==}\n+    deprecated: x\r\n \n' \
+    > "$BATS_TEST_TMPDIR/crlf.diff"
+  run_fixture cleared-paths "$BATS_TEST_TMPDIR/crlf.diff"
+  [ "$output" = "pnpm-lock.yaml" ]
 }

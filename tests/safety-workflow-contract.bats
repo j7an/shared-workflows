@@ -49,11 +49,16 @@ input_default() {
   [ "$output" = "1" ]
 }
 
-@test "dependency-safety invokes all three npm-bump-extract modes" {
-  for mode in deps lockfile-entries cleared-paths; do
+@test "dependency-safety invokes all four npm-bump-extract modes" {
+  for mode in deps lockfile-entries cleared-paths deprecated; do
     run grep -q "npm_bump_extract --mode=$mode" .github/workflows/dependency-safety.yml
     [ "$status" -eq 0 ]
   done
+}
+
+@test "the comment body includes the deprecated section" {
+  run grep -q '"\$DEPRECATED_SECTION" \\' .github/workflows/dependency-safety.yml
+  [ "$status" -eq 0 ]
 }
 
 @test "tier-2 sweep uses the OSV batch endpoint" {

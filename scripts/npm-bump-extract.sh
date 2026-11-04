@@ -3,15 +3,20 @@
 #
 # Owns all npm-ecosystem diff semantics for the dependency-safety workflow.
 # Emits tier-1 declared dependency rows (mode=deps), tier-2 newly introduced
-# lockfile versions (mode=lockfile-entries), or the paths it proved parseable
-# (mode=cleared-paths). Files with any unrecognized changed line are
+# lockfile versions (mode=lockfile-entries), the paths it proved parseable
+# (mode=cleared-paths), or packages gaining a deprecated: line
+# (mode=deprecated). Files with any unrecognized changed line are
 # disqualified and left unsupported so the fail-loud guard fires.
 #
 # Input:  unified diff on stdin
-# Flag:   --mode=deps | --mode=lockfile-entries | --mode=cleared-paths (exactly one)
+# Flag:   --mode=deps | --mode=lockfile-entries | --mode=cleared-paths | --mode=deprecated (exactly one)
 # Output (deps):             TSV <name>\t<version>\tnpm, sorted by name, deduped
 # Output (lockfile-entries): TSV <name>\t<version>\tnpm, sorted by name, deduped
 # Output (cleared-paths):    newline-delimited paths, sorted, deduped
+# Output (deprecated):       TSV <name>\t<version>, sorted, deduped, then one final
+#                            \t<count> line when any added deprecated: line had no
+#                            package key in the diff. The empty first field cannot
+#                            be forged: split_package_key rejects an empty name.
 # Exit:   0 on success (possibly zero rows)
 #         2 on malformed input, missing --mode, repeated --mode, unknown argument
 #
@@ -37,7 +42,7 @@ SUPPORTED_LOCKFILE_VERSIONS=$'\n9.0\n'
 MODE=""
 for arg in "$@"; do
   case "$arg" in
-    --mode=deps|--mode=lockfile-entries|--mode=cleared-paths)
+    --mode=deps|--mode=lockfile-entries|--mode=cleared-paths|--mode=deprecated)
       if [ -n "$MODE" ]; then
         echo "npm-bump-extract.sh: --mode specified more than once" >&2
         exit 2
@@ -52,7 +57,7 @@ for arg in "$@"; do
 done
 
 if [ -z "$MODE" ]; then
-  echo "npm-bump-extract.sh: --mode=deps, --mode=lockfile-entries, or --mode=cleared-paths required" >&2
+  echo "npm-bump-extract.sh: --mode=deps, --mode=lockfile-entries, --mode=cleared-paths, or --mode=deprecated required" >&2
   exit 2
 fi
 
@@ -91,6 +96,9 @@ tier2_rows=()
 corroborate=$'\n'              # "\n<name>\n" for names whose lock entry changed
 seen_tier1=$'\n'
 seen_tier2=$'\n'
+deprecated_rows=()
+seen_deprecated=$'\n'
+deprecated_unnamed=0
 
 # disqualify_lock <reason> — mark the lockfile unusable and explain why.
 disqualify_lock() {
@@ -181,6 +189,20 @@ emit_tier2() {
   esac
   seen_tier2="${seen_tier2}${key}"$'\n'
   tier2_rows+=("$1"$'\t'"$2"$'\t'"npm")
+}
+
+# note_deprecated <'name\tversion' or empty> — record an added deprecated: line.
+# An empty owner means the package key is outside the diff's context lines.
+note_deprecated() {
+  if [ -z "$1" ]; then
+    deprecated_unnamed=$((deprecated_unnamed + 1))
+    return 0
+  fi
+  case "$seen_deprecated" in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  seen_deprecated="${seen_deprecated}${1}"$'\n'
+  deprecated_rows+=("$1")
 }
 
 # split_package_key <'name@version'> — sets _pkg_name and _pkg_version.
@@ -385,6 +407,7 @@ pass1_lock() {
   local declared=""
   local entry_name="" minus_ver="" plus_ver="" spec_changed=0
   local tier2_old_changed=0 tier2_new_changed=0
+  local tier2_new_owner=""
   while IFS= read -r line; do
     line="${line%$'\r'}"
     if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
@@ -409,6 +432,14 @@ pass1_lock() {
     [[ "$line" == +++* ]] && continue
     [[ "$line" == ---[[:space:]]* ]] && continue
 
+    # A lone CR is a YAML line break, so one changed diff line could carry a
+    # second key this parser never examined. Only the trailing CR stripped above
+    # is a line ending.
+    if [[ "$line" == [+-]*$'\r'* ]]; then
+      disqualify_lock "changed line contains a carriage return: ${line}"
+      continue
+    fi
+
     # A document separator means sections may repeat, which the completeness
     # reasoning does not cover. Distinguished from the diff's own file header
     # (`--- a/path`), which always carries a path after the marker.
@@ -421,6 +452,9 @@ pass1_lock() {
     # the nearest column-0 line, which for pnpm-lock.yaml is a section name.
     # Verified across 1004 hunk headers in three real Dependabot PRs.
     if [[ "$line" =~ ^@@ ]]; then
+      # Reset here rather than in set_section: a hunk header can carry no
+      # section text, and a stale owner would name the wrong package.
+      tier2_new_owner=""
       # Take the section from the text AFTER the closing "@@" only.
       # `${line##*@@ }` is WRONG here: on a whole-file-add header
       # `@@ -0,0 +1,8 @@` the closing "@@" has no trailing space, so the glob
@@ -519,12 +553,29 @@ pass1_lock() {
           +) tier2_new_changed=1 ;;
           *) tier2_old_changed=0; tier2_new_changed=0 ;;
         esac
+        if [ "${BASH_REMATCH[1]}" != "-" ]; then
+          if split_package_key "${BASH_REMATCH[2]}"; then
+            tier2_new_owner="$_pkg_name"$'\t'"$_pkg_version"
+          else
+            tier2_new_owner=""
+          fi
+        fi
         if [ "${BASH_REMATCH[1]}" = "+" ]; then
           if split_package_key "${BASH_REMATCH[2]}"; then
             emit_tier2 "$_pkg_name" "$_pkg_version"
           else
             disqualify_lock "unparseable package key under packages:: ${BASH_REMATCH[2]}"
           fi
+        fi
+        continue
+      fi
+      # A deprecated: line does not move the tarball, so it is exempt under any
+      # key. Safe because a changed resolution is its own changed line, which
+      # still disqualifies below. Exactly 4 spaces: a peer dependency named
+      # `deprecated` sits deeper and must still fail closed.
+      if [[ "$line" =~ ^([+-])\ \ \ \ deprecated:[[:space:]] ]]; then
+        if [ "${BASH_REMATCH[1]}" = "+" ]; then
+          note_deprecated "$tier2_new_owner"
         fi
         continue
       fi
@@ -579,6 +630,16 @@ case "$MODE" in
   lockfile-entries)
     if [ "$lock_verdict" = "clean" ] && [ ${#tier2_rows[@]} -gt 0 ]; then
       printf '%s\n' "${tier2_rows[@]}" | sort -u
+    fi
+    ;;
+  deprecated)
+    if [ "$lock_verdict" = "clean" ]; then
+      if [ ${#deprecated_rows[@]} -gt 0 ]; then
+        printf '%s\n' "${deprecated_rows[@]}" | sort -u
+      fi
+      if [ "$deprecated_unnamed" -gt 0 ]; then
+        printf '\t%s\n' "$deprecated_unnamed"
+      fi
     fi
     ;;
   cleared-paths)
