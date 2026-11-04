@@ -432,6 +432,14 @@ pass1_lock() {
     [[ "$line" == +++* ]] && continue
     [[ "$line" == ---[[:space:]]* ]] && continue
 
+    # A lone CR is a YAML line break, so one changed diff line could carry a
+    # second key this parser never examined. Only the trailing CR stripped above
+    # is a line ending.
+    if [[ "$line" == [+-]*$'\r'* ]]; then
+      disqualify_lock "changed line contains a carriage return: ${line}"
+      continue
+    fi
+
     # A document separator means sections may repeat, which the completeness
     # reasoning does not cover. Distinguished from the diff's own file header
     # (`--- a/path`), which always carries a path after the marker.

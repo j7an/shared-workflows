@@ -747,3 +747,14 @@ run_deprecated_section() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"SECTION<<>>"* ]] || return 1
 }
+
+@test "chain: a carriage return in a rejected line cannot start a log line" {
+  # The Actions runner treats a lone CR as a line break, so a CR followed by
+  # `::` in the log could act as a workflow command.
+  printf 'diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -1,3 +1,3 @@\n {\n+  "engines": {}\r::error::injected\n }\n' \
+    > "$BATS_TEST_TMPDIR/cr-manifest.diff"
+  run_npm_chain "$BATS_TEST_TMPDIR/cr-manifest.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"::error::injected"* ]] || return 1
+  [[ "$output" != *$'\r'* ]] || return 1
+}

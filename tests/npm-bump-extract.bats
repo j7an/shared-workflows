@@ -322,3 +322,20 @@ assert_disqualified() {
 @test "deprecated under importers stays disqualified" {
   assert_disqualified tests/fixtures/npm-bump-extract/lock-deprecated-importers.diff
 }
+
+@test "embedded carriage return in a changed lockfile line disqualifies" {
+  # A lone CR is a YAML line break, so this one diff line would reach pnpm as a
+  # second key the parser never examined. Written here rather than as a fixture
+  # file so the raw CR cannot be normalized in a checkout.
+  printf 'diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml\n--- a/pnpm-lock.yaml\n+++ b/pnpm-lock.yaml\n@@ -100,4 +100,5 @@ packages:\n   a-pkg@1.0.0:\n     resolution: {integrity: sha512-AAAA==}\n+    deprecated: x\r    resolution: {integrity: sha512-EVIL==}\n \n' \
+    > "$BATS_TEST_TMPDIR/cr.diff"
+  assert_disqualified "$BATS_TEST_TMPDIR/cr.diff"
+}
+
+@test "trailing carriage return on a deprecated line still clears" {
+  # A CRLF line ending is not an embedded break and must not cause a false red.
+  printf 'diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml\n--- a/pnpm-lock.yaml\n+++ b/pnpm-lock.yaml\n@@ -100,4 +100,5 @@ packages:\n   a-pkg@1.0.0:\n     resolution: {integrity: sha512-AAAA==}\n+    deprecated: x\r\n \n' \
+    > "$BATS_TEST_TMPDIR/crlf.diff"
+  run_fixture cleared-paths "$BATS_TEST_TMPDIR/crlf.diff"
+  [ "$output" = "pnpm-lock.yaml" ]
+}

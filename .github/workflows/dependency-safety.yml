@@ -1392,6 +1392,14 @@ jobs:
               [[ "$line" == +++* ]] && continue
               [[ "$line" == ---[[:space:]]* ]] && continue
 
+              # A lone CR is a YAML line break, so one changed diff line could carry a
+              # second key this parser never examined. Only the trailing CR stripped above
+              # is a line ending.
+              if [[ "$line" == [+-]*$'\r'* ]]; then
+                disqualify_lock "changed line contains a carriage return: ${line}"
+                continue
+              fi
+
               # A document separator means sections may repeat, which the completeness
               # reasoning does not cover. Distinguished from the diff's own file header
               # (`--- a/path`), which always carries a path after the marker.
@@ -2106,15 +2114,16 @@ jobs:
           CLEARED_PYPROJECT=$(printf '%s' "$DIFF" | pyproject_bump_extract --mode=cleared-paths --head-dir="$PYPROJECT_HEAD_DIR" 2>/dev/null || true)
           # Keep the parser's reasons instead of discarding them: they tell a reviewer
           # why a lockfile was rejected. Each line starts with the fixed script
-          # prefix, so PR-supplied text cannot start a line and act as a workflow
-          # command. The first reason goes in the PR comment as inline code with
-          # backticks removed, which keeps PR-supplied text inert.
+          # prefix and has its CRs removed, because the runner treats a lone CR as a
+          # line break, so PR-supplied text cannot start a log line and act as a
+          # workflow command. The first reason goes in the PR comment as inline code
+          # with backticks removed, which keeps PR-supplied text inert.
           npm_reasons_file=$(mktemp "${RUNNER_TEMP:-/tmp}/npm-reasons.XXXXXX")
           CLEARED_NPM=$(printf '%s' "$DIFF" | npm_bump_extract --mode=cleared-paths 2>"$npm_reasons_file" || true)
           NPM_REJECTION=""
           if [ -s "$npm_reasons_file" ]; then
             echo "npm-bump-extract rejection reasons:"
-            cat "$npm_reasons_file"
+            tr -d '\r' < "$npm_reasons_file"
             NPM_REJECTION="\`$(head -n 1 "$npm_reasons_file" | sed 's/^npm-bump-extract\.sh: //' | tr -d '`\r' | cut -c1-300)\`"
             npm_reason_count=$(wc -l < "$npm_reasons_file" | tr -d ' ')
             if [ "$npm_reason_count" -gt 1 ]; then
