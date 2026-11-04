@@ -209,6 +209,7 @@ run_npm_chain() {
     printf 'UNSUP=[%s]\n' \"\$UNSUPPORTED_PATHS\"
     printf 'EFF=[%s]\n'   \"\$EFFECTIVE_TOUCHED\"
     printf 'HINT=[%s]\n'  \"\${ECO_HINT:-}\"
+    printf 'REJECTION=[%s]\n' \"\$NPM_REJECTION\"
   "
 }
 # ECO_HINT is printed through ${ECO_HINT:-} on purpose: the workflow only
@@ -644,4 +645,48 @@ age_tsv() {
   eval "$(extract_named_block "$WF" 'release age section')"
   [[ "$AGE_FOOTER" == *'2026-04-06'* ]] || return 1
   [[ "$AGE_FOOTER" != *'2026-09-06'* ]] || return 1
+}
+
+# --- npm rejection reason (issue #205) ---------------------------------------
+
+@test "chain: rejected lockfile reports first reason and logs all of them" {
+  run_npm_chain "$NPMFX/lock-integrity-only.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'REJECTION=[`pnpm-lock.yaml: changed metadata for an unchanged package version under packages:: -    resolution: {integrity: sha512-AAAA==}` (+1 more, see workflow log)]'* ]] || return 1
+  [[ "$output" == *'sha512-EVIL=='* ]] || return 1
+}
+
+@test "chain: deprecated-only lockfile clears with no rejection and an empty touched set" {
+  run_npm_chain "$NPMFX/lock-deprecated-only-hidden.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REJECTION=[]"* ]] || return 1
+  [[ "$output" == *"UNSUP=[]"* ]] || return 1
+  [[ "$output" == *"EFF=[]"* ]] || return 1
+}
+
+@test "chain: PR-supplied Markdown in a reason stays inside one code span" {
+  run_npm_chain "$NPMFX/lock-reason-markdown.diff"
+  [ "$status" -eq 0 ]
+  local r; r=$(printf '%s\n' "$output" | grep '^REJECTION=')
+  [[ "$r" == *'![p](https://example.invalid/i.png)'* ]] || return 1
+  local ticks="${r//[^\`]/}"
+  [ "${#ticks}" -eq 2 ]
+}
+
+@test "chain: a very long rejected line is capped in the comment but not the log" {
+  local long; long=$(printf 'x%.0s' {1..500})
+  cat > "$BATS_TEST_TMPDIR/long.diff" <<EOF
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -1,2 +1,3 @@ packages:
+   a-pkg@1.0.0:
++    engines: {node: '$long'}
+EOF
+  run_npm_chain "$BATS_TEST_TMPDIR/long.diff"
+  [ "$status" -eq 0 ]
+  local r; r=$(printf '%s\n' "$output" | grep '^REJECTION=')
+  [[ "$r" != *"$long"* ]] || return 1
+  [ "${#r}" -le 315 ]
+  [[ "$output" == *"$long"* ]] || return 1
 }

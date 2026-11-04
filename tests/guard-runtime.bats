@@ -96,3 +96,40 @@ extract_guard_block() {
   eval "$block"
   [ "$GUARD_TRIGGERED" = "false" ]
 }
+
+@test "safety: npm rejection reason replaces the unsupported wording" {
+  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  DEPS_TSV=""
+  TOUCHED_PATHS=$'tests/container/package.json\ntests/container/pnpm-lock.yaml'
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
+  UNSUPPORTED_PATHS="$TOUCHED_PATHS"
+  NPM_REJECTION='`the reason`'
+  eval "$block"
+  [ "$GUARD_TRIGGERED" = "true" ]
+  [[ "$EXTRACTION_WARNING" == *'`the reason`'* ]] || return 1
+  [[ "$EXTRACTION_WARNING" != *"does not support"* ]] || return 1
+}
+
+@test "safety: mixed PR keeps unsupported wording for the file the parser cannot handle" {
+  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  DEPS_TSV=""
+  TOUCHED_PATHS=$'package-lock.json\npackage.json\npnpm-lock.yaml'
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
+  UNSUPPORTED_PATHS="$TOUCHED_PATHS"
+  NPM_REJECTION='`the reason`'
+  eval "$block"
+  [[ "$EXTRACTION_WARNING" == *'`the reason`'* ]] || return 1
+  [[ "$EXTRACTION_WARNING" == *"does not support (package-lock.json)"* ]] || return 1
+}
+
+@test "safety: a reason is not shown when no npm path is unsupported" {
+  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  DEPS_TSV=""
+  TOUCHED_PATHS="package-lock.json"
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
+  UNSUPPORTED_PATHS="package-lock.json"
+  NPM_REJECTION='`the reason`'
+  eval "$block"
+  [[ "$EXTRACTION_WARNING" == *"does not support (package-lock.json)"* ]] || return 1
+  [[ "$EXTRACTION_WARNING" != *"the reason"* ]] || return 1
+}

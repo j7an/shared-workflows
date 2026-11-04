@@ -2104,7 +2104,24 @@ jobs:
           TOUCHED_PATHS=$(echo "$DIFF" | diff_touches_lockfile 2>/dev/null || true)
           BASE_UNSUPPORTED=$(printf '%s\n' "$TOUCHED_PATHS" | classify_touched_paths 2>/dev/null || true)
           CLEARED_PYPROJECT=$(printf '%s' "$DIFF" | pyproject_bump_extract --mode=cleared-paths --head-dir="$PYPROJECT_HEAD_DIR" 2>/dev/null || true)
-          CLEARED_NPM=$(printf '%s' "$DIFF" | npm_bump_extract --mode=cleared-paths 2>/dev/null || true)
+          # Keep the parser's reasons instead of discarding them: they tell a reviewer
+          # why a lockfile was rejected. Each line starts with the fixed script
+          # prefix, so PR-supplied text cannot start a line and act as a workflow
+          # command. The first reason goes in the PR comment as inline code with
+          # backticks removed, which keeps PR-supplied text inert.
+          npm_reasons_file=$(mktemp "${RUNNER_TEMP:-/tmp}/npm-reasons.XXXXXX")
+          CLEARED_NPM=$(printf '%s' "$DIFF" | npm_bump_extract --mode=cleared-paths 2>"$npm_reasons_file" || true)
+          NPM_REJECTION=""
+          if [ -s "$npm_reasons_file" ]; then
+            echo "npm-bump-extract rejection reasons:"
+            cat "$npm_reasons_file"
+            NPM_REJECTION="\`$(head -n 1 "$npm_reasons_file" | sed 's/^npm-bump-extract\.sh: //' | tr -d '`\r' | cut -c1-300)\`"
+            npm_reason_count=$(wc -l < "$npm_reasons_file" | tr -d ' ')
+            if [ "$npm_reason_count" -gt 1 ]; then
+              NPM_REJECTION="${NPM_REJECTION} (+$((npm_reason_count - 1)) more, see workflow log)"
+            fi
+          fi
+          rm -f "$npm_reasons_file"
           CLEARED_ALL=$(printf '%s\n%s\n' "$CLEARED_PYPROJECT" "$CLEARED_NPM" | sed '/^$/d' | sort -u)
 
           # Subtract cleared paths from BOTH the unsupported set and the touched
@@ -2165,6 +2182,16 @@ jobs:
             GUARD_TRIGGERED=true
             UNSUPPORTED_LIST=$(echo "$UNSUPPORTED_PATHS" | paste -sd, -)
             EXTRACTION_WARNING="⚠️ Diff touches dependency files the parser does not support (${UNSUPPORTED_LIST}). Manual review required; the dependency-safety gate cannot scan these."
+            # npm paths the parser rejected are supported files, so report the
+            # parser's reason for them. Anything else really is unsupported.
+            NPM_PATHS=$(printf '%s\n' "$UNSUPPORTED_PATHS" | grep -E '(^|/)(package\.json|pnpm-lock\.yaml)$' || true)
+            if [ -n "${NPM_REJECTION:-}" ] && [ -n "$NPM_PATHS" ]; then
+              EXTRACTION_WARNING="⚠️ Dependency parser rejected this diff: ${NPM_REJECTION}. Manual review required; the dependency-safety gate cannot scan these files."
+              OTHER_LIST=$(printf '%s\n' "$UNSUPPORTED_PATHS" | grep -vE '(^|/)(package\.json|pnpm-lock\.yaml)$' | paste -sd, - || true)
+              if [ -n "$OTHER_LIST" ]; then
+                EXTRACTION_WARNING="${EXTRACTION_WARNING} Also touches dependency files the parser does not support (${OTHER_LIST})."
+              fi
+            fi
           elif [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ] && [ -n "$EFFECTIVE_TOUCHED" ]; then
             GUARD_TRIGGERED=true
             TOUCHED_LIST=$(echo "$EFFECTIVE_TOUCHED" | paste -sd, -)
