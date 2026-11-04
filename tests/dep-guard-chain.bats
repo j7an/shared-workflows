@@ -690,3 +690,60 @@ EOF
   [ "${#r}" -le 315 ]
   [[ "$output" == *"$long"* ]] || return 1
 }
+
+# --- deprecated section (issue #205) -----------------------------------------
+
+# $1 = fixture diff. `set -u` makes the driver self-checking, as run_npm_chain does.
+run_deprecated_section() {
+  local fixture="$1"
+  local block; block=$(extract_named_block "$WF" "deprecated section")
+  run bash -c "
+    set -uo pipefail
+    npm_bump_extract() { bash scripts/npm-bump-extract.sh \"\$@\"; }
+    DIFF=\$(cat '$fixture')
+    $block
+    printf 'SECTION<<%s>>\n' \"\$DEPRECATED_SECTION\"
+  "
+}
+
+@test "deprecated section block extracts non-empty from the workflow" {
+  local block; block=$(extract_named_block "$WF" "deprecated section")
+  [ -n "$block" ]
+}
+
+@test "deprecated section names the package and states it does not affect the gate" {
+  run_deprecated_section "$NPMFX/real-deprecated-added.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"### Deprecated packages"* ]] || return 1
+  [[ "$output" == *"this does not affect the gate"* ]] || return 1
+  [[ "$output" == *'- `@smithy/core@3.34.1`'* ]] || return 1
+}
+
+@test "deprecated section adds a count for hidden names" {
+  run_deprecated_section "$NPMFX/lock-deprecated-hidden-key.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'- `a-pkg@1.0.0`'* ]] || return 1
+  [[ "$output" == *"- 1 more, see the lockfile diff"* ]] || return 1
+}
+
+@test "deprecated section with only hidden names does not say more" {
+  run_deprecated_section "$NPMFX/lock-deprecated-only-hidden.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"- 1 package(s), see the lockfile diff"* ]] || return 1
+  [[ "$output" != *"more"* ]] || return 1
+}
+
+@test "deprecated section strips backticks from package names" {
+  run_deprecated_section "$NPMFX/lock-deprecated-backtick-key.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'- `ab@1.0.0`'* ]] || return 1
+}
+
+@test "deprecated section is empty when nothing was added or the lockfile was rejected" {
+  run_deprecated_section "$NPMFX/lock-deprecated-removed.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SECTION<<>>"* ]] || return 1
+  run_deprecated_section "$NPMFX/lock-deprecated-with-resolution.diff"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SECTION<<>>"* ]] || return 1
+}

@@ -2628,6 +2628,26 @@ jobs:
           fi
           # --- END tier-2 sweep ---
 
+          # --- BEGIN deprecated section ---
+          # Informational only: a listed package never affects the verdict. Package
+          # names come from the PR's lockfile, so backticks are removed to keep them
+          # inside their inline code.
+          DEPRECATED_SECTION=""
+          DEPRECATED_TSV=$(printf '%s' "$DIFF" | npm_bump_extract --mode=deprecated 2>/dev/null || true)
+          if [ -n "$DEPRECATED_TSV" ]; then
+            DEPRECATED_LIST=$(printf '%s\n' "$DEPRECATED_TSV" | awk -F'\t' '$1 != "" { gsub(/`/, "", $1); gsub(/`/, "", $2); printf "- `%s@%s`\n", $1, $2 }')
+            DEPRECATED_HIDDEN=$(printf '%s\n' "$DEPRECATED_TSV" | awk -F'\t' '$1 == "" { print $2 }')
+            if [ -n "$DEPRECATED_HIDDEN" ]; then
+              if [ -n "$DEPRECATED_LIST" ]; then
+                DEPRECATED_LIST="${DEPRECATED_LIST}"$'\n'"- ${DEPRECATED_HIDDEN} more, see the lockfile diff"
+              else
+                DEPRECATED_LIST="- ${DEPRECATED_HIDDEN} package(s), see the lockfile diff"
+              fi
+            fi
+            DEPRECATED_SECTION=$(printf '\n### Deprecated packages\n\nDeprecated upstream. Shown for review; this does not affect the gate.\n\n%s\n' "$DEPRECATED_LIST")
+          fi
+          # --- END deprecated section ---
+
           # --- OpenSSF Scorecard (GitHub Actions only) ---
           SCORECARD_TABLE=""
           if [[ "$ENABLE_SCORECARD" == "true" ]]; then
@@ -2963,7 +2983,7 @@ jobs:
             EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
           fi
 
-          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s' \
+          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s%s' \
             "## Dependency Safety Scan" \
             "$EXTRACTION_WARNING_SECTION" \
             "**Packages scanned:** ${DEPS}" \
@@ -2974,6 +2994,7 @@ jobs:
             "$HISTORICAL_SECTION" \
             "$RELEASE_AGE_SECTION" \
             "$TIER2_SECTION" \
+            "$DEPRECATED_SECTION" \
             "$SCORECARD_SECTION")"
 
           # --- Comment management: update-or-create with change detection ---
