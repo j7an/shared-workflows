@@ -1,0 +1,12 @@
+diff --git a/Dockerfile b/Dockerfile
+index b5f885a..fb15987 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,6 +1,6 @@
+ # dep-rank MCP server image. Build context: dist/<wheel> plus dist/requirements.txt from
+ # `uv export --frozen --no-dev --extra mcp --no-emit-project -o dist/requirements.txt`.
+-FROM python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
++FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+ 
+ LABEL org.opencontainers.image.source=https://github.com/j7an/dep-rank
+ 
