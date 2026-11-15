@@ -1,0 +1,24 @@
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1 +1 @@
+-FROM a:1
++FROM a:2
+diff --git a/docker/Containerfile b/docker/Containerfile
+--- a/docker/Containerfile
++++ b/docker/Containerfile
+@@ -1 +1 @@
+-FROM a:1
++FROM a:2
+diff --git a/build/api.Dockerfile b/build/api.Dockerfile
+--- a/build/api.Dockerfile
++++ b/build/api.Dockerfile
+@@ -1 +1 @@
+-FROM a:1
++FROM a:2
+diff --git a/Dockerfile.dev b/Dockerfile.dev
+--- a/Dockerfile.dev
++++ b/Dockerfile.dev
+@@ -1 +1 @@
+-FROM a:1
++FROM a:2

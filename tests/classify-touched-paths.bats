@@ -9,7 +9,8 @@
 @test "supported single paths emit no unsupported paths" {
   local path
   for path in .github/workflows/ci.yml .github/workflows/release.yaml \
-    uv.lock subdir/uv.lock poetry.lock requirements.txt requirements-dev.txt; do
+    uv.lock subdir/uv.lock poetry.lock requirements.txt requirements-dev.txt \
+    Dockerfile docker/Containerfile build/api.Dockerfile Dockerfile.dev; do
     run bash -c 'printf "%s\\n" "$1" | bash scripts/classify-touched-paths.sh' _ "$path"
     if [ "$status" -ne 0 ] || [ -n "$output" ]; then
       printf 'supported path failed: %s; status=%s; output=%s\\n' "$path" "$status" "$output" >&2
@@ -71,4 +72,10 @@
   run bash -c 'printf "uv.lock\npackage-lock.json" | bash scripts/classify-touched-paths.sh'
   [ "$status" -eq 0 ]
   [ "$output" = "package-lock.json" ]
+}
+
+@test "Dockerfile lookalikes are not dependency files" {
+  run bash -c "printf 'docs/Dockerfile-notes.txt\nmyDockerfile\n' | bash scripts/classify-touched-paths.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'docs/Dockerfile-notes.txt\nmyDockerfile')" ]
 }

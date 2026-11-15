@@ -15,6 +15,8 @@
 #   - .github/workflows/*.yml | *.yaml  (GitHub Actions `uses:` line parser)
 #   - uv.lock | poetry.lock             (TOML [[package]] stanza parser)
 #   - requirements*.txt                 (pip line-shape parser)
+#   - Dockerfile | Containerfile | *.Dockerfile | Dockerfile.*
+#                                       (`FROM` line parser)
 #
 # `requirements*.txt` is supported by line-shape parsing, not by a full
 # requirements-file parser. The extractor recognizes added requirement lines
@@ -50,6 +52,7 @@ while IFS= read -r path || [ -n "$path" ]; do
   case "$base" in
     uv.lock|poetry.lock) continue ;;
     requirements*.txt)   continue ;;
+    Dockerfile|Containerfile|*.Dockerfile|Dockerfile.*) continue ;;
   esac
 
   # Anything else: emit as unsupported.

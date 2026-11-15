@@ -53,3 +53,10 @@
   [ "$status" -eq 2 ]
   [[ "$output" == *"not a unified diff"* ]]
 }
+
+@test "Dockerfile family touched — exit 0, all four paths emitted" {
+  # sort order is locale-dependent; pin the C locale
+  LC_ALL=C run bash scripts/diff-touches-lockfile.sh < tests/fixtures/diff-touches-lockfile/dockerfiles-touched.diff
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'Dockerfile\nDockerfile.dev\nbuild/api.Dockerfile\ndocker/Containerfile')" ]
+}
