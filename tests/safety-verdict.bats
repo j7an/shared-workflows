@@ -27,6 +27,7 @@ setup() {
   export RELEASE_AGE_POLICY=blocking
   export MINIMUM_RELEASE_AGE_DAYS=5
   export AUTO_MERGE=false
+  export IMAGE_COUNT=0
 }
 
 @test "clean + AUTO_MERGE=true (blocking) → success, auto_merge_ok=true, age text present" {
@@ -247,4 +248,59 @@ setup() {
   run_verdict
   [ "$status" -ne 0 ]
   [[ "$output" == *"orchestrator bug"* ]]
+}
+
+@test "image under policy off → error, no safety-error label, no auto-merge" {
+  RELEASE_AGE_POLICY=off IMAGE_COUNT=1 AUTO_MERGE=true run_verdict
+  [ "$status" -eq 0 ]
+  parse_tsv
+  [ "$GATE_STATE" = "error" ]
+  [ "$HAS_SAFETY_ERROR" = "false" ]
+  [ "$AUTO_MERGE_OK" = "false" ]
+  [ "$STATUS_DESC" = "Release age not checked for 1 container image(s) (release_age_policy: off). Manual review required." ]
+}
+
+@test "image under policy off does not mask guard" {
+  RELEASE_AGE_POLICY=off IMAGE_COUNT=1 GUARD_TRIGGERED=true run_verdict
+  [ "$status" -eq 0 ]
+  parse_tsv
+  [ "$GATE_STATE" = "error" ]
+  [ "$HAS_SAFETY_ERROR" = "true" ]
+  [ "$STATUS_DESC" = "Could not extract dependencies from diff. Manual review required." ]
+}
+
+@test "image under policy off outranks advisories and keeps the review label" {
+  RELEASE_AGE_POLICY=off IMAGE_COUNT=1 ADVISORY_COUNT=2 run_verdict
+  [ "$status" -eq 0 ]
+  parse_tsv
+  [ "$GATE_STATE" = "error" ]
+  [ "$HAS_SECURITY_REVIEW" = "true" ]
+  [ "$STATUS_DESC" = "Release age not checked for 1 container image(s) (release_age_policy: off). Manual review required." ]
+}
+
+@test "clean image under advisory policy → success with image wording" {
+  RELEASE_AGE_POLICY=advisory IMAGE_COUNT=1 AUTO_MERGE=true run_verdict
+  [ "$status" -eq 0 ]
+  parse_tsv
+  [ "$GATE_STATE" = "success" ]
+  [ "$AUTO_MERGE_OK" = "true" ]
+  [ "$STATUS_DESC" = "Clean scan (≥5d; container images age-checked only, no advisory data). Auto-merge enabled." ]
+}
+
+@test "image age violation under advisory keeps existing wording" {
+  RELEASE_AGE_POLICY=advisory IMAGE_COUNT=1 AGE_VIOLATION_COUNT=1 run_verdict
+  [ "$status" -eq 0 ]
+  parse_tsv
+  [ "$STATUS_DESC" = "1 package(s) below 5d minimum release age (advisory policy). Auto-merge suppressed." ]
+}
+
+@test "missing IMAGE_COUNT → non-zero exit" {
+  unset IMAGE_COUNT
+  run_verdict
+  [ "$status" -ne 0 ]
+}
+
+@test "negative IMAGE_COUNT → non-zero exit" {
+  IMAGE_COUNT=-1 run_verdict
+  [ "$status" -ne 0 ]
 }

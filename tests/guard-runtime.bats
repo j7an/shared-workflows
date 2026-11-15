@@ -133,3 +133,34 @@ extract_guard_block() {
   [[ "$EXTRACTION_WARNING" == *"does not support (package-lock.json)"* ]] || return 1
   [[ "$EXTRACTION_WARNING" != *"the reason"* ]] || return 1
 }
+
+@test "safety: unresolved Dockerfile build argument — guard fires" {
+  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  DEPS_TSV=$'${BASE}\t-\tdocker'
+  TOUCHED_PATHS=Dockerfile
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
+  UNSUPPORTED_PATHS=""
+  eval "$block"
+  [ "$GUARD_TRIGGERED" = "true" ]
+  [[ "$EXTRACTION_WARNING" == *"cannot resolve"* ]]
+}
+
+@test "safety: unparsed FROM alongside an extracted package — guard fires" {
+  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  DEPS_TSV=$'requests\t2.32.5\tpypi\nFROM\t-\tdocker'
+  TOUCHED_PATHS=$'Dockerfile\nrequirements.txt'
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
+  UNSUPPORTED_PATHS=""
+  eval "$block"
+  [ "$GUARD_TRIGGERED" = "true" ]
+}
+
+@test "safety: resolved image only — guard does NOT fire" {
+  block=$(extract_guard_block .github/workflows/dependency-safety.yml)
+  DEPS_TSV=$'python\t3.13\tdocker'
+  TOUCHED_PATHS=Dockerfile
+  EFFECTIVE_TOUCHED="$TOUCHED_PATHS"
+  UNSUPPORTED_PATHS=""
+  eval "$block"
+  [ "$GUARD_TRIGGERED" = "false" ]
+}

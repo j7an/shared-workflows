@@ -55,7 +55,7 @@ if [ "${SCAN_SECOND:-false}" = true ]; then
 fi
 verdict=$(GUARD_TRIGGERED=false AGE_ERROR_COUNT=0 AGE_VIOLATION_COUNT=0 \
   SCAN_ERROR_COUNT="$SCAN_ERROR_COUNT" ADVISORY_COUNT="$((GHSA_TOTAL + OSV_TOTAL))" \
-  RELEASE_AGE_POLICY=off MINIMUM_RELEASE_AGE_DAYS=5 AUTO_MERGE=true \
+  RELEASE_AGE_POLICY=off MINIMUM_RELEASE_AGE_DAYS=5 AUTO_MERGE=true IMAGE_COUNT=0 \
   bash "$SCAN_ROOT/scripts/safety-verdict.sh")
 jq -n --arg deps "$DEPS" --arg rows "$SCAN_RESULTS" --arg filtered "$FILTERED_RESULTS" \
   --arg error "$HAS_ERROR" --arg verdict "$verdict" \

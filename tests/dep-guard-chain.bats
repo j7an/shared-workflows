@@ -334,6 +334,8 @@ run_dep_routing() {
     $block
     printf 'NPM_LINES=%s\n' \"\$(printf '%s\n' \"\$NPM_ROWS\" | sed '/^\$/d' | wc -l | tr -d ' ')\"
     printf 'NPM_ROWS<<<%s>>>\n' \"\$NPM_ROWS\"
+    printf 'IMAGE_COUNT=%s\n' \"\$IMAGE_COUNT\"
+    printf 'IMAGE_ROWS<<<%s>>>\n' \"\$IMAGE_ROWS\"
   "
 }
 
@@ -357,6 +359,34 @@ run_dep_routing() {
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"NPM_LINES=0"* ]] || return 1
   [[ "$output" == *"NPM_ROWS<<<>>>"* ]] || return 1
+}
+
+@test "dep routing: docker rows go only to IMAGE_ROWS" {
+  local tsv="$BATS_TEST_TMPDIR/deps-docker.tsv"
+  printf 'sampleaction\tv1\tactions\npython\t3.13-slim\tdocker\nleftpad\t1.0.0\tnpm\n' > "$tsv"
+  run_dep_routing "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"IMAGE_COUNT=1"* ]] || return 1
+  [[ "$output" == *"IMAGE_ROWS<<<python"$'\t'"3.13-slim>>>"* ]] || return 1
+  [[ "$output" == *"NPM_LINES=1"* ]] || return 1
+  [[ "$output" == *"NPM_ROWS<<<leftpad"$'\t'"1.0.0>>>"* ]] || return 1
+}
+
+@test "dep routing: no docker rows → IMAGE_COUNT=0" {
+  local tsv="$BATS_TEST_TMPDIR/deps-nodocker.tsv"
+  printf 'leftpad\t1.0.0\tnpm\n' > "$tsv"
+  run_dep_routing "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"IMAGE_COUNT=0"* ]] || return 1
+  [[ "$output" == *"IMAGE_ROWS<<<>>>"* ]] || return 1
+}
+
+@test "dep routing: untagged image is counted" {
+  local tsv="$BATS_TEST_TMPDIR/deps-untagged.tsv"
+  printf 'debian\tlatest\tdocker\n' > "$tsv"
+  run_dep_routing "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"IMAGE_COUNT=1"* ]] || return 1
 }
 
 # --- tier-2 sweep ----------------------------------------------------------
