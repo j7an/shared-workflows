@@ -19,6 +19,7 @@ INLINE_PAIRS=(
   ".github/workflows/dependency-safety.yml:scripts/classify-touched-paths.sh"
   ".github/workflows/dependency-safety.yml:scripts/docker-image-pairs.sh"
   ".github/workflows/dependency-safety.yml:scripts/image-vuln-diff.sh"
+  ".github/workflows/dependency-safety.yml:scripts/image-compare-intake.sh"
   ".github/workflows/tag-release.yml:scripts/bump-version-files.sh"
   ".github/workflows/tag-release.yml:scripts/revalidate-tag-release-plan.sh"
   ".github/workflows/pre-commit-autoupdate.yml:scripts/pre-commit-autoupdate-preflight.sh"
