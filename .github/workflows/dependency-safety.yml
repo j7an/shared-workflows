@@ -2075,6 +2075,14 @@ jobs:
                 printf 'parse-failure'
                 return 1
               fi
+              # Sanity, per platform (a valid newest one must not hide a bad one):
+              # reproducible builds stamp created=1970, and a future date is garbage;
+              # neither is a real build date, so never report them as pass.
+              # 1356998400 = 2013-01-01T00:00:00Z (before Docker existed).
+              if [ "$ep" -lt 1356998400 ] || [ "$ep" -gt "$NOW_EPOCH" ]; then
+                printf 'implausible-timestamp'
+                return 1
+              fi
               if [ -z "$best_epoch" ] || [ "$ep" -gt "$best_epoch" ]; then
                 best_epoch="$ep"
                 best_iso="$created"
@@ -2188,13 +2196,6 @@ jobs:
                 fi
                 if ! pub_epoch=$(iso_to_epoch "$iso"); then
                   emit "$name" "$version" "$ecosystem" "-" "-" "error" "parse-failure"
-                  continue
-                fi
-                # Sanity: reproducible-build images stamp created=1970 (or garbage in the
-                # future); neither is a real build date, so never report them as pass.
-                # 1356998400 = 2013-01-01T00:00:00Z (before Docker existed).
-                if [ "$pub_epoch" -lt 1356998400 ] || [ "$pub_epoch" -gt "$NOW_EPOCH" ]; then
-                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "implausible-timestamp"
                   continue
                 fi
                 age_days=$(( (NOW_EPOCH - pub_epoch) / 86400 ))

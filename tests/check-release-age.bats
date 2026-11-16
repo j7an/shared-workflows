@@ -175,6 +175,14 @@ docker_row() { printf '%s\t%s\tdocker\n' "$1" "$2" | bash scripts/check-release-
   [ "$output" = $'ghcr.io/example/future\t1.0\tdocker\t-\t-\terror\timplausible-timestamp' ]
 }
 
+@test "docker epoch platform is an error even when a newer platform is valid" {
+  # amd64 config is created=1970; arm64 is a valid 2026 date that would win the max.
+  export COOLDOWN_DAYS=7
+  run docker_row mixed 1.0
+  [ "$status" -eq 0 ]
+  [ "$output" = $'mixed\t1.0\tdocker\t-\t-\terror\timplausible-timestamp' ]
+}
+
 @test "docker missing manifest is docker-404" {
   export COOLDOWN_DAYS=7
   run docker_row python 9.9
