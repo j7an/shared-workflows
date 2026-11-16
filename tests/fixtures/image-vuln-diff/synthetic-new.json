@@ -1,0 +1,31 @@
+{
+  "SchemaVersion": 2,
+  "Metadata": {"ImageConfig": {"architecture": "amd64", "os": "linux"}},
+  "Results": [
+    {
+      "Target": "synthetic (debian 13.0)",
+      "Class": "os-pkgs",
+      "Type": "debian",
+      "Packages": [{"Name": "pkg-m", "Version": "1.0"}, {"Name": "pkg-n", "Version": "3.0"}],
+      "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-0000-0001", "PkgName": "pkg-n", "InstalledVersion": "3.0", "FixedVersion": "3.1", "Severity": "HIGH"},
+        {"VulnerabilityID": "CVE-0000-0002", "PkgName": "pkg-m", "InstalledVersion": "1.0", "Severity": "MEDIUM"},
+        {"VulnerabilityID": "CVE-0000-0099", "PkgName": "pkg-s", "InstalledVersion": "1.1", "Severity": "LOW"},
+        {"VulnerabilityID": "CVE-0000-0005", "PkgName": "pkg-d", "InstalledVersion": "1.0", "FixedVersion": "1.1", "Severity": "MEDIUM"}
+      ]
+    },
+    {
+      "Target": "Python",
+      "Class": "lang-pkgs",
+      "Type": "python-pkg",
+      "Packages": [{"Name": "pkg-d", "Version": "1.1"}]
+    },
+    {
+      "Target": "ignored",
+      "Class": "secret",
+      "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-0000-0777", "PkgName": "pkg-z", "InstalledVersion": "1.0", "Severity": "CRITICAL"}
+      ]
+    }
+  ]
+}

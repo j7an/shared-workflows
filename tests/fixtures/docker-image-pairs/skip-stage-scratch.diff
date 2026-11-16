@@ -1,0 +1,12 @@
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,3 +1,3 @@
+ FROM golang:1.24 AS builder
+ FROM scratch
+-FROM builder
++FROM builder
+-FROM scratch
++FROM scratch
+-FROM alpine:3.20
++FROM alpine:3.21

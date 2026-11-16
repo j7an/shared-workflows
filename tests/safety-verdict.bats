@@ -284,7 +284,19 @@ setup() {
   parse_tsv
   [ "$GATE_STATE" = "success" ]
   [ "$AUTO_MERGE_OK" = "true" ]
-  [ "$STATUS_DESC" = "Clean scan (≥5d; container images age-checked only, no advisory data). Auto-merge enabled." ]
+  [ "$STATUS_DESC" = "Clean scan (≥5d; images compared on linux/amd64, no new fixable vulnerabilities). Auto-merge enabled." ]
+}
+
+@test "clean image status wording fits 140 chars at 999 days, both variants" {
+  RELEASE_AGE_POLICY=advisory IMAGE_COUNT=1 AUTO_MERGE=true MINIMUM_RELEASE_AGE_DAYS=999 run_verdict
+  [ "$status" -eq 0 ] || return 1
+  parse_tsv
+  [ "${#STATUS_DESC}" -le 140 ] || return 1
+  RELEASE_AGE_POLICY=advisory IMAGE_COUNT=1 AUTO_MERGE=false MINIMUM_RELEASE_AGE_DAYS=999 run_verdict
+  [ "$status" -eq 0 ] || return 1
+  parse_tsv
+  [ "$STATUS_DESC" = "Clean scan (≥999d; images compared on linux/amd64, no new fixable vulnerabilities). Ready for merge." ] || return 1
+  [ "${#STATUS_DESC}" -le 140 ] || return 1
 }
 
 @test "image age violation under advisory keeps existing wording" {

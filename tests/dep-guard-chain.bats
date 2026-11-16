@@ -867,6 +867,7 @@ run_deps_placeholder_img() {
 
 run_images_line() {
   local rows="$1" count="$2" policy="$3"
+  export IMAGE_COMPARE_TSV="${4:-}"
   local block; block=$(extract_named_block "$WF" "images line")
   run bash -c "
     set -uo pipefail
@@ -878,29 +879,156 @@ run_images_line() {
   "
 }
 
-@test "images line: policy on lists image and says not vulnerability-scanned" {
-  run_images_line 'python\t3.13-slim@sha256:e48f…' 1 advisory
+# TSV fixtures: validated intake output (image rows, pair rows, vuln rows).
+IC_OK=$'image\tpython\t3.13\tok\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok\nvuln\tpython\t3.13\tpython\t3.12\tintroduced\tfixable\tos\tCVE-2025-1\tlibssl3\t3.0.1\t3.0.2\tHIGH\nvuln\tpython\t3.13\tpython\t3.12\tintroduced\tunfixed\tos\tCVE-2025-2\tzlib\t1.2\t-\tLOW\nvuln\tpython\t3.13\tpython\t3.12\tfixed\tfixable\tos\tCVE-2024-9\tcurl\t8.0\t8.1\tMEDIUM'
+IC_ERR=$'image\tpython\t3.13\timage-compare-failure'
+
+@test "images line: ok comparison under advisory shows platform and counts, no #214" {
+  run_images_line 'python\t3.13' 1 advisory "$IC_OK"
   [ "$status" -eq 0 ] || return 1
-  [[ "$output" == *'**Container images:** `python` (3.13-slim@sha256:e48f…)'* ]] || return 1
-  [[ "$output" == *'release age checked; vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214)'* ]] || return 1
+  [[ "$output" == *'**Container images:** `python` (3.12 → 3.13, linux/amd64)'* ]] || return 1
+  [[ "$output" == *'1 new fixable, 1 new unfixed, 1 fixed'* ]] || return 1
+  [[ "$output" == *'release age checked'* ]] || return 1
+  [[ "$output" != *'#214'* ]] || return 1
+  [[ "$output" != *'vulnerability scan not performed'* ]] || return 1
 }
 
-@test "images line: policy off says age not checked and how to enable" {
-  run_images_line 'python\t3.13' 1 off
+@test "images line: error image says not vulnerability-checked with the reason" {
+  run_images_line 'python\t3.13' 1 advisory "$IC_ERR"
   [ "$status" -eq 0 ] || return 1
-  [[ "$output" == *'release age not checked (`release_age_policy` is `off`); vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214)'* ]] || return 1
+  [[ "$output" == *'`python` (3.13)'* ]] || return 1
+  [[ "$output" == *'image-compare-failure'* ]] || return 1
+  [[ "$output" == *'not vulnerability-checked'* ]] || return 1
+}
+
+@test "images line: policy off keeps the release-age-not-checked clause" {
+  run_images_line 'python\t3.13' 1 off "$IC_OK"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'release age not checked (`release_age_policy` is `off`)'* ]] || return 1
+  [[ "$output" != *'#214'* ]] || return 1
 }
 
 @test "images line: empty when no images" {
-  run_images_line '' 0 advisory
+  run_images_line '' 0 advisory ''
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"LINE<<<>>>"* ]] || return 1
 }
 
 @test "images line: backticks in PR-supplied names are stripped" {
-  run_images_line 'py`x\t1`2' 1 advisory
+  run_images_line 'py`x\t1`2' 1 advisory $'image\tpy`x\t1`2\thandoff-rejected'
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *'`pyx` (12)'* ]] || return 1
+}
+
+run_image_section() {
+  local count="$1"
+  export IMAGE_COMPARE_TSV="${2:-}"
+  local block; block=$(extract_named_block "$WF" "image comparison section")
+  run bash -c "
+    set -uo pipefail
+    IMAGE_COUNT='$count'
+    $block
+    printf 'SECTION<<<%s>>>\n' \"\$IMAGE_COMPARISON_SECTION\"
+  "
+}
+
+@test "image section: ok pair renders three lists with tables" {
+  run_image_section 1 "$IC_OK"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'### Container image vulnerabilities'* ]] || return 1
+  [[ "$output" == *'`python` 3.12 → 3.13 (linux/amd64)'* ]] || return 1
+  [[ "$output" == *'| ID | Package | Installed | Fixed | Severity |'* ]] || return 1
+  [[ "$output" == *'| CVE-2025-1 | `libssl3` | 3.0.1 | 3.0.2 | HIGH |'* ]] || return 1
+  [[ "$output" == *'| CVE-2025-2 | `zlib` | 1.2 | - | LOW |'* ]] || return 1
+  [[ "$output" == *'| CVE-2024-9 | `curl` | 8.0 | 8.1 | MEDIUM |'* ]] || return 1
+  [[ "$output" == *'Introduced, fixable (1)'* ]] || return 1
+  [[ "$output" == *'Introduced, unfixed (1)'* ]] || return 1
+  [[ "$output" == *'Fixed (1)'* ]] || return 1
+}
+
+@test "image section: package cell is inline code so scoped names do not @-mention" {
+  run_image_section 1 $'image\tpython\t3.13\tok\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok\nvuln\tpython\t3.13\tpython\t3.12\tintroduced\tfixable\tlang\tGHSA-x\t@npmcli/arborist\t1.0\t1.1\tHIGH'
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'| GHSA-x | `@npmcli/arborist` | 1.0 | 1.1 | HIGH |'* ]] || return 1
+}
+
+@test "image section: rows are capped at 50 per list with an exact-count remainder line" {
+  local tsv i
+  tsv=$'image\tpython\t3.13\tok\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok'
+  for i in $(seq -w 1 60); do
+    tsv+=$'\n'"vuln"$'\t'"python"$'\t'"3.13"$'\t'"python"$'\t'"3.12"$'\t'"introduced"$'\t'"fixable"$'\t'"os"$'\t'"CVE-2025-1$i"$'\t'"pkg$i"$'\t'"1"$'\t'"2"$'\t'"HIGH"
+  done
+  run_image_section 1 "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [ "$(printf '%s\n' "$output" | grep -c '^| CVE-2025-1')" -eq 50 ] || return 1
+  [[ "$output" == *'Introduced, fixable (60)'* ]] || return 1
+  [[ "$output" == *'10 more not shown'* ]] || return 1
+}
+
+@test "image section: empty lists say None and there is no details element" {
+  run_image_section 1 $'image\tpython\t3.13\tok\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok'
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'Introduced, fixable (0)'* ]] || return 1
+  [[ "$output" == *'None'* ]] || return 1
+  [[ "$output" != *'<details>'* ]] || return 1
+  run_image_section 1 "$IC_OK"
+  [[ "$output" != *'<details>'* ]] || return 1
+}
+
+@test "image section: error image renders no section" {
+  run_image_section 1 "$IC_ERR"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'SECTION<<<>>>'* ]] || return 1
+}
+
+@test "image section: an ok pair of an image whose comparison failed renders no tables (R1)" {
+  # python:3.13 is bumped in two Dockerfiles from different old refs; one
+  # comparison succeeded, the other failed, so intake marks the image failed.
+  # node:22 succeeded and must still render.
+  local tsv=$'image\tpython\t3.13\ttrivy-failed\nimage\tnode\t22\tok\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok\npair\tpython\t3.13\tpython\t3.11\tlinux/amd64\ttrivy-failed\npair\tnode\t22\tnode\t20\tlinux/amd64\tok\nvuln\tpython\t3.13\tpython\t3.12\tintroduced\tfixable\tos\tCVE-2025-7\tlibssl3\t3.0.1\t3.0.2\tHIGH\nvuln\tnode\t22\tnode\t20\tintroduced\tfixable\tlang\tGHSA-aaaa-bbbb-cccc\tpkg\t1\t2\tHIGH'
+  run_image_section 2 "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *'CVE-2025-7'* ]] || return 1
+  [[ "$output" != *'`python` 3.12'* ]] || return 1
+  [[ "$output" == *'`node` 20 → 22 (linux/amd64)'* ]] || return 1
+  [[ "$output" == *'GHSA-aaaa-bbbb-cccc'* ]] || return 1
+}
+
+@test "image section: only failed images renders no section (R1)" {
+  local tsv=$'image\tpython\t3.13\ttrivy-failed\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok\npair\tpython\t3.13\tpython\t3.11\tlinux/amd64\ttrivy-failed\nvuln\tpython\t3.13\tpython\t3.12\tintroduced\tfixable\tos\tCVE-2025-7\tlibssl3\t3.0.1\t3.0.2\tHIGH'
+  run_image_section 1 "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'SECTION<<<>>>'* ]] || return 1
+}
+
+@test "image section: empty when IMAGE_COUNT=0" {
+  run_image_section 0 ''
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'SECTION<<<>>>'* ]] || return 1
+}
+
+@test "image section: vulnerabilities group under their own pair only" {
+  local tsv=$'image\tpython\t3.13\tok\nimage\tnode\t22\tok\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok\npair\tnode\t22\tnode\t20\tlinux/amd64\tok\nvuln\tnode\t22\tnode\t20\tintroduced\tfixable\tlang\tGHSA-aaaa-bbbb-cccc\tpkg\t1\t2\tHIGH'
+  run_image_section 2 "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  local py node
+  py=${output#*python}; py=${py%%node*}
+  [[ "$py" != *GHSA-aaaa-bbbb-cccc* ]] || return 1
+  [[ "$output" == *GHSA-aaaa-bbbb-cccc* ]] || return 1
+}
+
+@test "change-note symmetry: IDs in the image section extract identically for PREV_IDS and CURRENT_IDS" {
+  local tsv=$'image\tnode\t22\tok\npair\tnode\t22\tnode\t20\tlinux/amd64\tok\nvuln\tnode\t22\tnode\t20\tintroduced\tfixable\tlang\tGHSA-aaaa-bbbb-cccc\tpkg\t1\t2\tHIGH'
+  run_image_section 1 "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  local section=${output#*SECTION<<<}; section=${section%>>>*}
+  local scan='| GHSA-xxxx-yyyy-zzzz | HIGH | s | GHSA |'
+  local body; body=$(printf '%s\n\n%s\n' "$scan" "$section")
+  local prev cur
+  prev=$(printf '%s\n' "$body" | sed '/<details>/,$d' | grep -oE '(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|PYSEC-[0-9]+-[0-9]+)' | sort -u | tr '\n' ',' | sed 's/,$//')
+  cur=$(printf '%s\n%s' "$scan" "$section" | grep -oE '(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|PYSEC-[0-9]+-[0-9]+)' | sort -u | tr '\n' ',' | sed 's/,$//')
+  [ "$prev" = "$cur" ] || return 1
+  [[ "$cur" == *GHSA-aaaa-bbbb-cccc* ]] || return 1
 }
 
 run_results_summary() {
@@ -908,7 +1036,8 @@ run_results_summary() {
   local block; block=$(extract_named_block "$WF" "results summary")
   run bash -c "
     set -uo pipefail
-    GUARD_TRIGGERED=false TOTAL=0 HAS_SAFETY_ERROR=false NO_PACKAGE_SCAN='$nps'
+    IMAGE_FIXABLE_INTRODUCED_COUNT='${IC_FIXABLE:-0}'
+    GUARD_TRIGGERED=false TOTAL='${IC_TOTAL:-0}' HAS_SAFETY_ERROR=false NO_PACKAGE_SCAN='$nps'
     IMAGE_COUNT='$icount' RELEASE_AGE_POLICY='$policy' AUTO_MERGE_OK='$am_ok'
     HAS_AGE_VIOLATION=false AGE_ONLY_COUNT=0 SUPPLY_RISK_COUNT=0
     MINIMUM_RELEASE_AGE_DAYS=7 SCAN_RESULTS=''
@@ -923,6 +1052,29 @@ run_results_summary() {
   [[ "$output" == *"not applicable"* ]] || return 1
   [[ "$output" != *"0 affecting target"* ]] || return 1
   [[ "$output" == *"HEADER<<<No package dependencies to scan."* ]] || return 1
+}
+
+@test "results summary: image-only clean comparison says images were compared" {
+  run_results_summary true 1 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"compared"* ]] || return 1
+  [[ "$output" == *"no new fixable vulnerabilities"* ]] || return 1
+  [[ "$output" != *"no vulnerability scan was performed"* ]] || return 1
+}
+
+@test "results summary: image-only PR with a new fixable vulnerability gets the advisory header" {
+  IC_FIXABLE=1 run_results_summary true 1 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"HEADER<<<**0 package advisory/ies and 1 new fixable image vulnerability/ies found**"* ]] || return 1
+  [[ "$output" != *"no vulnerability scan was performed"* ]] || return 1
+}
+
+@test "results summary: mixed PR, package-clean but new fixable image vuln, gets advisory header and clean table" {
+  IC_FIXABLE=1 run_results_summary false 1 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"1 new fixable image vulnerability/ies found"* ]] || return 1
+  [[ "$output" != *"No known exploits found"* ]] || return 1
+  [[ "$output" == *"0 affecting target"* ]] || return 1
 }
 
 @test "results summary: policy off + image header names the policy" {
