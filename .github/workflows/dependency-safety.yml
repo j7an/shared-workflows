@@ -184,6 +184,7 @@ jobs:
 
             # --- Dockerfile FROM lines (context/+ record stage aliases; + emits rows) ---
             if $current_is_dockerfile; then
+              prev_stage_names="$stage_names"
               if [[ "$line" =~ $from_alias_re ]]; then
                 alias_lc=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
                 stage_names="${stage_names}${alias_lc}"$'\n'
@@ -196,7 +197,7 @@ jobs:
                 token_lc=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
                 [ "$token_lc" = "scratch" ] && continue
                 if [ -n "$token" ]; then
-                  case "$stage_names" in *$'\n'"$token_lc"$'\n'*) continue ;; esac
+                  case "$prev_stage_names" in *$'\n'"$token_lc"$'\n'*) continue ;; esac
                 fi
 
                 if [ -z "$token" ] || [[ "$token" == *'$'* ]] || ! [[ "$token" =~ $image_token_re ]]; then

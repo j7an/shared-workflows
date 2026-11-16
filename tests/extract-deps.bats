@@ -134,3 +134,9 @@ docker_diff() {
   [ "$status" -eq 0 ]
   [ "$output" = $'python\t3.13\tdocker' ]
 }
+
+@test "self-aliased stage line still emits a row" {
+  run bash scripts/extract-deps.sh < <(docker_diff Dockerfile '+FROM python AS python')
+  [ "$status" -eq 0 ]
+  [ "$output" = $'python\tlatest\tdocker' ]
+}
