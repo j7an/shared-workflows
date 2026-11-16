@@ -3337,6 +3337,7 @@ jobs:
             AGE_TABLE_SEP="|---------|---------|-----------|-----|--------|"
             AGE_ROWS=""
             MAX_FAIL_EPOCH=0
+            HAD_DOCKER=0
             while IFS=$'\t' read -r _name _ver _eco _iso _days _verdict _reason; do
               [ -z "$_name" ] && continue
               case "$_verdict" in
@@ -3350,7 +3351,22 @@ jobs:
               else
                 _published_short="${_iso%T*}"
               fi
-              AGE_ROWS="${AGE_ROWS}| \`${_name}\` | v${_ver} | ${_published_short} | ${_days}d | ${_status} |"$'\n'
+              if [ "$_eco" = "docker" ]; then
+                HAD_DOCKER=1
+                # Image versions are tags/digests, not semver: no "v" prefix,
+                # long digests shortened, backticks stripped (PR-supplied text).
+                _ver_cell="${_ver//\`/}"
+                case "$_ver_cell" in
+                  *sha256:*)
+                    _dg="${_ver_cell##*sha256:}"
+                    _ver_cell="${_ver_cell%sha256:*}sha256:${_dg:0:12}…"
+                    ;;
+                esac
+                _name="${_name//\`/}"
+              else
+                _ver_cell="v${_ver}"
+              fi
+              AGE_ROWS="${AGE_ROWS}| \`${_name}\` | ${_ver_cell} | ${_published_short} | ${_days}d | ${_status} |"$'\n'
 
               # Track max fail epoch for "earliest unblock" footer. Age-only rows
               # (empty reason) only — a yanked/deprecated row's publish date is
@@ -3378,8 +3394,14 @@ jobs:
                 "$AGE_ONLY_COUNT" "$_unblock_iso")"
             fi
 
+            if [ "$HAD_DOCKER" -eq 1 ]; then
+              AGE_FOOTER="${AGE_FOOTER}"$'\n\n> Image dates are the image build timestamp reported by its publisher.'
+            fi
+
             RELEASE_AGE_SECTION="$(printf '\n### Release Age (minimum: %s days)\n\n%s\n%s\n%s%s' \
               "$MINIMUM_RELEASE_AGE_DAYS" "$AGE_TABLE_HDR" "$AGE_TABLE_SEP" "$AGE_ROWS" "$AGE_FOOTER")"
+          elif [ "${RELEASE_AGE_POLICY:-}" = "off" ] && printf '%s' "${DEPS_TSV:-}" | grep -q '[^[:space:]]'; then
+            RELEASE_AGE_SECTION=$'\n### Release Age\n\nNot checked: `release_age_policy` is `off`. Set it to `advisory` or `blocking` to check the release age of packages, GitHub Actions and container images.\n'
           fi
           # --- END release age section ---
 

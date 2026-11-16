@@ -677,6 +677,53 @@ age_tsv() {
   [[ "$AGE_FOOTER" != *'2026-09-06'* ]] || return 1
 }
 
+# --- Release Age section: image rows and policy-off note (issue #212) --------
+
+@test "release age section: docker row has no v prefix and a short digest" {
+  local d; d=$(printf 'e%.0s' $(seq 1 64))
+  AGE_TSV=$(age_tsv "python\t3.13-slim@sha256:${d}\tdocker\t2026-04-03T08:02:05Z\t9\tpass\t")
+  MINIMUM_RELEASE_AGE_DAYS=5; RELEASE_AGE_POLICY=advisory; DEPS_TSV=""
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [[ "$RELEASE_AGE_SECTION" == *'| 3.13-slim@sha256:eeeeeeeeeeee… |'* ]] || return 1
+  [[ "$RELEASE_AGE_SECTION" != *'vpython'* ]] || return 1
+  [[ "$RELEASE_AGE_SECTION" != *'v3.13'* ]] || return 1
+  [[ "$RELEASE_AGE_SECTION" == *'build timestamp reported by its publisher'* ]] || return 1
+}
+
+@test "release age section: package rows keep the v prefix and no image footnote" {
+  AGE_TSV=$(age_tsv 'lodash\t4.17.21\tnpm\t2021-02-20T00:00:00Z\t2000\tpass\t')
+  MINIMUM_RELEASE_AGE_DAYS=5; RELEASE_AGE_POLICY=advisory; DEPS_TSV=""
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [[ "$RELEASE_AGE_SECTION" == *'| v4.17.21 |'* ]] || return 1
+  [[ "$RELEASE_AGE_SECTION" != *'publisher'* ]] || return 1
+}
+
+@test "release age section: policy off with a pypi dependency shows the enable note" {
+  AGE_TSV=""; RELEASE_AGE_POLICY=off; MINIMUM_RELEASE_AGE_DAYS=5
+  DEPS_TSV=$'requests\t2.32.5\tpypi'
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  local want=$'\n### Release Age\n\nNot checked: `release_age_policy` is `off`. Set it to `advisory` or `blocking` to check the release age of packages, GitHub Actions and container images.\n'
+  [ "$RELEASE_AGE_SECTION" = "$want" ]
+}
+
+@test "release age section: policy off with no dependencies stays empty" {
+  AGE_TSV=""; RELEASE_AGE_POLICY=off; MINIMUM_RELEASE_AGE_DAYS=5; DEPS_TSV=""
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [ -z "$RELEASE_AGE_SECTION" ]
+}
+
+@test "release age section: advisory with empty AGE_TSV (0-day minimum) stays empty" {
+  AGE_TSV=""; RELEASE_AGE_POLICY=advisory; MINIMUM_RELEASE_AGE_DAYS=0
+  DEPS_TSV=$'requests\t2.32.5\tpypi'
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [ -z "$RELEASE_AGE_SECTION" ]
+}
+
 # --- npm rejection reason (issue #205) ---------------------------------------
 
 @test "chain: rejected lockfile reports first reason and logs all of them" {
