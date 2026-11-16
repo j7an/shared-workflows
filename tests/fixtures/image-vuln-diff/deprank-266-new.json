@@ -1,0 +1,86 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90",
+  "Metadata": {
+    "OS": {
+      "Family": "debian",
+      "Name": "13.7"
+    },
+    "ImageConfig": {
+      "os": "linux",
+      "architecture": "amd64"
+    }
+  },
+  "Results": [
+    {
+      "Target": "python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 (debian 13.7)",
+      "Class": "os-pkgs",
+      "Type": "debian",
+      "Packages": [
+        {
+          "Name": "apt",
+          "Version": "3.0.4",
+          "SrcName": "apt",
+          "SrcVersion": "3.0.4"
+        },
+        {
+          "Name": "libapt-pkg7.0",
+          "Version": "3.0.4",
+          "SrcName": "apt",
+          "SrcVersion": "3.0.4"
+        },
+        {
+          "Name": "tzdata",
+          "Version": "2026f",
+          "SrcName": "tzdata",
+          "SrcVersion": "2026f"
+        }
+      ],
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2026-18374",
+          "PkgName": "libc6",
+          "InstalledVersion": "2.41-12+deb13u4",
+          "FixedVersion": null,
+          "Status": "affected",
+          "Severity": "MEDIUM"
+        }
+      ]
+    },
+    {
+      "Target": "Python",
+      "Class": "lang-pkgs",
+      "Type": "python-pkg",
+      "Packages": [
+        {
+          "Name": "pip",
+          "Version": "26.2.2",
+          "SrcName": null,
+          "SrcVersion": null
+        },
+        {
+          "Name": "setuptools",
+          "Version": "70.3.0",
+          "SrcName": null,
+          "SrcVersion": null
+        },
+        {
+          "Name": "urllib3",
+          "Version": "2.7.0",
+          "SrcName": null,
+          "SrcVersion": null
+        }
+      ],
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2026-97687",
+          "PkgName": "urllib3",
+          "InstalledVersion": "2.7.0",
+          "FixedVersion": "2.8.0",
+          "Status": "fixed",
+          "Severity": "HIGH"
+        }
+      ]
+    }
+  ]
+}
