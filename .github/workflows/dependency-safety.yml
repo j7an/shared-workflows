@@ -96,7 +96,7 @@ jobs:
           extract_deps() (
           # extract-deps.sh — parse unified diff on stdin, emit dependency TSV on stdout
           #
-          # Output: <name>\t<version>\t<ecosystem>  where ecosystem ∈ {actions, pypi}
+          # Output: <name>\t<version>\t<ecosystem>  where ecosystem ∈ {actions, pypi, docker}
           # Exit:   0 on success (possibly zero rows), 2 on malformed input
           #
           # Handles THREE shapes observed in real PR diffs:
@@ -105,6 +105,12 @@ jobs:
           #   3. TOML lockfile [[package]] stanzas (uv.lock, poetry.lock) where the
           #      name line may be on an unchanged context line while only the version
           #      is `+`-prefixed — section-aware parsing required.
+          #
+          #   4. Dockerfile `FROM` lines (added lines only): emit
+          #      <image-without-tag-or-digest>\t<tag@digest | tag | digest | latest>\tdocker.
+          #      An added FROM line that cannot be parsed (e.g. `${BASE}` or a line
+          #      continuation) emits <raw token, or FROM>\t-\tdocker so the guard can
+          #      fail loud. Version is never empty (tab-`read` consumers collapse it).
           #
           # The TOML lockfile parser addresses issue #52: Dependabot bumps to uv.lock
           # and poetry.lock previously yielded zero rows, cascading to silent-green
@@ -133,6 +139,14 @@ jobs:
           current_file=""
           current_name=""
           current_ecosystem=""
+          current_is_dockerfile=false
+          stage_names=$'\n'
+
+          # Dockerfile FROM parsing (regexes in variables: they contain `)` and `|`)
+          from_line_re='^\+[[:space:]]*[Ff][Rr][Oo][Mm]([[:space:]]|$)'
+          from_token_re='^\+[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+((--[^[:space:]]+[[:space:]]+)*)([^[:space:]]+)'
+          from_alias_re='^[+ ][[:space:]]*[Ff][Rr][Oo][Mm][[:space:]].*[[:space:]][Aa][Ss][[:space:]]+([^[:space:]]+)[[:space:]]*$'
+          image_token_re='^[A-Za-z0-9][A-Za-z0-9._/:@-]*$'
 
           input=$(cat)
 
@@ -157,11 +171,68 @@ jobs:
               current_file="${BASH_REMATCH[2]##*/}"
               current_ecosystem=$(filename_to_ecosystem "$current_file")
               current_name=""
+              stage_names=$'\n'
+              case "$current_file" in
+                Dockerfile|Containerfile|*.Dockerfile|Dockerfile.*) current_is_dockerfile=true ;;
+                *) current_is_dockerfile=false ;;
+              esac
               continue
             fi
 
             # Skip diff file headers (+++ b/path)
             [[ "$line" == +++* ]] && continue
+
+            # --- Dockerfile FROM lines (context/+ record stage aliases; + emits rows) ---
+            if $current_is_dockerfile; then
+              prev_stage_names="$stage_names"
+              if [[ "$line" =~ $from_alias_re ]]; then
+                alias_lc=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
+                stage_names="${stage_names}${alias_lc}"$'\n'
+              fi
+              if [[ "$line" =~ $from_line_re ]]; then
+                token=""
+                if [[ "$line" =~ $from_token_re ]]; then
+                  token="${BASH_REMATCH[3]}"
+                fi
+                token_lc=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
+                [ "$token_lc" = "scratch" ] && continue
+                if [ -n "$token" ]; then
+                  case "$prev_stage_names" in *$'\n'"$token_lc"$'\n'*) continue ;; esac
+                fi
+
+                if [ -z "$token" ] || [[ "$token" == *'$'* ]] || ! [[ "$token" =~ $image_token_re ]]; then
+                  name="${token:-FROM}"
+                  version="-"
+                else
+                  rest="$token"
+                  digest=""
+                  tag=""
+                  if [[ "$rest" == *@* ]]; then
+                    digest="${rest##*@}"
+                    rest="${rest%@*}"
+                  fi
+                  if [[ "$rest" == *:* ]] && [[ "${rest##*:}" != */* ]]; then
+                    tag="${rest##*:}"
+                    rest="${rest%:*}"
+                  fi
+                  name="$rest"
+                  if [ -n "$tag" ] && [ -n "$digest" ]; then
+                    version="$tag@$digest"
+                  elif [ -n "$tag" ]; then
+                    version="$tag"
+                  elif [ -n "$digest" ]; then
+                    version="$digest"
+                  else
+                    version="latest"
+                  fi
+                fi
+                key="docker:$name@$version"
+                case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+                seen="${seen}${key}"$'\n'
+                rows+=("$name"$'\t'"$version"$'\t'"docker")
+                continue
+              fi
+            fi
 
             # --- Branch 3: [[package]] stanza boundary (context or +, not -) ---
             if [ -n "$current_ecosystem" ] && [[ "$line" =~ ^[+\ ][[:space:]]*\[\[package\]\] ]]; then
@@ -257,7 +328,8 @@ jobs:
             # Add new lockfile/manifest filename patterns to this case list as needed.
             case "$base" in
               *.lock|requirements*.txt|pyproject.toml|Pipfile|go.mod|Cargo.toml \
-                |package.json|package-lock.json|yarn.lock|pnpm-lock.yaml)
+                |package.json|package-lock.json|yarn.lock|pnpm-lock.yaml \
+                |Dockerfile|Containerfile|*.Dockerfile|Dockerfile.*)
                 matches+=("$path")
                 continue
                 ;;
@@ -298,6 +370,8 @@ jobs:
           #   - .github/workflows/*.yml | *.yaml  (GitHub Actions `uses:` line parser)
           #   - uv.lock | poetry.lock             (TOML [[package]] stanza parser)
           #   - requirements*.txt                 (pip line-shape parser)
+          #   - Dockerfile | Containerfile | *.Dockerfile | Dockerfile.*
+          #                                       (`FROM` line parser)
           #
           # `requirements*.txt` is supported by line-shape parsing, not by a full
           # requirements-file parser. The extractor recognizes added requirement lines
@@ -333,6 +407,7 @@ jobs:
             case "$base" in
               uv.lock|poetry.lock) continue ;;
               requirements*.txt)   continue ;;
+              Dockerfile|Containerfile|*.Dockerfile|Dockerfile.*) continue ;;
             esac
 
             # Anything else: emit as unsupported.
@@ -1693,7 +1768,8 @@ jobs:
           #   out: <name>\t<version>\t<ecosystem>\t<published_iso>\t<age_days>\t<verdict>\t<reason>
           #
           # Ecosystems: actions (GitHub releases API), pypi (PyPI JSON API),
-          # npm (deps.dev stable v3).
+          # npm (deps.dev stable v3), docker (image config `created` from the OCI
+          # registry API; newest across platforms).
           #
           # Verdicts: pass | fail | error
           # Exit: always 0; failures are per-row.
@@ -1801,10 +1877,229 @@ jobs:
             printf '%s\t%s\n' "$published" "$deprecated"
           }
 
+          # docker_registry_repo <name> — print "<host>\t<repo>" on stdout.
+          # A first path component containing '.' or ':' (or equal to 'localhost') is
+          # the registry host; otherwise the image lives on Docker Hub.
+          docker_registry_repo() {
+            local name="$1" first rest host repo
+            first="${name%%/*}"
+            rest="${name#*/}"
+            if [ "$first" != "$name" ] && { [[ "$first" == *.* ]] || [[ "$first" == *:* ]] || [ "$first" = "localhost" ]; }; then
+              host="$first"
+              repo="$rest"
+              if [ "$host" = "docker.io" ]; then
+                host="registry-1.docker.io"
+              fi
+            else
+              host="registry-1.docker.io"
+              repo="$name"
+            fi
+            if [ "$host" = "registry-1.docker.io" ]; then
+              repo="${repo#docker.io/}"
+              case "$repo" in
+                */*) ;;
+                *) repo="library/$repo" ;;
+              esac
+            fi
+            printf '%s\t%s\n' "$host" "$repo"
+          }
+
+          # registry_http <url> <body-file> <header-file> [header]... — one curl call;
+          # prints the HTTP status ("000" on network failure).
+          registry_http() {
+            local url="$1" bfile="$2" hfile="$3" code
+            shift 3
+            local args=() h
+            for h in "$@"; do
+              args+=(-H "$h")
+            done
+            code=$(curl -sS --proto '=https' --proto-redir '=https' --max-time 30 -L -D "$hfile" -o "$bfile" -w '%{http_code}' ${args[@]+"${args[@]}"} "$url" 2>/dev/null) || code=000
+            printf '%s' "${code:-000}"
+          }
+
+          # registry_get <host> <repo> <path> — print the response body on stdout.
+          # On failure return non-zero with the error reason on stdout.
+          # Fixture mode reads $AGE_FIXTURE_DIR/docker/<host>/<repo>/<path>.json.
+          registry_get() {
+            local host="$1" repo="$2" path="$3"
+            if [ -n "${AGE_FIXTURE_DIR:-}" ]; then
+              local fx="$AGE_FIXTURE_DIR/docker/$host/$repo/$path.json"
+              if [ ! -f "$fx" ]; then
+                printf 'docker-404'
+                return 1
+              fi
+              cat "$fx"
+              return 0
+            fi
+            local url="https://$host/v2/$repo/$path"
+            local accept='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+            local tmp bfile hfile code attempt authz="" challenge realm service scope turl
+            tmp=$(mktemp -d) || { printf 'transient-failure'; return 1; }
+            bfile="$tmp/body"
+            hfile="$tmp/hdr"
+            attempt=0
+            while :; do
+              if [ -n "$authz" ]; then
+                code=$(registry_http "$url" "$bfile" "$hfile" "Accept: $accept" "Authorization: Bearer $authz")
+              else
+                code=$(registry_http "$url" "$bfile" "$hfile" "Accept: $accept")
+              fi
+              case "$code" in
+                2??)
+                  cat "$bfile"
+                  rm -rf "$tmp"
+                  return 0
+                  ;;
+                401)
+                  if [ -n "$authz" ]; then
+                    rm -rf "$tmp"
+                    printf 'docker-auth-required'
+                    return 1
+                  fi
+                  challenge=$(grep -i '^www-authenticate:' "$hfile" 2>/dev/null | head -n 1 | tr -d '\r')
+                  realm=$(printf '%s' "$challenge" | sed -n 's/.*[Rr]ealm="\([^"]*\)".*/\1/p')
+                  service=$(printf '%s' "$challenge" | sed -n 's/.*[Ss]ervice="\([^"]*\)".*/\1/p')
+                  scope=$(printf '%s' "$challenge" | sed -n 's/.*[Ss]cope="\([^"]*\)".*/\1/p')
+                  case "$realm" in https://*) ;; *) realm="" ;; esac
+                  if [ -z "$realm" ]; then
+                    rm -rf "$tmp"
+                    printf 'docker-auth-required'
+                    return 1
+                  fi
+                  turl="$realm?service=$service&scope=$scope"
+                  code=$(registry_http "$turl" "$bfile" "$hfile")
+                  case "$code" in
+                    2??) authz=$(jq -r '.token // .access_token // empty' "$bfile" 2>/dev/null) ;;
+                    *) authz="" ;;
+                  esac
+                  if [ -z "$authz" ]; then
+                    rm -rf "$tmp"
+                    printf 'docker-auth-required'
+                    return 1
+                  fi
+                  ;;
+                403)
+                  rm -rf "$tmp"
+                  printf 'docker-auth-required'
+                  return 1
+                  ;;
+                404)
+                  rm -rf "$tmp"
+                  printf 'docker-404'
+                  return 1
+                  ;;
+                429)
+                  rm -rf "$tmp"
+                  printf 'docker-rate-limited'
+                  return 1
+                  ;;
+                *)
+                  attempt=$((attempt + 1))
+                  if [ "$attempt" -ge 2 ]; then
+                    rm -rf "$tmp"
+                    printf 'transient-failure'
+                    return 1
+                  fi
+                  sleep "${AGE_RETRY_SLEEP:-2}"
+                  ;;
+              esac
+            done
+          }
+
+          # fetch_docker <name> <version> — print the newest image config `created`
+          # (YYYY-MM-DDTHH:MM:SSZ) on stdout. On failure return 1 with the reason on stdout.
+          # The reference is the digest when version carries a sha256, else the tag.
+          # For an index, every entry whose platform os is not "unknown" counts (this
+          # skips attestation manifests); the newest `created` across platforms wins.
+          # ponytail: one config fetch per platform (~9 manifest GETs for an 8-platform
+          # index against Docker Hub's anonymous 100 per 6 h). Switch to index
+          # org.opencontainers.image.created annotations if rate limits bite in practice.
+          fetch_docker() {
+            local name="$1" version="$2"
+            local hr host repo ref body digests d mbody cdigest cbody created
+            local best_epoch="" best_iso="" ep re_frac='^(.*)\.[0-9]+Z$'
+            hr=$(docker_registry_repo "$name")
+            host="${hr%%$'\t'*}"
+            repo="${hr#*$'\t'}"
+            if [[ "$version" == *sha256:* ]]; then
+              ref="sha256:${version##*sha256:}"
+            else
+              ref="$version"
+            fi
+            if ! body=$(registry_get "$host" "$repo" "manifests/$ref"); then
+              printf '%s' "$body"
+              return 1
+            fi
+            if ! printf '%s' "$body" | jq -e 'type == "object"' >/dev/null 2>&1; then
+              printf 'parse-failure'
+              return 1
+            fi
+            digests=""
+            if printf '%s' "$body" | jq -e 'has("manifests")' >/dev/null 2>&1; then
+              digests=$(printf '%s' "$body" | jq -r '(.manifests // [])[]? | select((.platform.os // "") != "unknown") | .digest // empty' 2>/dev/null)
+              if [ -z "$digests" ]; then
+                printf 'parse-failure'
+                return 1
+              fi
+            else
+              # Single manifest: its config is the one to read.
+              mbody="$body"
+              digests="-"
+            fi
+            while IFS= read -r d; do
+              [ -z "$d" ] && continue
+              if [ "$d" != "-" ]; then
+                if ! mbody=$(registry_get "$host" "$repo" "manifests/$d"); then
+                  printf '%s' "$mbody"
+                  return 1
+                fi
+              fi
+              cdigest=$(printf '%s' "$mbody" | jq -r '.config.digest // empty' 2>/dev/null)
+              if [ -z "$cdigest" ]; then
+                printf 'parse-failure'
+                return 1
+              fi
+              if ! cbody=$(registry_get "$host" "$repo" "blobs/$cdigest"); then
+                printf '%s' "$cbody"
+                return 1
+              fi
+              created=$(printf '%s' "$cbody" | jq -r '.created // empty' 2>/dev/null)
+              if [ -z "$created" ]; then
+                printf 'parse-failure'
+                return 1
+              fi
+              if [[ "$created" =~ $re_frac ]]; then
+                created="${BASH_REMATCH[1]}Z"
+              fi
+              if ! ep=$(iso_to_epoch "$created"); then
+                printf 'parse-failure'
+                return 1
+              fi
+              # Sanity, per platform (a valid newest one must not hide a bad one):
+              # reproducible builds stamp created=1970, and a future date is garbage;
+              # neither is a real build date, so never report them as pass.
+              # 1356998400 = 2013-01-01T00:00:00Z (before Docker existed).
+              if [ "$ep" -lt 1356998400 ] || [ "$ep" -gt "$NOW_EPOCH" ]; then
+                printf 'implausible-timestamp'
+                return 1
+              fi
+              if [ -z "$best_epoch" ] || [ "$ep" -gt "$best_epoch" ]; then
+                best_epoch="$ep"
+                best_iso="$created"
+              fi
+            done <<EOT
+          $digests
+          EOT
+            printf '%s' "$best_iso"
+          }
+
           # emit name version ecosystem published age verdict reason
           emit() {
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7"
           }
+
+          # Test seam: source the functions above without running the loop.
+          [ "${CHECK_RELEASE_AGE_LIB:-}" = 1 ] && return 0 2>/dev/null
 
           while IFS=$'\t' read -r name version ecosystem || [ -n "${name:-}" ]; do
             [ -z "${name:-}" ] && continue
@@ -1890,6 +2185,27 @@ jobs:
                 fi
                 ;;
 
+              docker)
+                if [ "$version" = "-" ]; then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "docker-unresolved-reference"
+                  continue
+                fi
+                if ! iso=$(fetch_docker "$name" "$version"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "${iso:-transient-failure}"
+                  continue
+                fi
+                if ! pub_epoch=$(iso_to_epoch "$iso"); then
+                  emit "$name" "$version" "$ecosystem" "-" "-" "error" "parse-failure"
+                  continue
+                fi
+                age_days=$(( (NOW_EPOCH - pub_epoch) / 86400 ))
+                if [ "$age_days" -ge "$COOLDOWN_DAYS" ]; then
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "pass" ""
+                else
+                  emit "$name" "$version" "$ecosystem" "$iso" "$age_days" "fail" ""
+                fi
+                ;;
+
               *)
                 emit "$name" "$version" "$ecosystem" "-" "-" "error" "unknown-ecosystem"
                 ;;
@@ -1918,6 +2234,12 @@ jobs:
           #   RELEASE_AGE_POLICY      off|advisory|blocking
           #   MINIMUM_RELEASE_AGE_DAYS int >=0 (status text only; ignored when policy=off)
           #   AUTO_MERGE              true|false
+          #   IMAGE_COUNT             int >=0  (container base images found in the diff)
+          #
+          # Priority: guard > errors > image-unchecked > blocking-age > advisories >
+          # advisory-age > clean. Image-unchecked = RELEASE_AGE_POLICY=off with
+          # IMAGE_COUNT>0: images have no advisory data, so without an age check they
+          # need manual review (gate_state=error, no safety-error label, no auto-merge).
           #
           # Contract invariant: RELEASE_AGE_POLICY=off requires AGE_ERROR_COUNT=0 and
           # AGE_VIOLATION_COUNT=0 — no age data may exist when no lookup ran. A
@@ -1977,6 +2299,12 @@ jobs:
           require_nonneg_int SCAN_ERROR_COUNT
           require_nonneg_int ADVISORY_COUNT
           require_nonneg_int MINIMUM_RELEASE_AGE_DAYS
+          require_nonneg_int IMAGE_COUNT
+
+          image_unchecked=false
+          if [ "$RELEASE_AGE_POLICY" = "off" ] && [ "$IMAGE_COUNT" -gt 0 ]; then
+            image_unchecked=true
+          fi
 
           # Contract invariant (see header): no age data may exist when policy is off.
           if [ "$RELEASE_AGE_POLICY" = "off" ]; then
@@ -1994,6 +2322,8 @@ jobs:
           if [ "$GUARD_TRIGGERED" = "true" ]; then
             gate_state="error"
           elif [ "$error_total" -gt 0 ]; then
+            gate_state="error"
+          elif [ "$image_unchecked" = "true" ]; then
             gate_state="error"
           elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
             gate_state="failure"
@@ -2024,6 +2354,7 @@ jobs:
           if [ "$AUTO_MERGE" = "true" ] \
              && [ "$GUARD_TRIGGERED" = "false" ] \
              && [ "$error_total" -eq 0 ] \
+             && [ "$image_unchecked" = "false" ] \
              && [ "$AGE_VIOLATION_COUNT" -eq 0 ] \
              && [ "$ADVISORY_COUNT" -eq 0 ]; then
             auto_merge_ok="true"
@@ -2036,6 +2367,8 @@ jobs:
             status_desc="Could not extract dependencies from diff. Manual review required."
           elif [ "$error_total" -gt 0 ]; then
             status_desc="Scan errors: ${AGE_ERROR_COUNT} age lookup(s), ${SCAN_ERROR_COUNT} advisory query/ies. Re-run or push to retry."
+          elif [ "$image_unchecked" = "true" ]; then
+            status_desc="Release age not checked for ${IMAGE_COUNT} container image(s) (release_age_policy: off). Manual review required."
           elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
             status_desc="${AGE_VIOLATION_COUNT} package(s) younger than ${MINIMUM_RELEASE_AGE_DAYS}d minimum release age (blocking policy)."
           elif [ "$ADVISORY_COUNT" -gt 0 ]; then
@@ -2045,12 +2378,16 @@ jobs:
           elif [ "$auto_merge_ok" = "true" ]; then
             if [ "$RELEASE_AGE_POLICY" = "off" ]; then
               status_desc="Clean scan (no advisories). Auto-merge enabled."
+            elif [ "$IMAGE_COUNT" -gt 0 ]; then
+              status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; container images age-checked only, no advisory data). Auto-merge enabled."
             else
               status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Auto-merge enabled."
             fi
           else
             if [ "$RELEASE_AGE_POLICY" = "off" ]; then
               status_desc="Clean scan (no advisories). Ready for merge."
+            elif [ "$IMAGE_COUNT" -gt 0 ]; then
+              status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; container images age-checked only, no advisory data). Ready for merge."
             else
               status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Ready for merge."
             fi
@@ -2205,6 +2542,11 @@ jobs:
             GUARD_TRIGGERED=true
             TOUCHED_LIST=$(echo "$EFFECTIVE_TOUCHED" | paste -sd, -)
             EXTRACTION_WARNING="⚠️ Parser could not extract dependencies from this diff (touched: ${TOUCHED_LIST}). Manual review required before merge."
+          elif UNRESOLVED_IMAGES=$(printf '%s\n' "$DEPS_TSV" | awk -F'\t' '$3=="docker" && $2=="-" {print $1}' | paste -sd, -) && [ -n "$UNRESOLVED_IMAGES" ]; then
+            # An unparsed FROM line (e.g. a build argument) leaves a marker row
+            # with version "-"; the image cannot be age-checked, so fail loud.
+            GUARD_TRIGGERED=true
+            EXTRACTION_WARNING="⚠️ Dockerfile FROM line the parser cannot resolve to an image (${UNRESOLVED_IMAGES}), for example a build argument. Manual review required."
           fi
 
           # --- BEGIN dep routing ---
@@ -2213,6 +2555,7 @@ jobs:
           ACTIONS=""
           PY_DEPS=""
           NPM_ROWS=""
+          IMAGE_ROWS=""
           while IFS=$'\t' read -r _name _ver _eco; do
             [ -z "$_name" ] && continue
             case "$_eco" in
@@ -2227,11 +2570,16 @@ jobs:
               npm)
                 NPM_ROWS="$(printf '%s\n%s\t%s' "$NPM_ROWS" "$_name" "$_ver")"
                 ;;
+              docker)
+                IMAGE_ROWS="$(printf '%s\n%s\t%s' "$IMAGE_ROWS" "$_name" "$_ver")"
+                ;;
             esac
           done <<< "$DEPS_TSV"
           ACTIONS=$(echo "$ACTIONS" | sed '/^$/d' | sort -u)
           PY_DEPS=$(echo "$PY_DEPS" | sed '/^$/d' | sort -u)
           NPM_ROWS=$(printf '%s' "$NPM_ROWS" | sed '/^$/d' | sort -u)
+          IMAGE_ROWS=$(printf '%s' "$IMAGE_ROWS" | sed '/^$/d' | sort -u)
+          IMAGE_COUNT=$(printf '%s\n' "$IMAGE_ROWS" | sed '/^$/d' | wc -l | tr -d ' ')
           # --- END dep routing ---
 
           # PR-body version fallback for deps without inline version (preserved from v2.0.1)
@@ -2694,14 +3042,45 @@ jobs:
           # only "no dependencies extracted" there reads as nothing was
           # scanned, when N package versions actually were — point at the
           # tier-2 section instead of implying an unscanned gate.
+          # NO_PACKAGE_SCAN is computed before the placeholder replaces DEPS: true
+          # when no package was scanned at all (no tier-1 rows, no tier-2 sweep).
+          NO_PACKAGE_SCAN=false
+          if [ -z "$DEPS" ] && [ "$TIER2_COUNT" -eq 0 ]; then
+            NO_PACKAGE_SCAN=true
+          fi
           if [ -z "$DEPS" ]; then
             if [ "$TIER2_COUNT" -gt 0 ]; then
               DEPS="(no declared dependency changes — ${TIER2_COUNT} transitive lockfile version(s) swept, see below)"
+            elif [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
+              DEPS="(none — this PR changes container images only)"
             else
               DEPS="(no dependencies extracted from diff)"
             fi
           fi
           # --- END deps placeholder ---
+
+          # --- BEGIN images line ---
+          # Container images get no advisory scan; say so honestly. PR-supplied
+          # names/versions are inert: backticks are stripped before they go
+          # inside inline code.
+          IMAGES_LINE=""
+          if [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
+            _img_list=""
+            while IFS=$'\t' read -r _iname _iver; do
+              [ -z "$_iname" ] && continue
+              _iname="${_iname//\`/}"
+              _iver="${_iver//\`/}"
+              if [ -n "$_img_list" ]; then _img_list="${_img_list}, "; fi
+              _img_list="${_img_list}\`${_iname}\` (${_iver})"
+            done <<< "$IMAGE_ROWS"
+            if [ "$RELEASE_AGE_POLICY" = "off" ]; then
+              _img_suffix='release age not checked (`release_age_policy` is `off`); vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214).'
+            else
+              _img_suffix='release age checked; vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214).'
+            fi
+            IMAGES_LINE=$'\n\n'"**Container images:** ${_img_list} — ${_img_suffix}"
+          fi
+          # --- END images line ---
 
           # --- Build comment body ---
           TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
@@ -2744,6 +3123,7 @@ jobs:
                            RELEASE_AGE_POLICY="$RELEASE_AGE_POLICY" \
                            MINIMUM_RELEASE_AGE_DAYS="$MINIMUM_RELEASE_AGE_DAYS" \
                            AUTO_MERGE="$AUTO_MERGE" \
+                           IMAGE_COUNT="$IMAGE_COUNT" \
                            safety_verdict); then
             VERDICT_RC=0
           else
@@ -2829,6 +3209,7 @@ jobs:
           # The two are independent so that a multi-condition PR (e.g. age violation + advisories)
           # shows both signals: header per priority, table reflecting actual scan data.
 
+          # --- BEGIN results summary ---
           # ---- Results table (from scan state only) ----
           if [ "$GUARD_TRIGGERED" = "true" ] && [ "$TOTAL" -eq 0 ]; then
             # Extraction failed AND no advisories from any subset that did get scanned:
@@ -2840,6 +3221,13 @@ jobs:
             TABLE_SEP="|--------|----------------|"
             ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
             ROW2="| OSV.dev | (not scanned) |"
+            RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
+          elif [ "$TOTAL" -eq 0 ] && [ "$HAS_SAFETY_ERROR" != "true" ] && [ "${NO_PACKAGE_SCAN:-false}" = "true" ] && [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
+            # Nothing was package-scanned (e.g. image-only PR): advisory sources do not apply.
+            TABLE_HDR="| Source | Vulnerabilities |"
+            TABLE_SEP="|--------|----------------|"
+            ROW1="| GitHub Advisory (GHSA) | (not applicable — no packages to scan) |"
+            ROW2="| OSV.dev | (not applicable — no packages to scan) |"
             RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
           elif [ "$TOTAL" -gt 0 ]; then
             # Advisories present — show the actual scan results. This branch wins over
@@ -2876,7 +3264,7 @@ jobs:
           }
 
           # ---- Header + footer (from verdict priority — must match safety-verdict.sh order) ----
-          # Priority: guard > error > blocking-age > advisories > advisory-age > clean.
+          # Priority: guard > error > image-unchecked > blocking-age > advisories > advisory-age > clean.
           # Spec §6.1 — keep this order in sync with the script.
           if [ "$GUARD_TRIGGERED" = "true" ]; then
             RESULTS_HEADER="Dependency extraction failed — manual review required."
@@ -2889,6 +3277,9 @@ jobs:
           elif [ "$HAS_SAFETY_ERROR" = "true" ]; then
             RESULTS_HEADER="Scan completed with errors — see workflow logs."
             RESULTS_FOOTER="> Scan errors prevented a clean verdict. Re-run or push to retry."
+          elif [ "$RELEASE_AGE_POLICY" = "off" ] && [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
+            RESULTS_HEADER="Release age not checked for ${IMAGE_COUNT} container image(s) — manual review required."
+            RESULTS_FOOTER="> \`release_age_policy\` is \`off\`. Set it to \`advisory\` or \`blocking\` to have container image bumps age-checked."
           elif [ "$HAS_AGE_VIOLATION" = "true" ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
             RESULTS_HEADER="$(age_status_phrase) (blocking policy)."
             if [ "$AGE_ONLY_COUNT" -gt 0 ]; then
@@ -2907,6 +3298,13 @@ jobs:
             # release_age_policy: advisory — reported, not blocking.
             RESULTS_HEADER="$(age_status_phrase) (advisory policy — not blocking)."
             RESULTS_FOOTER="> Release-age violation reported (advisory policy — not blocking). Auto-merge suppressed."
+          elif [ "${NO_PACKAGE_SCAN:-false}" = "true" ] && [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
+            RESULTS_HEADER="No package dependencies to scan. Container image(s) passed the release-age check; no vulnerability scan was performed."
+            if [ "$AUTO_MERGE_OK" = "true" ]; then
+              RESULTS_FOOTER="> Auto-merge enabled. PR will merge once all required checks pass."
+            else
+              RESULTS_FOOTER="> Ready for manual review and merge."
+            fi
           else
             RESULTS_HEADER="No known exploits found affecting the target versions."
             if [ "$AUTO_MERGE_OK" = "true" ]; then
@@ -2915,6 +3313,8 @@ jobs:
               RESULTS_FOOTER="> Ready for manual review and merge."
             fi
           fi
+
+          # --- END results summary ---
 
           # Attach auto-merge SETUP failure note (from the auto-merge block above) to the footer.
           # Auto-merge "required checks not satisfied" is NOT an error and not surfaced
@@ -2940,6 +3340,7 @@ jobs:
             AGE_TABLE_SEP="|---------|---------|-----------|-----|--------|"
             AGE_ROWS=""
             MAX_FAIL_EPOCH=0
+            HAD_DOCKER=0
             while IFS=$'\t' read -r _name _ver _eco _iso _days _verdict _reason; do
               [ -z "$_name" ] && continue
               case "$_verdict" in
@@ -2953,7 +3354,22 @@ jobs:
               else
                 _published_short="${_iso%T*}"
               fi
-              AGE_ROWS="${AGE_ROWS}| \`${_name}\` | v${_ver} | ${_published_short} | ${_days}d | ${_status} |"$'\n'
+              if [ "$_eco" = "docker" ]; then
+                HAD_DOCKER=1
+                # Image versions are tags/digests, not semver: no "v" prefix,
+                # long digests shortened, backticks stripped (PR-supplied text).
+                _ver_cell="${_ver//\`/}"
+                case "$_ver_cell" in
+                  *sha256:*)
+                    _dg="${_ver_cell##*sha256:}"
+                    _ver_cell="${_ver_cell%sha256:*}sha256:${_dg:0:12}…"
+                    ;;
+                esac
+                _name="${_name//\`/}"
+              else
+                _ver_cell="v${_ver}"
+              fi
+              AGE_ROWS="${AGE_ROWS}| \`${_name}\` | ${_ver_cell} | ${_published_short} | ${_days}d | ${_status} |"$'\n'
 
               # Track max fail epoch for "earliest unblock" footer. Age-only rows
               # (empty reason) only — a yanked/deprecated row's publish date is
@@ -2981,8 +3397,14 @@ jobs:
                 "$AGE_ONLY_COUNT" "$_unblock_iso")"
             fi
 
+            if [ "$HAD_DOCKER" -eq 1 ]; then
+              AGE_FOOTER="${AGE_FOOTER}"$'\n\n> Image dates are the image build timestamp reported by its publisher.'
+            fi
+
             RELEASE_AGE_SECTION="$(printf '\n### Release Age (minimum: %s days)\n\n%s\n%s\n%s%s' \
               "$MINIMUM_RELEASE_AGE_DAYS" "$AGE_TABLE_HDR" "$AGE_TABLE_SEP" "$AGE_ROWS" "$AGE_FOOTER")"
+          elif [ "${RELEASE_AGE_POLICY:-}" = "off" ] && printf '%s' "${DEPS_TSV:-}" | grep -q '[^[:space:]]'; then
+            RELEASE_AGE_SECTION=$'\n### Release Age\n\nNot checked: `release_age_policy` is `off`. Set it to `advisory` or `blocking` to check the release age of packages, GitHub Actions and container images.\n'
           fi
           # --- END release age section ---
 
@@ -2992,10 +3414,11 @@ jobs:
             EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
           fi
 
-          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s%s' \
+          COMMENT_BODY="$(printf '%s%s\n\n%s%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s%s' \
             "## Dependency Safety Scan" \
             "$EXTRACTION_WARNING_SECTION" \
             "**Packages scanned:** ${DEPS}" \
+            "$IMAGES_LINE" \
             "### Results" \
             "$RESULTS_HEADER" \
             "$RESULTS_TABLE" \

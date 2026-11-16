@@ -15,6 +15,12 @@
 #   RELEASE_AGE_POLICY      off|advisory|blocking
 #   MINIMUM_RELEASE_AGE_DAYS int >=0 (status text only; ignored when policy=off)
 #   AUTO_MERGE              true|false
+#   IMAGE_COUNT             int >=0  (container base images found in the diff)
+#
+# Priority: guard > errors > image-unchecked > blocking-age > advisories >
+# advisory-age > clean. Image-unchecked = RELEASE_AGE_POLICY=off with
+# IMAGE_COUNT>0: images have no advisory data, so without an age check they
+# need manual review (gate_state=error, no safety-error label, no auto-merge).
 #
 # Contract invariant: RELEASE_AGE_POLICY=off requires AGE_ERROR_COUNT=0 and
 # AGE_VIOLATION_COUNT=0 — no age data may exist when no lookup ran. A
@@ -74,6 +80,12 @@ require_nonneg_int AGE_VIOLATION_COUNT
 require_nonneg_int SCAN_ERROR_COUNT
 require_nonneg_int ADVISORY_COUNT
 require_nonneg_int MINIMUM_RELEASE_AGE_DAYS
+require_nonneg_int IMAGE_COUNT
+
+image_unchecked=false
+if [ "$RELEASE_AGE_POLICY" = "off" ] && [ "$IMAGE_COUNT" -gt 0 ]; then
+  image_unchecked=true
+fi
 
 # Contract invariant (see header): no age data may exist when policy is off.
 if [ "$RELEASE_AGE_POLICY" = "off" ]; then
@@ -91,6 +103,8 @@ error_total=$(( AGE_ERROR_COUNT + SCAN_ERROR_COUNT ))
 if [ "$GUARD_TRIGGERED" = "true" ]; then
   gate_state="error"
 elif [ "$error_total" -gt 0 ]; then
+  gate_state="error"
+elif [ "$image_unchecked" = "true" ]; then
   gate_state="error"
 elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
   gate_state="failure"
@@ -121,6 +135,7 @@ fi
 if [ "$AUTO_MERGE" = "true" ] \
    && [ "$GUARD_TRIGGERED" = "false" ] \
    && [ "$error_total" -eq 0 ] \
+   && [ "$image_unchecked" = "false" ] \
    && [ "$AGE_VIOLATION_COUNT" -eq 0 ] \
    && [ "$ADVISORY_COUNT" -eq 0 ]; then
   auto_merge_ok="true"
@@ -133,6 +148,8 @@ if [ "$GUARD_TRIGGERED" = "true" ]; then
   status_desc="Could not extract dependencies from diff. Manual review required."
 elif [ "$error_total" -gt 0 ]; then
   status_desc="Scan errors: ${AGE_ERROR_COUNT} age lookup(s), ${SCAN_ERROR_COUNT} advisory query/ies. Re-run or push to retry."
+elif [ "$image_unchecked" = "true" ]; then
+  status_desc="Release age not checked for ${IMAGE_COUNT} container image(s) (release_age_policy: off). Manual review required."
 elif [ "$AGE_VIOLATION_COUNT" -gt 0 ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
   status_desc="${AGE_VIOLATION_COUNT} package(s) younger than ${MINIMUM_RELEASE_AGE_DAYS}d minimum release age (blocking policy)."
 elif [ "$ADVISORY_COUNT" -gt 0 ]; then
@@ -142,12 +159,16 @@ elif [ "$AGE_VIOLATION_COUNT" -gt 0 ]; then
 elif [ "$auto_merge_ok" = "true" ]; then
   if [ "$RELEASE_AGE_POLICY" = "off" ]; then
     status_desc="Clean scan (no advisories). Auto-merge enabled."
+  elif [ "$IMAGE_COUNT" -gt 0 ]; then
+    status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; container images age-checked only, no advisory data). Auto-merge enabled."
   else
     status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Auto-merge enabled."
   fi
 else
   if [ "$RELEASE_AGE_POLICY" = "off" ]; then
     status_desc="Clean scan (no advisories). Ready for merge."
+  elif [ "$IMAGE_COUNT" -gt 0 ]; then
+    status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; container images age-checked only, no advisory data). Ready for merge."
   else
     status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Ready for merge."
   fi

@@ -91,7 +91,7 @@ input_default() {
 # unrelated line-number drift elsewhere in the file.
 extract_comment_body_printf() {
   awk '
-    /COMMENT_BODY="\$\(printf .%s%s\\n\\n%s\\n\\n%s\\n\\n%s\\n\\n%s\\n\\n%s%s%s%s%s./{flag=1}
+    /COMMENT_BODY="\$\(printf .%s%s\\n\\n%s%s\\n\\n%s\\n\\n%s\\n\\n%s\\n\\n%s%s%s%s%s%s./{flag=1}
     flag{print}
     flag && /\)"$/{exit}
   ' "$YAML"
@@ -114,5 +114,18 @@ extract_comment_body_printf() {
   n_pct=$(printf '%s' "$fmt_line" | grep -o '%s' | wc -l | tr -d ' ')
   n_args=$(echo "$block" | tail -n +2 | grep -c '^ *"')
   [ "$n_pct" -gt 0 ]
+  [ "$n_pct" -eq "$n_args" ]
+}
+
+@test "PR comment body wires IMAGES_LINE into the printf argument list" {
+  # Presence-only is not enough: a dropped %s shifts every later argument.
+  local block; block=$(extract_comment_body_printf)
+  [ -n "$block" ]
+  echo "$block" | grep -qF '"$IMAGES_LINE"'
+  # IMAGES_LINE must directly follow the Packages scanned argument.
+  [ "$(echo "$block" | grep -n 'IMAGES_LINE' | cut -d: -f1)" -eq "$(( $(echo "$block" | grep -n 'Packages scanned' | cut -d: -f1) + 1 ))" ]
+  local n_pct n_args
+  n_pct=$(echo "$block" | head -1 | grep -o '%s' | wc -l | tr -d ' ')
+  n_args=$(echo "$block" | tail -n +2 | grep -c '^ *"')
   [ "$n_pct" -eq "$n_args" ]
 }

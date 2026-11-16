@@ -5,6 +5,7 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 ## Features
 
 - **Opt-in release-age verification** — Dependabot's native `cooldown.default-days` owns the wait before PR creation; `release_age_policy` (default `"off"`) can additionally label (`advisory`) or fail the gate (`blocking`) on target versions younger than `minimum_release_age_days`
+- **Container base images** — Dockerfile `FROM` lines are parsed and, under `advisory` or `blocking`, each image's build date is age-checked via the OCI registry API. Images are not advisory-scanned (no advisory database covers container images; tracked in [#214](https://github.com/j7an/shared-workflows/issues/214))
 - **Version-aware advisory filtering** — advisories already patched at or below the PR's target version are collapsed into a non-blocking "historical" section
 - **GHSA + OSV dual-source scan** — every package is queried against both GitHub Advisory and OSV.dev; mismatches surface both
 - **OpenSSF Scorecard integration** — Scorecard results for each GitHub Action appear in the scan comment
@@ -15,7 +16,7 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 
 ## Prerequisites
 
-- **Dependabot** configured for your repo (GitHub Actions, pip/uv, and/or npm ecosystems)
+- **Dependabot** configured for your repo (GitHub Actions, pip/uv, npm, and/or Docker ecosystems)
 - **Native cool-down** configured in `.github/dependabot.yml` (see Quick Start)
 - **No Renovate** — this workflow only scans `dependabot[bot]` PRs; other actors are passed through with a success status (except external fork PRs, whose read-only token can't post the status — see [Fork PRs and the required gate](#fork-prs-and-the-required-gate))
 
@@ -384,8 +385,8 @@ update.
 |-------|------|---------|-------------|
 | `enable_scorecard` | boolean | `true` | Include OpenSSF Scorecard results for GitHub Actions in the scan comment |
 | `auto_merge` | boolean | `true` | On clean scans, enable `gh pr merge --auto` (requires `contents: write`); on dirty scans, apply the appropriate label. Set `false` for manual merges |
-| `release_age_policy` | string | `"off"` | Post-PR release-age verification: `off` (no age lookup), `advisory` (label + comment on young targets, gate stays green, auto-merge suppressed), `blocking` (gate fails). Quote `"off"` in YAML |
-| `minimum_release_age_days` | number | `5` | Threshold used when `release_age_policy` is `advisory` or `blocking`; ignored when `off`. Should match `cooldown.default-days` in `dependabot.yml` |
+| `release_age_policy` | string | `"off"` | Post-PR release-age verification: `off` (no age lookup), `advisory` (label + comment on young targets, gate stays green, auto-merge suppressed), `blocking` (gate fails). Quote `"off"` in YAML. Under `off`, a container image bump needs manual review (gate `error`, auto-merge off, no `dependency-safety-error` label) because its age cannot be checked |
+| `minimum_release_age_days` | number | `5` | Threshold used when `release_age_policy` is `advisory` or `blocking`; ignored when `off`. Should match `cooldown.default-days` in `dependabot.yml`. |
 
 ## Supported Ecosystems
 
@@ -394,6 +395,7 @@ update.
 | `.github/workflows/*.yml` (`uses:` lines) | GHSA `ACTIONS`, OSV `GitHub Actions` | — | GitHub Releases API | Yes |
 | `requirements*.txt`, `uv.lock`, `poetry.lock`, `pyproject.toml` | GHSA `PIP`, OSV `PyPI` | — | PyPI JSON API | No |
 | `package.json` + `pnpm-lock.yaml` | GHSA `NPM`, OSV `npm` | OSV batch over new lockfile entries | deps.dev v3 | No |
+| `Dockerfile`, `Containerfile`, `*.Dockerfile`, `Dockerfile.*` (added `FROM` lines) | Not advisory-scanned (no advisory database covers images; see [#214](https://github.com/j7an/shared-workflows/issues/214)) | — | OCI registry API (anonymous; newest image-config `created` across platforms; only under `advisory`/`blocking`) | No |
 | `package-lock.json` | **Not supported — fails closed** | — | — | — |
 | `yarn.lock` | **Not supported — fails closed** | — | — | — |
 
@@ -401,6 +403,25 @@ Dependabot calls the ecosystem `npm` regardless of which package manager a repo
 uses, so the table is keyed by lockfile. A repo using npm or Yarn directly will
 get an `error` gate with a diagnostic naming the unsupported file — not a
 silent pass.
+
+### Container images
+
+Added `FROM` lines in the Dockerfile family become `docker` rows (an untagged
+image is treated as `latest`; a `FROM` that cannot be parsed becomes a marker
+row that triggers the manual-review guard). Under `release_age_policy:
+advisory` or `blocking`, the image's age is the newest image-config `created`
+timestamp across its platforms, looked up anonymously through the OCI registry
+API (Docker Hub short names resolve under `library/`). Timestamps before 2013
+or in the future, and registry errors, are reported as `error` rows.
+
+Images are **not** advisory-scanned: no advisory database covers container
+images (tracked in [#214](https://github.com/j7an/shared-workflows/issues/214)),
+so a clean verdict means images were age-checked only. Under
+`release_age_policy: off`, any image bump yields gate `error` and requires
+manual review with auto-merge off, but no `dependency-safety-error` label,
+since this is a policy outcome rather than a scan failure. For all ecosystems,
+the scan comment carries a Release Age note when the policy is `off`, saying
+age was not checked and that `advisory` or `blocking` enables it.
 
 ### npm/pnpm scanning model
 
@@ -447,6 +468,7 @@ dependency-safety.yml fires on pull_request
     ├── Non-dependabot PR? → status "success" (no-op; external forks can't post — see "Fork PRs and the required gate")
     ├── Status → "pending" ("Scanning dependencies for safety...")
     ├── Parses diff to extract package names + target versions
+    │     ├── Dockerfile family: added FROM lines → docker rows (images are never advisory-scanned)
     │     ├── github-actions / pip: inline versions, falling back to PR body text
     │     └── npm/pnpm: lockfile-resolved versions; PR-body fallback only when
     │         the parser proves nothing
@@ -454,7 +476,7 @@ dependency-safety.yml fires on pull_request
     │     ├── Batched OSV queries, up to 100 packages per request
     │     └── Advisories suppress auto-merge; release age is NOT checked for
     │         Tier 2 (transitive versions are not declared by the PR author)
-    ├── Verifies release age (only when release_age_policy is advisory or blocking; blocking fails the gate, advisory labels + suppresses auto-merge)
+    ├── Verifies release age (only when release_age_policy is advisory or blocking; blocking fails the gate, advisory labels + suppresses auto-merge; includes container image build dates; under off, image bumps → manual review)
     ├── For each package:
     │     ├── GHSA GraphQL query (by ecosystem)
     │     ├── OSV.dev POST query (with version if known)
@@ -487,17 +509,17 @@ The `dependency-safety / gate` commit status uses three states:
 |-------|------|
 | `success` | Clean scan, OR advisories present (label `security-review-needed`), OR age violation under `release_age_policy: advisory` (label `dependency-age-violation`) |
 | `failure` | Age violation under `release_age_policy: blocking` |
-| `error` | Dependency extraction failed, or GHSA/OSV/age-lookup APIs errored — the verdict is unreliable; manual review required |
+| `error` | Dependency extraction failed, or GHSA/OSV/age-lookup APIs errored — the verdict is unreliable; manual review required. Also set when a container image changed under `release_age_policy: off`, which needs manual review and gets no `dependency-safety-error` label |
 
 Labels:
 
 | Label | Color | Applied when | Removed when |
 |-------|-------|--------------|--------------|
-| `security-review-needed` | red (`B60205`) | Advisory scan finds vulnerabilities affecting target versions | Re-scan finds zero applicable advisories AND no `error` state |
-| `dependency-age-violation` | amber (`FBCA04`) | Any target version is younger than `minimum_release_age_days` (only under `release_age_policy: advisory` or `blocking`) | All versions pass age check AND no `error` state |
+| `security-review-needed` | red (`B60205`) | Advisory scan finds vulnerabilities affecting target versions | Re-scan finds zero applicable advisories AND no `error` state (the policy-`off` container-image case does not count: labels reconcile normally there) |
+| `dependency-age-violation` | amber (`FBCA04`) | Any target version is younger than `minimum_release_age_days` (only under `release_age_policy: advisory` or `blocking`) | All versions pass age check AND no `error` state (the policy-`off` container-image case does not count: labels reconcile normally there) |
 | `dependency-safety-error` | grey (`6E7781`) | Scan extraction failed or API errors occurred | Clean scan completes without errors |
 
-Reconciliation is authoritative when the scan succeeds. On the `error` path, labels are preserved (not removed) since the verdict is unreliable.
+Reconciliation is authoritative when the scan succeeds. On the `error` path, labels are preserved (not removed) since the verdict is unreliable, except the policy-`off` container-image case, where labels reconcile normally.
 
 ## Fork PRs and the required gate
 

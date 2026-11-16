@@ -334,6 +334,8 @@ run_dep_routing() {
     $block
     printf 'NPM_LINES=%s\n' \"\$(printf '%s\n' \"\$NPM_ROWS\" | sed '/^\$/d' | wc -l | tr -d ' ')\"
     printf 'NPM_ROWS<<<%s>>>\n' \"\$NPM_ROWS\"
+    printf 'IMAGE_COUNT=%s\n' \"\$IMAGE_COUNT\"
+    printf 'IMAGE_ROWS<<<%s>>>\n' \"\$IMAGE_ROWS\"
   "
 }
 
@@ -357,6 +359,34 @@ run_dep_routing() {
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"NPM_LINES=0"* ]] || return 1
   [[ "$output" == *"NPM_ROWS<<<>>>"* ]] || return 1
+}
+
+@test "dep routing: docker rows go only to IMAGE_ROWS" {
+  local tsv="$BATS_TEST_TMPDIR/deps-docker.tsv"
+  printf 'sampleaction\tv1\tactions\npython\t3.13-slim\tdocker\nleftpad\t1.0.0\tnpm\n' > "$tsv"
+  run_dep_routing "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"IMAGE_COUNT=1"* ]] || return 1
+  [[ "$output" == *"IMAGE_ROWS<<<python"$'\t'"3.13-slim>>>"* ]] || return 1
+  [[ "$output" == *"NPM_LINES=1"* ]] || return 1
+  [[ "$output" == *"NPM_ROWS<<<leftpad"$'\t'"1.0.0>>>"* ]] || return 1
+}
+
+@test "dep routing: no docker rows → IMAGE_COUNT=0" {
+  local tsv="$BATS_TEST_TMPDIR/deps-nodocker.tsv"
+  printf 'leftpad\t1.0.0\tnpm\n' > "$tsv"
+  run_dep_routing "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"IMAGE_COUNT=0"* ]] || return 1
+  [[ "$output" == *"IMAGE_ROWS<<<>>>"* ]] || return 1
+}
+
+@test "dep routing: untagged image is counted" {
+  local tsv="$BATS_TEST_TMPDIR/deps-untagged.tsv"
+  printf 'debian\tlatest\tdocker\n' > "$tsv"
+  run_dep_routing "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"IMAGE_COUNT=1"* ]] || return 1
 }
 
 # --- tier-2 sweep ----------------------------------------------------------
@@ -647,6 +677,53 @@ age_tsv() {
   [[ "$AGE_FOOTER" != *'2026-09-06'* ]] || return 1
 }
 
+# --- Release Age section: image rows and policy-off note (issue #212) --------
+
+@test "release age section: docker row has no v prefix and a short digest" {
+  local d; d=$(printf 'e%.0s' $(seq 1 64))
+  AGE_TSV=$(age_tsv "python\t3.13-slim@sha256:${d}\tdocker\t2026-04-03T08:02:05Z\t9\tpass\t")
+  MINIMUM_RELEASE_AGE_DAYS=5; RELEASE_AGE_POLICY=advisory; DEPS_TSV=""
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [[ "$RELEASE_AGE_SECTION" == *'| 3.13-slim@sha256:eeeeeeeeeeee… |'* ]] || return 1
+  [[ "$RELEASE_AGE_SECTION" != *'vpython'* ]] || return 1
+  [[ "$RELEASE_AGE_SECTION" != *'v3.13'* ]] || return 1
+  [[ "$RELEASE_AGE_SECTION" == *'build timestamp reported by its publisher'* ]] || return 1
+}
+
+@test "release age section: package rows keep the v prefix and no image footnote" {
+  AGE_TSV=$(age_tsv 'lodash\t4.17.21\tnpm\t2021-02-20T00:00:00Z\t2000\tpass\t')
+  MINIMUM_RELEASE_AGE_DAYS=5; RELEASE_AGE_POLICY=advisory; DEPS_TSV=""
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [[ "$RELEASE_AGE_SECTION" == *'| v4.17.21 |'* ]] || return 1
+  [[ "$RELEASE_AGE_SECTION" != *'publisher'* ]] || return 1
+}
+
+@test "release age section: policy off with a pypi dependency shows the enable note" {
+  AGE_TSV=""; RELEASE_AGE_POLICY=off; MINIMUM_RELEASE_AGE_DAYS=5
+  DEPS_TSV=$'requests\t2.32.5\tpypi'
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  local want=$'\n### Release Age\n\nNot checked: `release_age_policy` is `off`. Set it to `advisory` or `blocking` to check the release age of packages, GitHub Actions and container images.\n'
+  [ "$RELEASE_AGE_SECTION" = "$want" ]
+}
+
+@test "release age section: policy off with no dependencies stays empty" {
+  AGE_TSV=""; RELEASE_AGE_POLICY=off; MINIMUM_RELEASE_AGE_DAYS=5; DEPS_TSV=""
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [ -z "$RELEASE_AGE_SECTION" ]
+}
+
+@test "release age section: advisory with empty AGE_TSV (0-day minimum) stays empty" {
+  AGE_TSV=""; RELEASE_AGE_POLICY=advisory; MINIMUM_RELEASE_AGE_DAYS=0
+  DEPS_TSV=$'requests\t2.32.5\tpypi'
+  eval "$(extract_named_block "$WF" 'age counts')"
+  eval "$(extract_named_block "$WF" 'release age section')"
+  [ -z "$RELEASE_AGE_SECTION" ]
+}
+
 # --- npm rejection reason (issue #205) ---------------------------------------
 
 @test "chain: rejected lockfile reports first reason and logs all of them" {
@@ -757,4 +834,115 @@ run_deprecated_section() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"::error::injected"* ]] || return 1
   [[ "$output" != *$'\r'* ]] || return 1
+}
+
+# --- images placeholder / images line / results summary ----------------------
+
+run_deps_placeholder_img() {
+  local deps="$1" tier2_count="$2" image_count="$3"
+  local block; block=$(extract_named_block "$WF" "deps placeholder")
+  run bash -c "
+    set -uo pipefail
+    DEPS='$deps'
+    TIER2_COUNT='$tier2_count'
+    IMAGE_COUNT='$image_count'
+    $block
+    printf 'DEPS<<<%s>>> NPS=%s\n' \"\$DEPS\" \"\$NO_PACKAGE_SCAN\"
+  "
+}
+
+@test "deps placeholder: image-only PR says images only and sets NO_PACKAGE_SCAN" {
+  run_deps_placeholder_img "" "0" "1"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DEPS<<<(none — this PR changes container images only)>>> NPS=true"* ]] || return 1
+}
+
+@test "deps placeholder: package PR leaves NO_PACKAGE_SCAN=false" {
+  run_deps_placeholder_img "foo 1.0, " "0" "0"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"NPS=false"* ]] || return 1
+  run_deps_placeholder_img "" "3" "1"
+  [[ "$output" == *"NPS=false"* ]] || return 1
+}
+
+run_images_line() {
+  local rows="$1" count="$2" policy="$3"
+  local block; block=$(extract_named_block "$WF" "images line")
+  run bash -c "
+    set -uo pipefail
+    IMAGE_ROWS=\$'$rows'
+    IMAGE_COUNT='$count'
+    RELEASE_AGE_POLICY='$policy'
+    $block
+    printf 'LINE<<<%s>>>\n' \"\$IMAGES_LINE\"
+  "
+}
+
+@test "images line: policy on lists image and says not vulnerability-scanned" {
+  run_images_line 'python\t3.13-slim@sha256:e48f…' 1 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'**Container images:** `python` (3.13-slim@sha256:e48f…)'* ]] || return 1
+  [[ "$output" == *'release age checked; vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214)'* ]] || return 1
+}
+
+@test "images line: policy off says age not checked and how to enable" {
+  run_images_line 'python\t3.13' 1 off
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'release age not checked (`release_age_policy` is `off`); vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214)'* ]] || return 1
+}
+
+@test "images line: empty when no images" {
+  run_images_line '' 0 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"LINE<<<>>>"* ]] || return 1
+}
+
+@test "images line: backticks in PR-supplied names are stripped" {
+  run_images_line 'py`x\t1`2' 1 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'`pyx` (12)'* ]] || return 1
+}
+
+run_results_summary() {
+  local nps="$1" icount="$2" policy="$3"
+  local block; block=$(extract_named_block "$WF" "results summary")
+  run bash -c "
+    set -uo pipefail
+    GUARD_TRIGGERED=false TOTAL=0 HAS_SAFETY_ERROR=false NO_PACKAGE_SCAN='$nps'
+    IMAGE_COUNT='$icount' RELEASE_AGE_POLICY='$policy' AUTO_MERGE_OK=true
+    HAS_AGE_VIOLATION=false AGE_ONLY_COUNT=0 SUPPLY_RISK_COUNT=0
+    MINIMUM_RELEASE_AGE_DAYS=7 SCAN_RESULTS=''
+    $block
+    printf 'HEADER<<<%s>>>\nFOOTER<<<%s>>>\nTABLE<<<%s>>>\n' \"\$RESULTS_HEADER\" \"\$RESULTS_FOOTER\" \"\$RESULTS_TABLE\"
+  "
+}
+
+@test "results table: image-only PR shows advisory sources as not applicable" {
+  run_results_summary true 1 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"not applicable"* ]] || return 1
+  [[ "$output" != *"0 affecting target"* ]] || return 1
+  [[ "$output" == *"HEADER<<<No package dependencies to scan."* ]] || return 1
+}
+
+@test "results summary: policy off + image header names the policy" {
+  run_results_summary true 2 off
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"HEADER<<<Release age not checked for 2 container image(s) — manual review required.>>>"* ]] || return 1
+  [[ "$output" == *'`advisory` or `blocking`'* ]] || return 1
+}
+
+@test "results summary: package-only clean PR keeps existing header and table" {
+  run_results_summary false 0 off
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"No known exploits found"* ]] || return 1
+  [[ "$output" == *"0 affecting target"* ]] || return 1
+}
+
+@test "results table: no packages and no images keeps existing table" {
+  run_results_summary true 0 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"0 affecting target"* ]] || return 1
+  [[ "$output" != *"not applicable"* ]] || return 1
+  [[ "$output" == *"HEADER<<<No known exploits found"* ]] || return 1
 }

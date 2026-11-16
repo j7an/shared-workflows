@@ -61,3 +61,82 @@ EOF
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+# --- Dockerfile FROM lines (issue #212) ---
+
+# docker_diff <path> <body-lines...>: build a one-hunk unified diff.
+docker_diff() {
+  local path="$1"; shift
+  printf 'diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,1 +1,1 @@\n' "$path" "$path" "$path" "$path"
+  printf '%s\n' "$@"
+}
+
+@test "dep-rank#266 digest bump yields one docker row" {
+  run bash scripts/extract-deps.sh < tests/fixtures/extract-deps/dockerfile-deprank-266.diff
+  [ "$status" -eq 0 ]
+  diff <(echo "$output") tests/fixtures/extract-deps/dockerfile-deprank-266.tsv
+}
+
+@test "only added FROM lines emit rows" {
+  run bash -c 'bash scripts/extract-deps.sh' < <(docker_diff Dockerfile ' FROM base:1' '-FROM python:3.12' '+FROM python:3.13')
+  [ "$status" -eq 0 ]
+  [ "$output" = $'python\t3.13\tdocker' ]
+}
+
+@test "registry port is not a tag" {
+  run bash scripts/extract-deps.sh < <(docker_diff Dockerfile '+FROM localhost:5000/team/img:1.2')
+  [ "$status" -eq 0 ]
+  [ "$output" = $'localhost:5000/team/img\t1.2\tdocker' ]
+}
+
+@test "lowercase from with platform flag and stage alias" {
+  run bash scripts/extract-deps.sh < <(docker_diff Dockerfile '+from --platform=$BUILDPLATFORM python:3.13 as build')
+  [ "$status" -eq 0 ]
+  [ "$output" = $'python\t3.13\tdocker' ]
+}
+
+@test "scratch and earlier stage names are skipped" {
+  run bash scripts/extract-deps.sh < <(docker_diff Dockerfile ' FROM golang:1.25 AS builder' '+FROM builder' '+FROM scratch' '+FROM alpine:3.22')
+  [ "$status" -eq 0 ]
+  [ "$output" = $'alpine\t3.22\tdocker' ]
+}
+
+@test "digest-only and untagged references" {
+  local d
+  d=$(printf 'a%.0s' $(seq 1 64))
+  run env LC_ALL=C bash scripts/extract-deps.sh < <(docker_diff Dockerfile "+FROM ghcr.io/astral-sh/uv@sha256:$d" '+FROM debian')
+  [ "$status" -eq 0 ]
+  # LC_ALL=C pins sort order (locale-dependent otherwise)
+  [ "$output" = "$(printf 'debian\tlatest\tdocker\nghcr.io/astral-sh/uv\tsha256:%s\tdocker' "$d")" ]
+}
+
+@test "unresolved ARG reference emits a raw row" {
+  run bash scripts/extract-deps.sh < <(docker_diff Dockerfile '+FROM ${BASE_IMAGE}')
+  [ "$status" -eq 0 ]
+  [ "$output" = $'${BASE_IMAGE}\t-\tdocker' ]
+}
+
+@test "mixed parsed and unparsed FROM lines both emit rows" {
+  run env LC_ALL=C bash scripts/extract-deps.sh < <(docker_diff Dockerfile '+FROM python:3.13' '+FROM \' '+FROM')
+  [ "$status" -eq 0 ]
+  # LC_ALL=C pins sort order (locale-dependent otherwise)
+  [ "$output" = "$(printf 'FROM\t-\tdocker\n\\\t-\tdocker\npython\t3.13\tdocker')" ]
+}
+
+@test "FROM in a non-Dockerfile is ignored" {
+  run bash scripts/extract-deps.sh < <(docker_diff README.md '+FROM python:3.13')
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "CRLF Dockerfile lines parse" {
+  run bash scripts/extract-deps.sh < <(docker_diff Dockerfile $'+FROM python:3.13\r')
+  [ "$status" -eq 0 ]
+  [ "$output" = $'python\t3.13\tdocker' ]
+}
+
+@test "self-aliased stage line still emits a row" {
+  run bash scripts/extract-deps.sh < <(docker_diff Dockerfile '+FROM python AS python')
+  [ "$status" -eq 0 ]
+  [ "$output" = $'python\tlatest\tdocker' ]
+}

@@ -29,7 +29,8 @@ while IFS= read -r path; do
   # Add new lockfile/manifest filename patterns to this case list as needed.
   case "$base" in
     *.lock|requirements*.txt|pyproject.toml|Pipfile|go.mod|Cargo.toml \
-      |package.json|package-lock.json|yarn.lock|pnpm-lock.yaml)
+      |package.json|package-lock.json|yarn.lock|pnpm-lock.yaml \
+      |Dockerfile|Containerfile|*.Dockerfile|Dockerfile.*)
       matches+=("$path")
       continue
       ;;
