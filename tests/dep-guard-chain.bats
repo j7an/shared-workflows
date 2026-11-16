@@ -891,3 +891,11 @@ run_results_summary() {
   [[ "$output" == *"No known exploits found"* ]] || return 1
   [[ "$output" == *"0 affecting target"* ]] || return 1
 }
+
+@test "results table: no packages and no images keeps existing table" {
+  run_results_summary true 0 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"0 affecting target"* ]] || return 1
+  [[ "$output" != *"not applicable"* ]] || return 1
+  [[ "$output" == *"HEADER<<<No known exploits found"* ]] || return 1
+}

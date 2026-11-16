@@ -3219,7 +3219,7 @@ jobs:
             ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
             ROW2="| OSV.dev | (not scanned) |"
             RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
-          elif [ "$TOTAL" -eq 0 ] && [ "$HAS_SAFETY_ERROR" != "true" ] && [ "${NO_PACKAGE_SCAN:-false}" = "true" ]; then
+          elif [ "$TOTAL" -eq 0 ] && [ "$HAS_SAFETY_ERROR" != "true" ] && [ "${NO_PACKAGE_SCAN:-false}" = "true" ] && [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
             # Nothing was package-scanned (e.g. image-only PR): advisory sources do not apply.
             TABLE_HDR="| Source | Vulnerabilities |"
             TABLE_SEP="|--------|----------------|"
