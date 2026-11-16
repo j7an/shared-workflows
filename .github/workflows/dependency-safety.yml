@@ -21,14 +21,440 @@ on:
         description: "Threshold used when release_age_policy is advisory or blocking; ignored when off. Should match cooldown.default-days in your dependabot.yml."
 
 jobs:
+  image-compare:
+    # Unprivileged: no statuses:write, no secrets. Untrusted PR images are pulled
+    # and scanned here only; `scan` consumes the result as plain data (#214).
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      result: ${{ steps.compare.outputs.result }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+
+      - name: Pair base images in the PR diff
+        id: pairs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # --- BEGIN inline:scripts/docker-image-pairs.sh ---
+          docker_image_pairs() (
+          # docker-image-pairs.sh — pair removed and added Dockerfile FROM images from a
+          # unified diff on stdin.
+          #
+          # Output: <file path>\t<old name>\t<old version>\t<new name>\t<new version>\t<status>
+          #   One row per added, non-skipped, parseable FROM line, in file order.
+          #   name/version split exactly as extract-deps.sh does; version is one of
+          #   tag@digest | tag | digest | latest.
+          #   status:
+          #     ok                    removed FROM paired with the added FROM by position
+          #     pairing-ambiguous     no removed FROM, or removed/added FROM counts differ
+          #                           within one file (every added row in that file)
+          #     unparseable-reference the paired removed FROM could not be parsed
+          #   On non-ok status the old name/version fields are "-".
+          #   An unparseable ADDED FROM emits no row: extract-deps.sh already emits its
+          #   "-" marker row, and the consumer reports that image as missing-comparison.
+          #   `FROM scratch` and `FROM <earlier stage alias>` are skipped on both sides.
+          # Exit:   0 on success (possibly zero rows), 2 when non-empty input is not a
+          #         unified diff
+          #
+          # The from_*_re regexes, the scratch/stage-name skip and the name/version split
+          # MUST stay identical to scripts/extract-deps.sh (tests/docker-image-pairs.bats
+          # has a parity test). Bash 3.2 compatible: no associative arrays.
+
+          set -euo pipefail
+
+          from_line_re='^\+[[:space:]]*[Ff][Rr][Oo][Mm]([[:space:]]|$)'
+          from_token_re='^\+[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+((--[^[:space:]]+[[:space:]]+)*)([^[:space:]]+)'
+          from_alias_re='^[+ ][[:space:]]*[Ff][Rr][Oo][Mm][[:space:]].*[[:space:]][Aa][Ss][[:space:]]+([^[:space:]]+)[[:space:]]*$'
+          image_token_re='^[A-Za-z0-9][A-Za-z0-9._/:@-]*$'
+
+          current_file=""
+          current_path=""
+          current_is_dockerfile=false
+          # Stage names per side: removed side = context + '-' lines; added side = context + '+' lines.
+          stage_old=$'\n'
+          stage_new=$'\n'
+          # Per-file refs: "name<TAB>version", or "-" for an unparseable reference.
+          old_refs=()
+          new_refs=()
+          old_n=0
+          new_n=0
+
+          flush_file() {
+            local i status ostr
+            if $current_is_dockerfile && [ "$new_n" -gt 0 ]; then
+              i=0
+              while [ "$i" -lt "$new_n" ]; do
+                if [ "${new_refs[$i]}" != "-" ]; then
+                  if [ "$old_n" -ne "$new_n" ]; then
+                    status="pairing-ambiguous"
+                    ostr="-"$'\t'"-"
+                  elif [ "${old_refs[$i]}" = "-" ]; then
+                    status="unparseable-reference"
+                    ostr="-"$'\t'"-"
+                  else
+                    status="ok"
+                    ostr="${old_refs[$i]}"
+                  fi
+                  printf '%s\t%s\t%s\t%s\n' "$current_path" "$ostr" "${new_refs[$i]}" "$status"
+                fi
+                i=$((i + 1))
+              done
+            fi
+            old_refs=()
+            new_refs=()
+            old_n=0
+            new_n=0
+          }
+
+          input=$(cat)
+
+          if [ -z "$input" ]; then
+            exit 0
+          fi
+
+          if ! grep -qE '^(\+\+\+|---|@@|diff --git)' <<< "$input"; then
+            echo "docker-image-pairs.sh: input is not a unified diff" >&2
+            exit 2
+          fi
+
+          while IFS= read -r line; do
+            line="${line%$'\r'}"
+
+            if [[ "$line" =~ ^diff[[:space:]]--git[[:space:]]a/([^[:space:]]+)[[:space:]]b/([^[:space:]]+) ]]; then
+              flush_file
+              current_path="${BASH_REMATCH[2]}"
+              current_file="${current_path##*/}"
+              stage_old=$'\n'
+              stage_new=$'\n'
+              case "$current_file" in
+                Dockerfile|Containerfile|*.Dockerfile|Dockerfile.*) current_is_dockerfile=true ;;
+                *) current_is_dockerfile=false ;;
+              esac
+              continue
+            fi
+
+            $current_is_dockerfile || continue
+            [[ "$line" == +++\ * || "$line" == ---\ * ]] && continue
+
+            side="${line:0:1}"
+            case "$side" in
+              ' '|'+'|'-') ;;
+              *) continue ;;
+            esac
+            # Normalise to a '+' line so the extract-deps.sh regexes apply unchanged.
+            norm="+${line:1}"
+
+            if [ "$side" = "-" ]; then
+              prev_stage_names="$stage_old"
+            elif [ "$side" = "+" ]; then
+              prev_stage_names="$stage_new"
+            else
+              prev_stage_names="$stage_new"
+            fi
+
+            if [[ "$norm" =~ $from_alias_re ]]; then
+              alias_lc=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
+              if [ "$side" != "+" ]; then stage_old="${stage_old}${alias_lc}"$'\n'; fi
+              if [ "$side" != "-" ]; then stage_new="${stage_new}${alias_lc}"$'\n'; fi
+            fi
+
+            [ "$side" = " " ] && continue
+
+            if [[ "$norm" =~ $from_line_re ]]; then
+              token=""
+              if [[ "$norm" =~ $from_token_re ]]; then
+                token="${BASH_REMATCH[3]}"
+              fi
+              token_lc=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
+              [ "$token_lc" = "scratch" ] && continue
+              if [ -n "$token" ]; then
+                case "$prev_stage_names" in *$'\n'"$token_lc"$'\n'*) continue ;; esac
+              fi
+
+              if [ -z "$token" ] || [[ "$token" == *'$'* ]] || ! [[ "$token" =~ $image_token_re ]]; then
+                ref="-"
+              else
+                rest="$token"
+                digest=""
+                tag=""
+                if [[ "$rest" == *@* ]]; then
+                  digest="${rest##*@}"
+                  rest="${rest%@*}"
+                fi
+                if [[ "$rest" == *:* ]] && [[ "${rest##*:}" != */* ]]; then
+                  tag="${rest##*:}"
+                  rest="${rest%:*}"
+                fi
+                name="$rest"
+                if [ -n "$tag" ] && [ -n "$digest" ]; then
+                  version="$tag@$digest"
+                elif [ -n "$tag" ]; then
+                  version="$tag"
+                elif [ -n "$digest" ]; then
+                  version="$digest"
+                else
+                  version="latest"
+                fi
+                ref="$name"$'\t'"$version"
+              fi
+
+              if [ "$side" = "-" ]; then
+                old_refs[$old_n]="$ref"
+                old_n=$((old_n + 1))
+              else
+                new_refs[$new_n]="$ref"
+                new_n=$((new_n + 1))
+              fi
+            fi
+          done <<< "$input"
+
+          flush_file
+          )
+          # --- END inline:scripts/docker-image-pairs.sh ---
+
+          gh pr diff "$PR_NUMBER" --repo "$GH_REPO" | docker_image_pairs > "$RUNNER_TEMP/pairs.tsv"
+          if [ -s "$RUNNER_TEMP/pairs.tsv" ]; then
+            echo "has_images=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_images=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Trivy
+        id: install
+        if: steps.pairs.outputs.has_images == 'true'
+        env:
+          TRIVY_VERSION: 0.76.2
+          TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+        run: |
+          set -euo pipefail
+          asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          dl="$RUNNER_TEMP/trivy-download"
+          mkdir -p "$dl" "$RUNNER_TEMP/trivy"
+          curl -fsSL -o "$dl/$asset" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${asset}"
+          (cd "$dl" && echo "${TRIVY_SHA256}  ${asset}" | sha256sum -c -)
+          tar -xzf "$dl/$asset" -C "$RUNNER_TEMP/trivy" trivy
+          echo "$RUNNER_TEMP/trivy" >> "$GITHUB_PATH"
+
+      - name: Compare old and new images
+        id: compare
+        if: steps.pairs.outputs.has_images == 'true'
+        run: |
+          set -euo pipefail
+          # --- BEGIN inline:scripts/image-vuln-diff.sh ---
+          image_vuln_diff() (
+          # image-vuln-diff.sh — diff Trivy vulnerability results for two container images.
+          #
+          # Usage: image-vuln-diff.sh <db-version.json> <old.json> <new.json>
+          #   db-version.json  `trivy version --format json` output (reads
+          #                    .VulnerabilityDB.UpdatedAt)
+          #   old.json/new.json `trivy image --list-all-pkgs --format json` reports
+          # Env: IMAGE_DIFF_NOW  epoch seconds overriding the current time (tests only).
+          #
+          # Pure logic: jq is the only external tool; no network.
+          # Fail-closed: any failed check prints NOTHING on stdout, writes exactly one
+          # reason token as the first line of stderr, and exits 2.
+          #
+          # Output (stdout, one TSV row per delta entry, sorted, unique by
+          # (direction, class, id, pkg); empty output + exit 0 means no delta):
+          #   direction\tfixability\tclass\tid\tpkg\tinstalled\tfixed\tseverity
+          #     direction  introduced (in new only) | fixed (in old only)
+          #     fixability fixable | unfixed — from the new-side entry for introduced,
+          #                the old-side entry for fixed
+          #     class      os | lang (Trivy os-pkgs / lang-pkgs; other classes ignored)
+          #     fixed      FixedVersion, or - when Trivy omits it
+          # The delta keys on class + VulnerabilityID + PkgName only, so a shared entry
+          # whose InstalledVersion changed is not a delta row.
+          #
+          # Reason tokens (stderr line 1, exit 2):
+          #   usage                  wrong number of arguments
+          #   invalid-json           an input is missing, unparsable, lacks UpdatedAt, or has
+          #                          a non-array Vulnerabilities / an entry without string
+          #                          VulnerabilityID and PkgName
+          #   trivy-db-stale         DB UpdatedAt is more than 72 hours before now
+          #   platform-mismatch-old  old report's ImageConfig os/architecture is not
+          #   platform-mismatch-new  linux/amd64 (Trivy ignores --platform for
+          #                          single-platform images, so check the report)
+          #   no-packages-old        a report lists zero packages (sum of
+          #   no-packages-new        .Results[].Packages | length is 0)
+
+          set -u
+
+          STALE_HOURS=72
+
+          fail() {
+            printf '%s\n' "$1" >&2
+            exit 2
+          }
+
+          [ "$#" -eq 3 ] || fail usage
+          DB="$1"
+          OLD="$2"
+          NEW="$3"
+
+          for f in "$DB" "$OLD" "$NEW"; do
+            jq -e . "$f" >/dev/null 2>&1 || fail invalid-json
+          done
+
+          # UpdatedAt has fractional seconds ("...:02.624123452Z"); strip them first.
+          UPDATED=$(jq -r '.VulnerabilityDB.UpdatedAt // empty
+            | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601' "$DB" 2>/dev/null) || fail invalid-json
+          [ -n "$UPDATED" ] || fail invalid-json
+
+          NOW="${IMAGE_DIFF_NOW:-$(date +%s)}"
+          [ $(( NOW - UPDATED )) -le $(( STALE_HOURS * 3600 )) ] || fail trivy-db-stale
+
+          for side in old new; do
+            if [ "$side" = old ]; then f="$OLD"; else f="$NEW"; fi
+            jq -e '.Metadata.ImageConfig.os == "linux"
+                   and .Metadata.ImageConfig.architecture == "amd64"' "$f" >/dev/null 2>&1 \
+              || fail "platform-mismatch-$side"
+          done
+
+          for side in old new; do
+            if [ "$side" = old ]; then f="$OLD"; else f="$NEW"; fi
+            jq -e '[.Results[]? | (.Packages // []) | length] | add // 0 | . > 0' "$f" >/dev/null 2>&1 \
+              || fail "no-packages-$side"
+          done
+
+          jq -rn --slurpfile old "$OLD" --slurpfile new "$NEW" '
+            def entries:
+              [ .Results[]?
+                | select(.Class == "os-pkgs" or .Class == "lang-pkgs")
+                | (if .Class == "os-pkgs" then "os" else "lang" end) as $c
+                | (.Vulnerabilities // [])
+                | if type == "array" then .[] else error("vulnerabilities not an array") end
+                | if (type == "object" and (.VulnerabilityID | type) == "string"
+                      and (.PkgName | type) == "string")
+                  then . else error("malformed vulnerability entry") end
+                | { c: $c, id: .VulnerabilityID, pkg: .PkgName,
+                    inst: (.InstalledVersion // ""), fix: (.FixedVersion // ""),
+                    sev: (.Severity // "") } ]
+              | unique_by([.c, .id, .pkg]);
+            def keyset: map({key: ([.c, .id, .pkg] | join("\t")), value: true}) | from_entries;
+            def row($dir):
+              [$dir, (if .fix == "" then "unfixed" else "fixable" end), .c, .id, .pkg,
+               .inst, (if .fix == "" then "-" else .fix end), .sev];
+            ($old[0] | entries) as $o
+            | ($new[0] | entries) as $n
+            | ($o | keyset) as $ok
+            | ($n | keyset) as $nk
+            | ( [ $n[] | select($ok[[.c, .id, .pkg] | join("\t")] | not) | row("introduced") ]
+              + [ $o[] | select($nk[[.c, .id, .pkg] | join("\t")] | not) | row("fixed") ] )
+            | sort[] | @tsv
+          ' 2>/dev/null || fail invalid-json
+          )
+          # --- END inline:scripts/image-vuln-diff.sh ---
+
+          # --- BEGIN image compare loop ---
+          # Pair rows in: <file>\t<old name>\t<old ver>\t<new name>\t<new ver>\t<status>.
+          # Handoff out: base64 TSV of `pair` and `vuln` rows (see issue #214).
+          image_ref() {
+            case "$2" in
+              latest) printf '%s:latest' "$1" ;;
+              sha256:*) printf '%s@%s' "$1" "$2" ;;
+              *) printf '%s:%s' "$1" "$2" ;;
+            esac
+          }
+
+          scan_image() {
+            # $1 ref, $2 report file, $3 stderr file. Registry pull only; no token.
+            trivy image --skip-db-update --skip-version-check --cache-dir "$cache_dir" \
+              --image-src remote --platform linux/amd64 --scanners vuln --list-all-pkgs \
+              --format json --quiet --output "$2" "$1" </dev/null 2>"$3"
+          }
+
+          PAIRS_FILE="${PAIRS_FILE:-$RUNNER_TEMP/pairs.tsv}"
+          MAX_RESULT_BYTES="${IMAGE_COMPARE_MAX_BYTES:-900000}"
+          cache_dir="$RUNNER_TEMP/trivy-cache"
+          work_dir="$RUNNER_TEMP/image-compare"
+          mkdir -p "$cache_dir" "$work_dir"
+          handoff="$work_dir/handoff.tsv"
+          pair_rows="$work_dir/pair-rows.tsv"
+          : >"$handoff"
+          : >"$pair_rows"
+          result=""
+
+          if [ -s "$PAIRS_FILE" ]; then
+            # Download the vulnerability DB once. A failure here fails the step; the
+            # scan job reports every image as an error.
+            if ! trivy image --download-db-only --skip-version-check --cache-dir "$cache_dir" --quiet </dev/null; then
+              echo "::error::Trivy vulnerability DB download failed"
+              exit 1
+            fi
+            trivy version --format json --cache-dir "$cache_dir" >"$work_dir/db-version.json"
+
+            n=0
+            while IFS=$'\t' read -r _file old_name old_ver new_name new_ver pstatus; do
+              n=$((n + 1))
+              key="$new_name"$'\t'"$new_ver"$'\t'"$old_name"$'\t'"$old_ver"
+              status="$pstatus"
+              rows=""
+              if [ "$pstatus" = "ok" ]; then
+                old_json="$work_dir/old-$n.json"
+                new_json="$work_dir/new-$n.json"
+                old_err="$work_dir/old-$n.err"
+                new_err="$work_dir/new-$n.err"
+                scan_ok=true
+                scan_image "$(image_ref "$old_name" "$old_ver")" "$old_json" "$old_err" || scan_ok=false
+                scan_image "$(image_ref "$new_name" "$new_ver")" "$new_json" "$new_err" || scan_ok=false
+                if [ "$scan_ok" = false ]; then
+                  if grep -Eq 'TOOMANYREQUESTS|(^|[^[:alnum:]])429([^[:alnum:]]|$)' "$old_err" "$new_err"; then
+                    status="docker-rate-limited"
+                  else
+                    status="trivy-failed"
+                  fi
+                else
+                  diff_err="$work_dir/diff-$n.err"
+                  if rows=$(image_vuln_diff "$work_dir/db-version.json" "$old_json" "$new_json" 2>"$diff_err"); then
+                    status="ok"
+                  else
+                    rows=""
+                    status=$(head -n 1 "$diff_err")
+                    case "$status" in
+                      "" | *[!a-z0-9-]*) status="diff-failed" ;;
+                    esac
+                  fi
+                fi
+              fi
+              printf 'pair\t%s\tlinux/amd64\t%s\n' "$key" "$status" >>"$handoff"
+              printf 'pair\t%s\tlinux/amd64\tresult-too-large\n' "$key" >>"$pair_rows"
+              if [ -n "$rows" ]; then
+                printf '%s\n' "$rows" | while IFS= read -r row; do
+                  printf 'vuln\t%s\t%s\n' "$key" "$row"
+                done >>"$handoff"
+              fi
+            done <"$PAIRS_FILE"
+
+            result=$(base64 <"$handoff" | tr -d '\n')
+            if [ "${#result}" -gt "$MAX_RESULT_BYTES" ]; then
+              result=$(base64 <"$pair_rows" | tr -d '\n')
+            fi
+          fi
+          echo "result=$result" >>"$GITHUB_OUTPUT"
+          # --- END image compare loop ---
+
   scan:
+    needs: image-compare
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # Gate discipline (see #29): `Set initial status` must be the first
     # step after `Harden runner`. Every subsequent step must carry
     # `if: steps.gate.outputs.skip == 'false'` unless it is itself part
     # of the gate. This avoids making non-bot PRs pay for fallible work
     # (cross-repo fetches, API calls, script execution) that would only
-    # be used for Dependabot PRs.
+    # be used for Dependabot PRs. The pending status now posts after
+    # `image-compare` finishes (scan needs it); non-bot PRs skip that job,
+    # so their neutral status is unaffected.
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
@@ -91,6 +517,8 @@ jobs:
           COOLDOWN_DAYS: ${{ inputs.minimum_release_age_days }}
           MINIMUM_RELEASE_AGE_DAYS: ${{ inputs.minimum_release_age_days }}
           RELEASE_AGE_POLICY: ${{ inputs.release_age_policy }}
+          IMAGE_COMPARE_RESULT: ${{ needs.image-compare.result }}
+          IMAGE_COMPARE_OUTPUT: ${{ needs.image-compare.outputs.result }}
         run: |
           # --- BEGIN inline:scripts/extract-deps.sh ---
           extract_deps() (
