@@ -3039,14 +3039,45 @@ jobs:
           # only "no dependencies extracted" there reads as nothing was
           # scanned, when N package versions actually were — point at the
           # tier-2 section instead of implying an unscanned gate.
+          # NO_PACKAGE_SCAN is computed before the placeholder replaces DEPS: true
+          # when no package was scanned at all (no tier-1 rows, no tier-2 sweep).
+          NO_PACKAGE_SCAN=false
+          if [ -z "$DEPS" ] && [ "$TIER2_COUNT" -eq 0 ]; then
+            NO_PACKAGE_SCAN=true
+          fi
           if [ -z "$DEPS" ]; then
             if [ "$TIER2_COUNT" -gt 0 ]; then
               DEPS="(no declared dependency changes — ${TIER2_COUNT} transitive lockfile version(s) swept, see below)"
+            elif [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
+              DEPS="(none — this PR changes container images only)"
             else
               DEPS="(no dependencies extracted from diff)"
             fi
           fi
           # --- END deps placeholder ---
+
+          # --- BEGIN images line ---
+          # Container images get no advisory scan; say so honestly. PR-supplied
+          # names/versions are inert: backticks are stripped before they go
+          # inside inline code.
+          IMAGES_LINE=""
+          if [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
+            _img_list=""
+            while IFS=$'\t' read -r _iname _iver; do
+              [ -z "$_iname" ] && continue
+              _iname="${_iname//\`/}"
+              _iver="${_iver//\`/}"
+              if [ -n "$_img_list" ]; then _img_list="${_img_list}, "; fi
+              _img_list="${_img_list}\`${_iname}\` (${_iver})"
+            done <<< "$IMAGE_ROWS"
+            if [ "$RELEASE_AGE_POLICY" = "off" ]; then
+              _img_suffix='release age not checked (`release_age_policy` is `off`).'
+            else
+              _img_suffix='release age checked; vulnerability scan not performed (no advisory database covers container images).'
+            fi
+            IMAGES_LINE=$'\n\n'"**Container images:** ${_img_list} — ${_img_suffix}"
+          fi
+          # --- END images line ---
 
           # --- Build comment body ---
           TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
@@ -3175,6 +3206,7 @@ jobs:
           # The two are independent so that a multi-condition PR (e.g. age violation + advisories)
           # shows both signals: header per priority, table reflecting actual scan data.
 
+          # --- BEGIN results summary ---
           # ---- Results table (from scan state only) ----
           if [ "$GUARD_TRIGGERED" = "true" ] && [ "$TOTAL" -eq 0 ]; then
             # Extraction failed AND no advisories from any subset that did get scanned:
@@ -3186,6 +3218,13 @@ jobs:
             TABLE_SEP="|--------|----------------|"
             ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
             ROW2="| OSV.dev | (not scanned) |"
+            RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
+          elif [ "$TOTAL" -eq 0 ] && [ "$HAS_SAFETY_ERROR" != "true" ] && [ "${NO_PACKAGE_SCAN:-false}" = "true" ]; then
+            # Nothing was package-scanned (e.g. image-only PR): advisory sources do not apply.
+            TABLE_HDR="| Source | Vulnerabilities |"
+            TABLE_SEP="|--------|----------------|"
+            ROW1="| GitHub Advisory (GHSA) | (not applicable — no packages to scan) |"
+            ROW2="| OSV.dev | (not applicable — no packages to scan) |"
             RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
           elif [ "$TOTAL" -gt 0 ]; then
             # Advisories present — show the actual scan results. This branch wins over
@@ -3222,7 +3261,7 @@ jobs:
           }
 
           # ---- Header + footer (from verdict priority — must match safety-verdict.sh order) ----
-          # Priority: guard > error > blocking-age > advisories > advisory-age > clean.
+          # Priority: guard > error > image-unchecked > blocking-age > advisories > advisory-age > clean.
           # Spec §6.1 — keep this order in sync with the script.
           if [ "$GUARD_TRIGGERED" = "true" ]; then
             RESULTS_HEADER="Dependency extraction failed — manual review required."
@@ -3235,6 +3274,9 @@ jobs:
           elif [ "$HAS_SAFETY_ERROR" = "true" ]; then
             RESULTS_HEADER="Scan completed with errors — see workflow logs."
             RESULTS_FOOTER="> Scan errors prevented a clean verdict. Re-run or push to retry."
+          elif [ "$RELEASE_AGE_POLICY" = "off" ] && [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
+            RESULTS_HEADER="Release age not checked for ${IMAGE_COUNT} container image(s) — manual review required."
+            RESULTS_FOOTER="> \`release_age_policy\` is \`off\`. Set it to \`advisory\` or \`blocking\` to have container image bumps age-checked."
           elif [ "$HAS_AGE_VIOLATION" = "true" ] && [ "$RELEASE_AGE_POLICY" = "blocking" ]; then
             RESULTS_HEADER="$(age_status_phrase) (blocking policy)."
             if [ "$AGE_ONLY_COUNT" -gt 0 ]; then
@@ -3253,6 +3295,13 @@ jobs:
             # release_age_policy: advisory — reported, not blocking.
             RESULTS_HEADER="$(age_status_phrase) (advisory policy — not blocking)."
             RESULTS_FOOTER="> Release-age violation reported (advisory policy — not blocking). Auto-merge suppressed."
+          elif [ "${NO_PACKAGE_SCAN:-false}" = "true" ] && [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
+            RESULTS_HEADER="No package dependencies to scan. Container image(s) passed the release-age check; no vulnerability scan was performed."
+            if [ "$AUTO_MERGE_OK" = "true" ]; then
+              RESULTS_FOOTER="> Auto-merge enabled. PR will merge once all required checks pass."
+            else
+              RESULTS_FOOTER="> Ready for manual review and merge."
+            fi
           else
             RESULTS_HEADER="No known exploits found affecting the target versions."
             if [ "$AUTO_MERGE_OK" = "true" ]; then
@@ -3261,6 +3310,8 @@ jobs:
               RESULTS_FOOTER="> Ready for manual review and merge."
             fi
           fi
+
+          # --- END results summary ---
 
           # Attach auto-merge SETUP failure note (from the auto-merge block above) to the footer.
           # Auto-merge "required checks not satisfied" is NOT an error and not surfaced
@@ -3338,10 +3389,11 @@ jobs:
             EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
           fi
 
-          COMMENT_BODY="$(printf '%s%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s%s' \
+          COMMENT_BODY="$(printf '%s%s\n\n%s%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s%s' \
             "## Dependency Safety Scan" \
             "$EXTRACTION_WARNING_SECTION" \
             "**Packages scanned:** ${DEPS}" \
+            "$IMAGES_LINE" \
             "### Results" \
             "$RESULTS_HEADER" \
             "$RESULTS_TABLE" \

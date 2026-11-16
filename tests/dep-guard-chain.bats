@@ -788,3 +788,106 @@ run_deprecated_section() {
   [[ "$output" == *"::error::injected"* ]] || return 1
   [[ "$output" != *$'\r'* ]] || return 1
 }
+
+# --- images placeholder / images line / results summary ----------------------
+
+run_deps_placeholder_img() {
+  local deps="$1" tier2_count="$2" image_count="$3"
+  local block; block=$(extract_named_block "$WF" "deps placeholder")
+  run bash -c "
+    set -uo pipefail
+    DEPS='$deps'
+    TIER2_COUNT='$tier2_count'
+    IMAGE_COUNT='$image_count'
+    $block
+    printf 'DEPS<<<%s>>> NPS=%s\n' \"\$DEPS\" \"\$NO_PACKAGE_SCAN\"
+  "
+}
+
+@test "deps placeholder: image-only PR says images only and sets NO_PACKAGE_SCAN" {
+  run_deps_placeholder_img "" "0" "1"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DEPS<<<(none — this PR changes container images only)>>> NPS=true"* ]] || return 1
+}
+
+@test "deps placeholder: package PR leaves NO_PACKAGE_SCAN=false" {
+  run_deps_placeholder_img "foo 1.0, " "0" "0"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"NPS=false"* ]] || return 1
+  run_deps_placeholder_img "" "3" "1"
+  [[ "$output" == *"NPS=false"* ]] || return 1
+}
+
+run_images_line() {
+  local rows="$1" count="$2" policy="$3"
+  local block; block=$(extract_named_block "$WF" "images line")
+  run bash -c "
+    set -uo pipefail
+    IMAGE_ROWS=\$'$rows'
+    IMAGE_COUNT='$count'
+    RELEASE_AGE_POLICY='$policy'
+    $block
+    printf 'LINE<<<%s>>>\n' \"\$IMAGES_LINE\"
+  "
+}
+
+@test "images line: policy on lists image and says not vulnerability-scanned" {
+  run_images_line 'python\t3.13-slim@sha256:e48f…' 1 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'**Container images:** `python` (3.13-slim@sha256:e48f…)'* ]] || return 1
+  [[ "$output" == *"vulnerability scan not performed"* ]] || return 1
+}
+
+@test "images line: policy off says age not checked and how to enable" {
+  run_images_line 'python\t3.13' 1 off
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'release age not checked (`release_age_policy` is `off`).'* ]] || return 1
+}
+
+@test "images line: empty when no images" {
+  run_images_line '' 0 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"LINE<<<>>>"* ]] || return 1
+}
+
+@test "images line: backticks in PR-supplied names are stripped" {
+  run_images_line 'py`x\t1`2' 1 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'`pyx` (12)'* ]] || return 1
+}
+
+run_results_summary() {
+  local nps="$1" icount="$2" policy="$3"
+  local block; block=$(extract_named_block "$WF" "results summary")
+  run bash -c "
+    set -uo pipefail
+    GUARD_TRIGGERED=false TOTAL=0 HAS_SAFETY_ERROR=false NO_PACKAGE_SCAN='$nps'
+    IMAGE_COUNT='$icount' RELEASE_AGE_POLICY='$policy' AUTO_MERGE_OK=true
+    HAS_AGE_VIOLATION=false AGE_ONLY_COUNT=0 SUPPLY_RISK_COUNT=0
+    MINIMUM_RELEASE_AGE_DAYS=7 SCAN_RESULTS=''
+    $block
+    printf 'HEADER<<<%s>>>\nFOOTER<<<%s>>>\nTABLE<<<%s>>>\n' \"\$RESULTS_HEADER\" \"\$RESULTS_FOOTER\" \"\$RESULTS_TABLE\"
+  "
+}
+
+@test "results table: image-only PR shows advisory sources as not applicable" {
+  run_results_summary true 1 advisory
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"not applicable"* ]] || return 1
+  [[ "$output" != *"0 affecting target"* ]] || return 1
+  [[ "$output" == *"HEADER<<<No package dependencies to scan."* ]] || return 1
+}
+
+@test "results summary: policy off + image header names the policy" {
+  run_results_summary true 2 off
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"HEADER<<<Release age not checked for 2 container image(s) — manual review required.>>>"* ]] || return 1
+  [[ "$output" == *'`advisory` or `blocking`'* ]] || return 1
+}
+
+@test "results summary: package-only clean PR keeps existing header and table" {
+  run_results_summary false 0 off
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"No known exploits found"* ]] || return 1
+  [[ "$output" == *"0 affecting target"* ]] || return 1
+}
