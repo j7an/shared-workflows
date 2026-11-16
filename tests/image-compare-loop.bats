@@ -70,16 +70,19 @@ decoded() { sed -n 's/^result=//p' "$GITHUB_OUTPUT" | base64 -d; }
   out=$(decoded)
   has_line 'pair\tex/bad\t2.0\tex/bad\t1.0\tlinux/amd64\ttrivy-failed' <<<"$out"
   has_line 'pair\tex/img\t2.0\tex/img\t1.0\tlinux/amd64\tok' <<<"$out"
-  ! grep '^vuln.ex/bad' <<<"$out"
+  if grep -q '^vuln.ex/bad' <<<"$out"; then return 1; fi
   grep -q '^vuln.ex/img' <<<"$out"
 }
 
 @test "rate limit in trivy stderr gives docker-rate-limited" {
   printf 'Dockerfile\tex/img\t1.0\tex/img\t2.0\tok\n' >"$T/pairs.tsv"
-  FAIL_REF=ex/img:1.0 FAIL_MSG="toomanyrequests: TOOMANYREQUESTS pulling" run_loop
-  decoded | has_line 'pair\tex/img\t2.0\tex/img\t1.0\tlinux/amd64\tdocker-rate-limited'
-  FAIL_REF=ex/img:1.0 FAIL_MSG="HTTP 429 Too Many" run_loop
-  decoded | tail -1 | grep -q 'docker-rate-limited'
+  local msg
+  for msg in "toomanyrequests: TOOMANYREQUESTS pulling" "HTTP 429 Too Many"; do
+    : >"$GITHUB_OUTPUT"
+    FAIL_REF=ex/img:1.0 FAIL_MSG="$msg" run_loop
+    [ "$status" -eq 0 ]
+    decoded | has_line 'pair\tex/img\t2.0\tex/img\t1.0\tlinux/amd64\tdocker-rate-limited'
+  done
 }
 
 @test "diff reason token becomes the pair status" {
@@ -90,7 +93,7 @@ decoded() { sed -n 's/^result=//p' "$GITHUB_OUTPUT" | base64 -d; }
   out=$(decoded)
   has_line 'pair\tex/img\t2.0\tex/img\t1.0\tlinux/amd64\tno-packages-new' <<<"$out"
   [[ $(grep -c '^pair' <<<"$out") -eq 1 ]]
-  ! grep -q '^vuln' <<<"$out"
+  if grep -q '^vuln' <<<"$out"; then return 1; fi
 }
 
 @test "non-ok row from docker-image-pairs passes through as pair status" {

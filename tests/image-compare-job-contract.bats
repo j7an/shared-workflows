@@ -6,7 +6,8 @@ setup() {
   cd "$BATS_TEST_DIRNAME/.."
 }
 
-WF=.github/workflows/dependency-safety.yml
+# IMAGE_COMPARE_WF lets a mutation test point these contracts at a modified copy.
+WF=${IMAGE_COMPARE_WF:-.github/workflows/dependency-safety.yml}
 
 @test "image-compare permissions are exactly contents read and pull-requests read" {
   run yq -o=json -I=0 '.jobs.image-compare.permissions' "$WF"
@@ -25,13 +26,15 @@ WF=.github/workflows/dependency-safety.yml
   assert_action_pin "$step" "step-security/harden-runner"
 }
 
-@test "no step that runs trivy has GH_TOKEN or github.token in env" {
+@test "no step that runs trivy has any token or secret reference" {
   local id body
   for id in install compare; do
-    [ "$(yq ".jobs.image-compare.steps[] | select(.id == \"$id\") | .env | has(\"GH_TOKEN\")" "$WF")" = "false" ]
     body=$(yq ".jobs.image-compare.steps[] | select(.id == \"$id\")" "$WF")
-    ! grep -q 'github\.token' <<<"$body"
-    ! grep -q 'secrets\.' <<<"$body"
+    [ -n "$body" ]
+    if grep -Eiq 'github\.token|secrets\.|GITHUB_TOKEN|GH_TOKEN' <<<"$body"; then
+      echo "step $id references a token or secret"
+      return 1
+    fi
   done
 }
 
@@ -54,8 +57,8 @@ WF=.github/workflows/dependency-safety.yml
 @test "image-compare does not use actions/checkout and not trivy-action" {
   local uses
   uses=$(yq '.jobs.image-compare.steps[].uses // ""' "$WF")
-  ! grep -q 'actions/checkout' <<<"$uses"
-  ! grep -q 'trivy-action' <<<"$uses"
+  if grep -q 'actions/checkout' <<<"$uses"; then echo "uses actions/checkout"; return 1; fi
+  if grep -q 'trivy-action' <<<"$uses"; then echo "uses trivy-action"; return 1; fi
 }
 
 @test "scan needs image-compare and runs unless cancelled" {
