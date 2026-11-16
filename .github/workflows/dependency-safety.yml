@@ -3666,12 +3666,17 @@ jobs:
             }
             while IFS=$'\t' read -r _pk _pn _pv _pon _pov _pplat _pst; do
               [ "$_pk" = "pair" ] && [ "$_pst" = "ok" ] || continue
+              # The image's aggregate status must be ok too: one failed pair
+              # fails the image, and its other pairs would be partial lists.
+              grep -qxF "image"$'\t'"${_pn}"$'\t'"${_pv}"$'\t'"ok" <<< "${IMAGE_COMPARE_TSV:-}" || continue
               _sec="${_sec}"$'\n\n'"#### \`${_pn//\`/}\` ${_pov//\`/} → ${_pv//\`/} (${_pplat})"
               _vlist introduced fixable "Introduced, fixable"
               _vlist introduced unfixed "Introduced, unfixed"
               _vlist fixed '' "Fixed"
             done <<< "$IMAGE_COMPARE_TSV"
-            IMAGE_COMPARISON_SECTION=$'\n\n'"### Container image vulnerabilities"$'\n\nTrivy comparison of each new base image against the previous one (OS and language packages).'"${_sec}"
+            if [ -n "$_sec" ]; then
+              IMAGE_COMPARISON_SECTION=$'\n\n'"### Container image vulnerabilities"$'\n\nTrivy comparison of each new base image against the previous one (OS and language packages).'"${_sec}"
+            fi
           fi
           # --- END image comparison section ---
 

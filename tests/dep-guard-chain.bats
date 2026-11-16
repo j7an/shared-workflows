@@ -981,6 +981,26 @@ run_image_section() {
   [[ "$output" == *'SECTION<<<>>>'* ]] || return 1
 }
 
+@test "image section: an ok pair of an image whose comparison failed renders no tables (R1)" {
+  # python:3.13 is bumped in two Dockerfiles from different old refs; one
+  # comparison succeeded, the other failed, so intake marks the image failed.
+  # node:22 succeeded and must still render.
+  local tsv=$'image\tpython\t3.13\ttrivy-failed\nimage\tnode\t22\tok\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok\npair\tpython\t3.13\tpython\t3.11\tlinux/amd64\ttrivy-failed\npair\tnode\t22\tnode\t20\tlinux/amd64\tok\nvuln\tpython\t3.13\tpython\t3.12\tintroduced\tfixable\tos\tCVE-2025-7\tlibssl3\t3.0.1\t3.0.2\tHIGH\nvuln\tnode\t22\tnode\t20\tintroduced\tfixable\tlang\tGHSA-aaaa-bbbb-cccc\tpkg\t1\t2\tHIGH'
+  run_image_section 2 "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *'CVE-2025-7'* ]] || return 1
+  [[ "$output" != *'`python` 3.12'* ]] || return 1
+  [[ "$output" == *'`node` 20 → 22 (linux/amd64)'* ]] || return 1
+  [[ "$output" == *'GHSA-aaaa-bbbb-cccc'* ]] || return 1
+}
+
+@test "image section: only failed images renders no section (R1)" {
+  local tsv=$'image\tpython\t3.13\ttrivy-failed\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok\npair\tpython\t3.13\tpython\t3.11\tlinux/amd64\ttrivy-failed\nvuln\tpython\t3.13\tpython\t3.12\tintroduced\tfixable\tos\tCVE-2025-7\tlibssl3\t3.0.1\t3.0.2\tHIGH'
+  run_image_section 1 "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'SECTION<<<>>>'* ]] || return 1
+}
+
 @test "image section: empty when IMAGE_COUNT=0" {
   run_image_section 0 ''
   [ "$status" -eq 0 ] || return 1
