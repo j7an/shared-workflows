@@ -216,6 +216,7 @@ while [ "$#" -gt 0 ]; do
     -D) shift; hfile="$1" ;;
     -o) shift; bfile="$1" ;;
     -w) shift ;;
+    --proto|--proto-redir) shift; printf 'P: %s\n' "$1" >> "$DK_LOG" ;;
     -H) shift; printf 'H: %s\n' "$1" >> "$DK_LOG"
         [ "$1" = "Authorization: Bearer T" ] && auth=true ;;
     http*) url="$1"; printf 'URL: %s\n' "$1" >> "$DK_LOG" ;;
@@ -234,6 +235,8 @@ case "$url" in
         hdr='WWW-Authenticate: Bearer realm="https://auth.example/token",service="reg",scope="repository:library/python:pull"'; fi ;;
       authfail) code=401
         hdr='WWW-Authenticate: Bearer realm="https://auth.example/token",service="reg",scope="repository:library/python:pull"' ;;
+      httprealm) code=401
+        hdr='WWW-Authenticate: Bearer realm="http://auth.example/token",service="reg",scope="repository:library/python:pull"' ;;
       rate) code=429 ;;
       fivexx) code=503 ;;
       badjson) body='not json' ;;
@@ -292,4 +295,19 @@ SH
   run docker_row python 3.13-slim
   [ "$status" -eq 0 ]
   [ "$output" = $'python\t3.13-slim\tdocker\t-\t-\terror\tparse-failure' ]
+}
+
+@test "docker live: non-https auth realm is rejected without a request" {
+  docker_live_setup; export DK_SCENARIO=httprealm
+  run docker_row python 3.13-slim
+  [ "$status" -eq 0 ]
+  [ "$output" = $'python\t3.13-slim\tdocker\t-\t-\terror\tdocker-auth-required' ]
+  ! grep -q 'http://auth.example' "$DK_LOG"
+}
+
+@test "docker live: registry requests are restricted to https" {
+  docker_live_setup; export DK_SCENARIO=bearer
+  run docker_row python 3.13-slim
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^P: =https$' "$DK_LOG")" -ge 4 ]
 }

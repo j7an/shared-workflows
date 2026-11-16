@@ -151,7 +151,7 @@ registry_http() {
   for h in "$@"; do
     args+=(-H "$h")
   done
-  code=$(curl -sS --max-time 30 -L -D "$hfile" -o "$bfile" -w '%{http_code}' ${args[@]+"${args[@]}"} "$url" 2>/dev/null) || code=000
+  code=$(curl -sS --proto '=https' --proto-redir '=https' --max-time 30 -L -D "$hfile" -o "$bfile" -w '%{http_code}' ${args[@]+"${args[@]}"} "$url" 2>/dev/null) || code=000
   printf '%s' "${code:-000}"
 }
 
@@ -198,6 +198,7 @@ registry_get() {
         realm=$(printf '%s' "$challenge" | sed -n 's/.*[Rr]ealm="\([^"]*\)".*/\1/p')
         service=$(printf '%s' "$challenge" | sed -n 's/.*[Ss]ervice="\([^"]*\)".*/\1/p')
         scope=$(printf '%s' "$challenge" | sed -n 's/.*[Ss]cope="\([^"]*\)".*/\1/p')
+        case "$realm" in https://*) ;; *) realm="" ;; esac
         if [ -z "$realm" ]; then
           rm -rf "$tmp"
           printf 'docker-auth-required'
