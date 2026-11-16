@@ -7,8 +7,8 @@
       "Name": "13.7"
     },
     "ImageConfig": {
-      "os": "linux",
-      "architecture": "amd64"
+      "architecture": "amd64",
+      "os": "linux"
     }
   },
   "Results": [
@@ -38,10 +38,16 @@
       ],
       "Vulnerabilities": [
         {
+          "VulnerabilityID": "CVE-2011-3374",
+          "PkgName": "apt",
+          "InstalledVersion": "3.0.4",
+          "Status": "affected",
+          "Severity": "LOW"
+        },
+        {
           "VulnerabilityID": "CVE-2026-18374",
           "PkgName": "libc6",
           "InstalledVersion": "2.41-12+deb13u4",
-          "FixedVersion": null,
           "Status": "affected",
           "Severity": "MEDIUM"
         }
@@ -54,21 +60,15 @@
       "Packages": [
         {
           "Name": "pip",
-          "Version": "26.2.2",
-          "SrcName": null,
-          "SrcVersion": null
+          "Version": "26.2.2"
         },
         {
           "Name": "setuptools",
-          "Version": "70.3.0",
-          "SrcName": null,
-          "SrcVersion": null
+          "Version": "70.3.0"
         },
         {
           "Name": "urllib3",
-          "Version": "2.7.0",
-          "SrcName": null,
-          "SrcVersion": null
+          "Version": "2.7.0"
         }
       ],
       "Vulnerabilities": [
