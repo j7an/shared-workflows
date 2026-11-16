@@ -882,13 +882,13 @@ run_images_line() {
   run_images_line 'python\t3.13-slim@sha256:e48f…' 1 advisory
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *'**Container images:** `python` (3.13-slim@sha256:e48f…)'* ]] || return 1
-  [[ "$output" == *"vulnerability scan not performed"* ]] || return 1
+  [[ "$output" == *'release age checked; vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214)'* ]] || return 1
 }
 
 @test "images line: policy off says age not checked and how to enable" {
   run_images_line 'python\t3.13' 1 off
   [ "$status" -eq 0 ] || return 1
-  [[ "$output" == *'release age not checked (`release_age_policy` is `off`).'* ]] || return 1
+  [[ "$output" == *'release age not checked (`release_age_policy` is `off`); vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214)'* ]] || return 1
 }
 
 @test "images line: empty when no images" {

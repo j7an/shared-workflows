@@ -3073,9 +3073,9 @@ jobs:
               _img_list="${_img_list}\`${_iname}\` (${_iver})"
             done <<< "$IMAGE_ROWS"
             if [ "$RELEASE_AGE_POLICY" = "off" ]; then
-              _img_suffix='release age not checked (`release_age_policy` is `off`).'
+              _img_suffix='release age not checked (`release_age_policy` is `off`); vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214).'
             else
-              _img_suffix='release age checked; vulnerability scan not performed (no advisory database covers container images).'
+              _img_suffix='release age checked; vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214).'
             fi
             IMAGES_LINE=$'\n\n'"**Container images:** ${_img_list} — ${_img_suffix}"
           fi
