@@ -3195,15 +3195,21 @@ jobs:
           # comment composition below). "Required checks not yet satisfied" is
           # NOT a setup failure — that is the normal case --auto handles.
           # Must run BEFORE comment composition so the comment can attach the note.
+          # --- BEGIN auto-merge ---
           AUTO_MERGE_COMMENT_NOTE=""
           if [ "$AUTO_MERGE_OK" = "true" ]; then
             if gh pr merge --auto --squash "$PR_NUMBER" --repo "$GH_REPO"; then
               echo "Auto-merge enabled for PR #${PR_NUMBER}"
             else
               AUTO_MERGE_COMMENT_NOTE="Auto-merge could not be enabled: gh pr merge --auto rejected the request (auto-merge disabled, insufficient permission, or PR not mergeable). Merge manually."
+              # Auto-merge is NOT on: downgrade so the footer falls through to the
+              # manual-merge text and the final status stops claiming "enabled" (#213).
+              AUTO_MERGE_OK="false"
+              STATUS_DESC="${STATUS_DESC/Auto-merge enabled./Auto-merge could not be enabled; merge manually.}"
               echo "WARNING: gh pr merge failed for PR #${PR_NUMBER} — see comment note"
             fi
           fi
+          # --- END auto-merge ---
 
           # --- Compose results section: table (from scan state) + header/footer (from verdict priority) ---
           # The two are independent so that a multi-condition PR (e.g. age violation + advisories)

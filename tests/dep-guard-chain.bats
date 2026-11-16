@@ -904,12 +904,12 @@ run_images_line() {
 }
 
 run_results_summary() {
-  local nps="$1" icount="$2" policy="$3"
+  local nps="$1" icount="$2" policy="$3" am_ok="${4:-true}"
   local block; block=$(extract_named_block "$WF" "results summary")
   run bash -c "
     set -uo pipefail
     GUARD_TRIGGERED=false TOTAL=0 HAS_SAFETY_ERROR=false NO_PACKAGE_SCAN='$nps'
-    IMAGE_COUNT='$icount' RELEASE_AGE_POLICY='$policy' AUTO_MERGE_OK=true
+    IMAGE_COUNT='$icount' RELEASE_AGE_POLICY='$policy' AUTO_MERGE_OK='$am_ok'
     HAS_AGE_VIOLATION=false AGE_ONLY_COUNT=0 SUPPLY_RISK_COUNT=0
     MINIMUM_RELEASE_AGE_DAYS=7 SCAN_RESULTS=''
     $block
@@ -945,4 +945,61 @@ run_results_summary() {
   [[ "$output" == *"0 affecting target"* ]] || return 1
   [[ "$output" != *"not applicable"* ]] || return 1
   [[ "$output" == *"HEADER<<<No known exploits found"* ]] || return 1
+}
+
+@test "results summary: downgraded AUTO_MERGE_OK footer has no \"enabled\" line" {
+  run_results_summary false 0 off false
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"FOOTER<<<> Ready for manual review and merge.>>>"* ]] || return 1
+  [[ "$output" != *"Auto-merge enabled"* ]] || return 1
+}
+
+# --- auto-merge (issue #213) -------------------------------------------------
+
+# run_auto_merge <gh_rc> <policy> <image_count> <min_days>
+# STATUS_DESC comes from the real verdict script for a clean, auto-merge-eligible
+# PR, so a rewording of its "Auto-merge enabled." clause fails these tests.
+run_auto_merge() {
+  local gh_rc="$1" policy="$2" icount="$3" days="$4"
+  local block; block=$(extract_named_block "$WF" "auto-merge")
+  local desc
+  desc=$(AUTO_MERGE=true GUARD_TRIGGERED=false AGE_ERROR_COUNT=0 \
+    AGE_VIOLATION_COUNT=0 SCAN_ERROR_COUNT=0 ADVISORY_COUNT=0 \
+    RELEASE_AGE_POLICY="$policy" MINIMUM_RELEASE_AGE_DAYS="$days" \
+    IMAGE_COUNT="$icount" bash scripts/safety-verdict.sh | cut -f6)
+  [ -n "$desc" ] || return 1
+  STATUS_DESC_IN="$desc" run bash -c "
+    set -uo pipefail
+    gh() { return $gh_rc; }
+    AUTO_MERGE_OK=true PR_NUMBER=1 GH_REPO=o/r
+    STATUS_DESC=\"\$STATUS_DESC_IN\"
+    $block
+    printf 'OK=%s\nDESC<<<%s>>>\nNOTE<<<%s>>>\n' \"\$AUTO_MERGE_OK\" \"\$STATUS_DESC\" \"\$AUTO_MERGE_COMMENT_NOTE\"
+  "
+}
+
+@test "auto-merge: gh rejection downgrades AUTO_MERGE_OK and status for every clean variant" {
+  local variant policy icount days desc
+  for variant in "off 0 7" "blocking 1 365" "blocking 0 7"; do
+    read -r policy icount days <<< "$variant"
+    run_auto_merge 1 "$policy" "$icount" "$days" || return 1
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"OK=false"* ]] || return 1
+    [[ "$output" != *"Auto-merge enabled"* ]] || return 1
+    [[ "$output" == *"Auto-merge could not be enabled; merge manually.>>>"* ]] || return 1
+    [[ "$output" != *"NOTE<<<>>>"* ]] || return 1
+    desc=$(printf '%s\n' "$output" | sed -n 's/^DESC<<<\(.*\)>>>$/\1/p')
+    # GitHub caps status descriptions at 140 characters; bytes >= chars, so a
+    # byte count is the stricter, locale-independent bound.
+    [ "$(printf '%s' "$desc" | wc -c)" -le 140 ] || return 1
+  done
+}
+
+@test "auto-merge: gh success leaves AUTO_MERGE_OK and status unchanged" {
+  run_auto_merge 0 blocking 0 5 || return 1
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"OK=true"* ]] || return 1
+  # Exact literal on purpose: this text is the success-path contract (#213).
+  [[ "$output" == *"DESC<<<Clean scan (≥5d, no advisories). Auto-merge enabled.>>>"* ]] || return 1
+  [[ "$output" == *"NOTE<<<>>>"* ]] || return 1
 }
