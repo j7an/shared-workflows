@@ -385,8 +385,8 @@ update.
 |-------|------|---------|-------------|
 | `enable_scorecard` | boolean | `true` | Include OpenSSF Scorecard results for GitHub Actions in the scan comment |
 | `auto_merge` | boolean | `true` | On clean scans, enable `gh pr merge --auto` (requires `contents: write`); on dirty scans, apply the appropriate label. Set `false` for manual merges |
-| `release_age_policy` | string | `"off"` | Post-PR release-age verification: `off` (no age lookup), `advisory` (label + comment on young targets, gate stays green, auto-merge suppressed), `blocking` (gate fails). Quote `"off"` in YAML |
-| `minimum_release_age_days` | number | `5` | Threshold used when `release_age_policy` is `advisory` or `blocking`; ignored when `off`. Should match `cooldown.default-days` in `dependabot.yml`. Under `off`, a container image bump needs manual review (gate `error`, auto-merge off, no `dependency-safety-error` label) because its age cannot be checked |
+| `release_age_policy` | string | `"off"` | Post-PR release-age verification: `off` (no age lookup), `advisory` (label + comment on young targets, gate stays green, auto-merge suppressed), `blocking` (gate fails). Quote `"off"` in YAML. Under `off`, a container image bump needs manual review (gate `error`, auto-merge off, no `dependency-safety-error` label) because its age cannot be checked |
+| `minimum_release_age_days` | number | `5` | Threshold used when `release_age_policy` is `advisory` or `blocking`; ignored when `off`. Should match `cooldown.default-days` in `dependabot.yml`. |
 
 ## Supported Ecosystems
 
@@ -515,11 +515,11 @@ Labels:
 
 | Label | Color | Applied when | Removed when |
 |-------|-------|--------------|--------------|
-| `security-review-needed` | red (`B60205`) | Advisory scan finds vulnerabilities affecting target versions | Re-scan finds zero applicable advisories AND no `error` state |
-| `dependency-age-violation` | amber (`FBCA04`) | Any target version is younger than `minimum_release_age_days` (only under `release_age_policy: advisory` or `blocking`) | All versions pass age check AND no `error` state |
+| `security-review-needed` | red (`B60205`) | Advisory scan finds vulnerabilities affecting target versions | Re-scan finds zero applicable advisories AND no `error` state (the policy-`off` container-image case does not count: labels reconcile normally there) |
+| `dependency-age-violation` | amber (`FBCA04`) | Any target version is younger than `minimum_release_age_days` (only under `release_age_policy: advisory` or `blocking`) | All versions pass age check AND no `error` state (the policy-`off` container-image case does not count: labels reconcile normally there) |
 | `dependency-safety-error` | grey (`6E7781`) | Scan extraction failed or API errors occurred | Clean scan completes without errors |
 
-Reconciliation is authoritative when the scan succeeds. On the `error` path, labels are preserved (not removed) since the verdict is unreliable.
+Reconciliation is authoritative when the scan succeeds. On the `error` path, labels are preserved (not removed) since the verdict is unreliable, except the policy-`off` container-image case, where labels reconcile normally.
 
 ## Fork PRs and the required gate
 
