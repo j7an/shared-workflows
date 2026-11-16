@@ -149,3 +149,18 @@ fixed${TAB}fixable${TAB}os${TAB}CVE-2026-109518${TAB}libapt-pkg7.0${TAB}3.0.3${T
   run_diff "$FIX/db-version.json" "$TMPD/old.json" "$FIX/deprank-266-new.json"
   assert_fail_token platform-mismatch-old
 }
+
+@test "non-array Vulnerabilities fails with invalid-json as stderr line 1" {
+  jq '.Results[0].Vulnerabilities = "x"' "$FIX/deprank-266-new.json" > "$TMPD/new.json"
+  run_diff "$FIX/db-version.json" "$FIX/deprank-266-old.json" "$TMPD/new.json"
+  assert_fail_token invalid-json
+}
+
+@test "vuln entry missing VulnerabilityID or PkgName fails with invalid-json" {
+  jq '.Results[0].Vulnerabilities[0] |= del(.VulnerabilityID)' "$FIX/deprank-266-new.json" > "$TMPD/new.json"
+  run_diff "$FIX/db-version.json" "$FIX/deprank-266-old.json" "$TMPD/new.json"
+  assert_fail_token invalid-json
+  jq '.Results[0].Vulnerabilities[0] |= del(.PkgName)' "$FIX/deprank-266-old.json" > "$TMPD/old.json"
+  run_diff "$FIX/db-version.json" "$TMPD/old.json" "$FIX/deprank-266-new.json"
+  assert_fail_token invalid-json
+}

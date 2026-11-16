@@ -24,7 +24,9 @@
 #
 # Reason tokens (stderr line 1, exit 2):
 #   usage                  wrong number of arguments
-#   invalid-json           an input is missing, unparsable, or lacks UpdatedAt
+#   invalid-json           an input is missing, unparsable, lacks UpdatedAt, or has
+#                          a non-array Vulnerabilities / an entry without string
+#                          VulnerabilityID and PkgName
 #   trivy-db-stale         DB UpdatedAt is more than 72 hours before now
 #   platform-mismatch-old  old report's ImageConfig os/architecture is not
 #   platform-mismatch-new  linux/amd64 (Trivy ignores --platform for
@@ -76,7 +78,11 @@ jq -rn --slurpfile old "$OLD" --slurpfile new "$NEW" '
     [ .Results[]?
       | select(.Class == "os-pkgs" or .Class == "lang-pkgs")
       | (if .Class == "os-pkgs" then "os" else "lang" end) as $c
-      | (.Vulnerabilities // [])[]
+      | (.Vulnerabilities // [])
+      | if type == "array" then .[] else error("vulnerabilities not an array") end
+      | if (type == "object" and (.VulnerabilityID | type) == "string"
+            and (.PkgName | type) == "string")
+        then . else error("malformed vulnerability entry") end
       | { c: $c, id: .VulnerabilityID, pkg: .PkgName,
           inst: (.InstalledVersion // ""), fix: (.FixedVersion // ""),
           sev: (.Severity // "") } ]
@@ -92,4 +98,4 @@ jq -rn --slurpfile old "$OLD" --slurpfile new "$NEW" '
   | ( [ $n[] | select($ok[[.c, .id, .pkg] | join("\t")] | not) | row("introduced") ]
     + [ $o[] | select($nk[[.c, .id, .pkg] | join("\t")] | not) | row("fixed") ] )
   | sort[] | @tsv
-' || fail invalid-json
+' 2>/dev/null || fail invalid-json
