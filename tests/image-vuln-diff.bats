@@ -92,6 +92,33 @@ fixed${TAB}fixable${TAB}os${TAB}CVE-2026-109518${TAB}libapt-pkg7.0${TAB}3.0.3${T
   [ -z "$output" ]
 }
 
+@test "new image without detected OS fails with os-coverage-mismatch" {
+  jq 'del(.Metadata.OS) | .Results |= map(select(.Class != "os-pkgs"))' "$FIX/deprank-266-new.json" > "$TMPD/new.json"
+  run_diff "$FIX/db-version.json" "$FIX/deprank-266-old.json" "$TMPD/new.json"
+  assert_fail_token os-coverage-mismatch
+}
+
+@test "differing OS families fail with os-coverage-mismatch" {
+  jq '.Metadata.OS.Family = "alpine"' "$FIX/deprank-266-new.json" > "$TMPD/new.json"
+  run_diff "$FIX/db-version.json" "$FIX/deprank-266-old.json" "$TMPD/new.json"
+  assert_fail_token os-coverage-mismatch
+}
+
+@test "only one side with an os-pkgs result fails with os-coverage-mismatch" {
+  jq '.Results |= map(select(.Class != "os-pkgs"))' "$FIX/deprank-266-new.json" > "$TMPD/new.json"
+  run_diff "$FIX/db-version.json" "$FIX/deprank-266-old.json" "$TMPD/new.json"
+  assert_fail_token os-coverage-mismatch
+}
+
+@test "both sides without OS and only lang packages still compare" {
+  local f
+  for f in old new; do
+    jq 'del(.Metadata.OS) | .Results |= map(select(.Class == "lang-pkgs"))' "$FIX/deprank-266-$f.json" > "$TMPD/$f.json"
+  done
+  run_diff "$FIX/db-version.json" "$TMPD/old.json" "$TMPD/new.json"
+  [ "$status" -eq 0 ]
+}
+
 @test "zero packages in old image fails with no-packages-old" {
   jq '.Results |= map(del(.Packages))' "$FIX/deprank-266-old.json" > "$TMPD/old.json"
   run_diff "$FIX/db-version.json" "$TMPD/old.json" "$FIX/deprank-266-new.json"
@@ -99,7 +126,7 @@ fixed${TAB}fixable${TAB}os${TAB}CVE-2026-109518${TAB}libapt-pkg7.0${TAB}3.0.3${T
 }
 
 @test "zero packages in new image fails with no-packages-new" {
-  jq '.Results = []' "$FIX/deprank-266-new.json" > "$TMPD/new.json"
+  jq '.Results |= map(del(.Packages))' "$FIX/deprank-266-new.json" > "$TMPD/new.json"
   run_diff "$FIX/db-version.json" "$FIX/deprank-266-old.json" "$TMPD/new.json"
   assert_fail_token no-packages-new
 }

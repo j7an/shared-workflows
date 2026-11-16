@@ -87,7 +87,7 @@ decoded() { sed -n 's/^result=//p' "$GITHUB_OUTPUT" | base64 -d; }
 
 @test "diff reason token becomes the pair status" {
   printf 'Dockerfile\tex/img\t1.0\tex/img\t2.0\tok\n' >"$T/pairs.tsv"
-  jq 'del(.Results)' "$FX/deprank-266-new.json" >"$T/empty.json"
+  jq '.Results |= map(del(.Packages))' "$FX/deprank-266-new.json" >"$T/empty.json"
   NEW_FX="$T/empty.json" run_loop
   [ "$status" -eq 0 ]
   out=$(decoded)
@@ -110,6 +110,13 @@ decoded() { sed -n 's/^result=//p' "$GITHUB_OUTPUT" | base64 -d; }
   [ "$status" -eq 0 ]
   out=$(decoded)
   [ "$out" = "$(printf 'pair\tex/img\t2.0\tex/img\t1.0\tlinux/amd64\tresult-too-large')" ]
+}
+
+@test "default result cap stays below the 128 KiB per-env-string limit" {
+  local cap
+  cap=$(sed -n 's/.*MAX_RESULT_BYTES="\${IMAGE_COMPARE_MAX_BYTES:-\([0-9]*\)}".*/\1/p' .github/workflows/dependency-safety.yml)
+  [ -n "$cap" ]
+  [ "$cap" -lt 131072 ]
 }
 
 @test "image refs passed to trivy" {

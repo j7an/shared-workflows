@@ -938,12 +938,31 @@ run_image_section() {
   [[ "$output" == *'### Container image vulnerabilities'* ]] || return 1
   [[ "$output" == *'`python` 3.12 → 3.13 (linux/amd64)'* ]] || return 1
   [[ "$output" == *'| ID | Package | Installed | Fixed | Severity |'* ]] || return 1
-  [[ "$output" == *'| CVE-2025-1 | libssl3 | 3.0.1 | 3.0.2 | HIGH |'* ]] || return 1
-  [[ "$output" == *'| CVE-2025-2 | zlib | 1.2 | - | LOW |'* ]] || return 1
-  [[ "$output" == *'| CVE-2024-9 | curl | 8.0 | 8.1 | MEDIUM |'* ]] || return 1
+  [[ "$output" == *'| CVE-2025-1 | `libssl3` | 3.0.1 | 3.0.2 | HIGH |'* ]] || return 1
+  [[ "$output" == *'| CVE-2025-2 | `zlib` | 1.2 | - | LOW |'* ]] || return 1
+  [[ "$output" == *'| CVE-2024-9 | `curl` | 8.0 | 8.1 | MEDIUM |'* ]] || return 1
   [[ "$output" == *'Introduced, fixable (1)'* ]] || return 1
   [[ "$output" == *'Introduced, unfixed (1)'* ]] || return 1
   [[ "$output" == *'Fixed (1)'* ]] || return 1
+}
+
+@test "image section: package cell is inline code so scoped names do not @-mention" {
+  run_image_section 1 $'image\tpython\t3.13\tok\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok\nvuln\tpython\t3.13\tpython\t3.12\tintroduced\tfixable\tlang\tGHSA-x\t@npmcli/arborist\t1.0\t1.1\tHIGH'
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'| GHSA-x | `@npmcli/arborist` | 1.0 | 1.1 | HIGH |'* ]] || return 1
+}
+
+@test "image section: rows are capped at 50 per list with an exact-count remainder line" {
+  local tsv i
+  tsv=$'image\tpython\t3.13\tok\npair\tpython\t3.13\tpython\t3.12\tlinux/amd64\tok'
+  for i in $(seq -w 1 60); do
+    tsv+=$'\n'"vuln"$'\t'"python"$'\t'"3.13"$'\t'"python"$'\t'"3.12"$'\t'"introduced"$'\t'"fixable"$'\t'"os"$'\t'"CVE-2025-1$i"$'\t'"pkg$i"$'\t'"1"$'\t'"2"$'\t'"HIGH"
+  done
+  run_image_section 1 "$tsv"
+  [ "$status" -eq 0 ] || return 1
+  [ "$(printf '%s\n' "$output" | grep -c '^| CVE-2025-1')" -eq 50 ] || return 1
+  [[ "$output" == *'Introduced, fixable (60)'* ]] || return 1
+  [[ "$output" == *'10 more not shown'* ]] || return 1
 }
 
 @test "image section: empty lists say None and there is no details element" {

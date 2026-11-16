@@ -22,6 +22,7 @@ on:
 
 jobs:
   image-compare:
+    timeout-minutes: 20
     # Unprivileged: no statuses:write, no secrets. Untrusted PR images are pulled
     # and scanned here only; `scan` consumes the result as plain data (#214).
     if: github.event.pull_request.user.login == 'dependabot[bot]'
@@ -240,7 +241,7 @@ jobs:
           asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
           dl="$RUNNER_TEMP/trivy-download"
           mkdir -p "$dl" "$RUNNER_TEMP/trivy"
-          curl -fsSL -o "$dl/$asset" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${asset}"
+          curl -fsSL --max-time 300 -o "$dl/$asset" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${asset}"
           (cd "$dl" && echo "${TRIVY_SHA256}  ${asset}" | sha256sum -c -)
           tar -xzf "$dl/$asset" -C "$RUNNER_TEMP/trivy" trivy
           echo "$RUNNER_TEMP/trivy" >> "$GITHUB_PATH"
@@ -284,6 +285,10 @@ jobs:
           #   platform-mismatch-old  old report's ImageConfig os/architecture is not
           #   platform-mismatch-new  linux/amd64 (Trivy ignores --platform for
           #                          single-platform images, so check the report)
+          #   os-coverage-mismatch   .Metadata.OS.Family differs between old and new (a
+          #                          missing family differs from a present one), or exactly
+          #                          one side has an os-pkgs result: OS vulns would be
+          #                          reported as fixed/introduced wholesale
           #   no-packages-old        a report lists zero packages (sum of
           #   no-packages-new        .Results[].Packages | length is 0)
 
@@ -319,6 +324,10 @@ jobs:
                    and .Metadata.ImageConfig.architecture == "amd64"' "$f" >/dev/null 2>&1 \
               || fail "platform-mismatch-$side"
           done
+
+          OLD_OS=$(jq -c '[(.Metadata.OS.Family // null), ([.Results[]? | select(.Class == "os-pkgs")] | length > 0)]' "$OLD" 2>/dev/null) || fail invalid-json
+          NEW_OS=$(jq -c '[(.Metadata.OS.Family // null), ([.Results[]? | select(.Class == "os-pkgs")] | length > 0)]' "$NEW" 2>/dev/null) || fail invalid-json
+          [ "$OLD_OS" = "$NEW_OS" ] || fail os-coverage-mismatch
 
           for side in old new; do
             if [ "$side" = old ]; then f="$OLD"; else f="$NEW"; fi
@@ -374,7 +383,7 @@ jobs:
           }
 
           PAIRS_FILE="${PAIRS_FILE:-$RUNNER_TEMP/pairs.tsv}"
-          MAX_RESULT_BYTES="${IMAGE_COMPARE_MAX_BYTES:-900000}"
+          MAX_RESULT_BYTES="${IMAGE_COMPARE_MAX_BYTES:-98304}"
           cache_dir="$RUNNER_TEMP/trivy-cache"
           work_dir="$RUNNER_TEMP/image-compare"
           mkdir -p "$cache_dir" "$work_dir"
@@ -3642,12 +3651,17 @@ jobs:
             _sec=""
             _vlist() {
               local _rows
-              _rows=$(printf '%s\n' "${IMAGE_COMPARE_TSV:-}" | awk -F '\t' -v n="$_pn" -v v="$_pv" -v on="$_pon" -v ov="$_pov" -v d="$1" -v f="$2" '$1 == "vuln" && $2 == n && $3 == v && $4 == on && $5 == ov && $6 == d && (f == "" || $7 == f) { printf "| %s | %s | %s | %s | %s |\n", $9, $10, $11, $12, $13 }' | sort -u)
-              _sec="${_sec}"$'\n\n'"**$3 ($(printf '%s' "$_rows" | grep -c . || true))**"$'\n\n'
+              _rows=$(printf '%s\n' "${IMAGE_COMPARE_TSV:-}" | awk -F '\t' -v n="$_pn" -v v="$_pv" -v on="$_pon" -v ov="$_pov" -v d="$1" -v f="$2" '$1 == "vuln" && $2 == n && $3 == v && $4 == on && $5 == ov && $6 == d && (f == "" || $7 == f) { printf "| %s | `%s` | %s | %s | %s |\n", $9, $10, $11, $12, $13 }' | sort -u)
+              local _total _max=50
+              _total=$(printf '%s' "$_rows" | grep -c . || true)
+              _sec="${_sec}"$'\n\n'"**$3 (${_total})**"$'\n\n'
               if [ -z "$_rows" ]; then
                 _sec="${_sec}None"
               else
-                _sec="${_sec}| ID | Package | Installed | Fixed | Severity |"$'\n'"|----|---------|-----------|-------|----------|"$'\n'"${_rows}"
+                _sec="${_sec}| ID | Package | Installed | Fixed | Severity |"$'\n'"|----|---------|-----------|-------|----------|"$'\n'"$(printf '%s\n' "$_rows" | head -n "$_max")"
+                if [ "$_total" -gt "$_max" ]; then
+                  _sec="${_sec}"$'\n\n'"…and $((_total - _max)) more not shown"
+                fi
               fi
             }
             while IFS=$'\t' read -r _pk _pn _pv _pon _pov _pplat _pst; do

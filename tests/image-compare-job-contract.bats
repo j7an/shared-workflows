@@ -75,3 +75,15 @@ WF=${IMAGE_COMPARE_WF:-.github/workflows/dependency-safety.yml}
   hits=$(yq '.jobs[].steps[] | select(.run != null) | select(.run | test("needs\.image-compare")) | .name' "$WF")
   [ -z "$hits" ]
 }
+
+@test "image-compare has a job timeout of at most 30 minutes" {
+  local t
+  t=$(yq '.jobs.image-compare.timeout-minutes' "$WF")
+  [[ "$t" =~ ^[0-9]+$ ]]
+  [ "$t" -le 30 ]
+}
+
+@test "trivy tarball download has a curl max-time" {
+  run yq '.jobs.image-compare.steps[] | select(.id == "install") | .run' "$WF"
+  [[ "$output" == *'curl -fsSL --max-time 300'* ]]
+}

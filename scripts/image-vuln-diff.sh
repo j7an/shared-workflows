@@ -31,6 +31,10 @@
 #   platform-mismatch-old  old report's ImageConfig os/architecture is not
 #   platform-mismatch-new  linux/amd64 (Trivy ignores --platform for
 #                          single-platform images, so check the report)
+#   os-coverage-mismatch   .Metadata.OS.Family differs between old and new (a
+#                          missing family differs from a present one), or exactly
+#                          one side has an os-pkgs result: OS vulns would be
+#                          reported as fixed/introduced wholesale
 #   no-packages-old        a report lists zero packages (sum of
 #   no-packages-new        .Results[].Packages | length is 0)
 
@@ -66,6 +70,10 @@ for side in old new; do
          and .Metadata.ImageConfig.architecture == "amd64"' "$f" >/dev/null 2>&1 \
     || fail "platform-mismatch-$side"
 done
+
+OLD_OS=$(jq -c '[(.Metadata.OS.Family // null), ([.Results[]? | select(.Class == "os-pkgs")] | length > 0)]' "$OLD" 2>/dev/null) || fail invalid-json
+NEW_OS=$(jq -c '[(.Metadata.OS.Family // null), ([.Results[]? | select(.Class == "os-pkgs")] | length > 0)]' "$NEW" 2>/dev/null) || fail invalid-json
+[ "$OLD_OS" = "$NEW_OS" ] || fail os-coverage-mismatch
 
 for side in old new; do
   if [ "$side" = old ]; then f="$OLD"; else f="$NEW"; fi
