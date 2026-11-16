@@ -19,8 +19,9 @@
 #
 # Priority: guard > errors > image-unchecked > blocking-age > advisories >
 # advisory-age > clean. Image-unchecked = RELEASE_AGE_POLICY=off with
-# IMAGE_COUNT>0: images have no advisory data, so without an age check they
-# need manual review (gate_state=error, no safety-error label, no auto-merge).
+# IMAGE_COUNT>0: images get a vulnerability comparison but, under `off`, no age
+# check, so they need manual review (gate_state=error, no safety-error label,
+# no auto-merge).
 #
 # Contract invariant: RELEASE_AGE_POLICY=off requires AGE_ERROR_COUNT=0 and
 # AGE_VIOLATION_COUNT=0 — no age data may exist when no lookup ran. A
@@ -160,7 +161,7 @@ elif [ "$auto_merge_ok" = "true" ]; then
   if [ "$RELEASE_AGE_POLICY" = "off" ]; then
     status_desc="Clean scan (no advisories). Auto-merge enabled."
   elif [ "$IMAGE_COUNT" -gt 0 ]; then
-    status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; container images age-checked only, no advisory data). Auto-merge enabled."
+    status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; images compared on linux/amd64, no new fixable vulnerabilities). Auto-merge enabled."
   else
     status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Auto-merge enabled."
   fi
@@ -168,7 +169,7 @@ else
   if [ "$RELEASE_AGE_POLICY" = "off" ]; then
     status_desc="Clean scan (no advisories). Ready for merge."
   elif [ "$IMAGE_COUNT" -gt 0 ]; then
-    status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; container images age-checked only, no advisory data). Ready for merge."
+    status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; images compared on linux/amd64, no new fixable vulnerabilities). Ready for merge."
   else
     status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Ready for merge."
   fi

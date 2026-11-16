@@ -5,7 +5,7 @@ Reusable GitHub Actions workflows for dependency safety verification and release
 ## Features
 
 - **Opt-in release-age verification** — Dependabot's native `cooldown.default-days` owns the wait before PR creation; `release_age_policy` (default `"off"`) can additionally label (`advisory`) or fail the gate (`blocking`) on target versions younger than `minimum_release_age_days`
-- **Container base images** — Dockerfile `FROM` lines are parsed and, under `advisory` or `blocking`, each image's build date is age-checked via the OCI registry API. Images are not advisory-scanned (no advisory database covers container images; tracked in [#214](https://github.com/j7an/shared-workflows/issues/214))
+- **Container base images** — Dockerfile `FROM` lines are parsed and, under `advisory` or `blocking`, each image's build date is age-checked via the OCI registry API. Each image bump is vulnerability-compared against its previous version with Trivy on `linux/amd64` (OS and language packages); new fixable vulnerabilities apply `security-review-needed` and suppress auto-merge ([#214](https://github.com/j7an/shared-workflows/issues/214))
 - **Version-aware advisory filtering** — advisories already patched at or below the PR's target version are collapsed into a non-blocking "historical" section
 - **GHSA + OSV dual-source scan** — every package is queried against both GitHub Advisory and OSV.dev; mismatches surface both
 - **OpenSSF Scorecard integration** — Scorecard results for each GitHub Action appear in the scan comment
@@ -395,7 +395,7 @@ update.
 | `.github/workflows/*.yml` (`uses:` lines) | GHSA `ACTIONS`, OSV `GitHub Actions` | — | GitHub Releases API | Yes |
 | `requirements*.txt`, `uv.lock`, `poetry.lock`, `pyproject.toml` | GHSA `PIP`, OSV `PyPI` | — | PyPI JSON API | No |
 | `package.json` + `pnpm-lock.yaml` | GHSA `NPM`, OSV `npm` | OSV batch over new lockfile entries | deps.dev v3 | No |
-| `Dockerfile`, `Containerfile`, `*.Dockerfile`, `Dockerfile.*` (added `FROM` lines) | Not advisory-scanned (no advisory database covers images; see [#214](https://github.com/j7an/shared-workflows/issues/214)) | — | OCI registry API (anonymous; newest image-config `created` across platforms; only under `advisory`/`blocking`) | No |
+| `Dockerfile`, `Containerfile`, `*.Dockerfile`, `Dockerfile.*` (added `FROM` lines) | Old-vs-new Trivy vulnerability comparison on `linux/amd64` (see [#214](https://github.com/j7an/shared-workflows/issues/214)) | — | OCI registry API (anonymous; newest image-config `created` across platforms; only under `advisory`/`blocking`) | No |
 | `package-lock.json` | **Not supported — fails closed** | — | — | — |
 | `yarn.lock` | **Not supported — fails closed** | — | — | — |
 
@@ -414,9 +414,19 @@ timestamp across its platforms, looked up anonymously through the OCI registry
 API (Docker Hub short names resolve under `library/`). Timestamps before 2013
 or in the future, and registry errors, are reported as `error` rows.
 
-Images are **not** advisory-scanned: no advisory database covers container
-images (tracked in [#214](https://github.com/j7an/shared-workflows/issues/214)),
-so a clean verdict means images were age-checked only. Under
+Each image bump is also compared old-vs-new with Trivy on `linux/amd64`
+([#214](https://github.com/j7an/shared-workflows/issues/214)), in an
+unprivileged job separate from the privileged scan. Trivy detects OS packages
+and language packages installed through package managers (for example pip
+site-packages); a language runtime installed outside a package manager (for
+example CPython under `/usr/local` in official python images) is not itself
+detected. Vulnerabilities newly introduced with a fix available apply
+`security-review-needed` and suppress auto-merge; introduced-but-unfixed and
+fixed vulnerabilities are listed in the scan comment but do not gate. A failed
+comparison is a scan error: gate `error` and `dependency-safety-error` under
+every policy. The pending status for this job appears after the comparison job
+completes. A clean verdict means the images were age-checked (when the policy
+allows) and compared with no new fixable vulnerabilities. Under
 `release_age_policy: off`, any image bump yields gate `error` and requires
 manual review with auto-merge off, but no `dependency-safety-error` label,
 since this is a policy outcome rather than a scan failure. For all ecosystems,
@@ -468,7 +478,7 @@ dependency-safety.yml fires on pull_request
     ├── Non-dependabot PR? → status "success" (no-op; external forks can't post — see "Fork PRs and the required gate")
     ├── Status → "pending" ("Scanning dependencies for safety...")
     ├── Parses diff to extract package names + target versions
-    │     ├── Dockerfile family: added FROM lines → docker rows (images are never advisory-scanned)
+    │     ├── Dockerfile family: added FROM lines → docker rows (images get an old-vs-new Trivy comparison on linux/amd64, not an advisory scan)
     │     ├── github-actions / pip: inline versions, falling back to PR body text
     │     └── npm/pnpm: lockfile-resolved versions; PR-body fallback only when
     │         the parser proves nothing
@@ -509,13 +519,13 @@ The `dependency-safety / gate` commit status uses three states:
 |-------|------|
 | `success` | Clean scan, OR advisories present (label `security-review-needed`), OR age violation under `release_age_policy: advisory` (label `dependency-age-violation`) |
 | `failure` | Age violation under `release_age_policy: blocking` |
-| `error` | Dependency extraction failed, or GHSA/OSV/age-lookup APIs errored — the verdict is unreliable; manual review required. Also set when a container image changed under `release_age_policy: off`, which needs manual review and gets no `dependency-safety-error` label |
+| `error` | Dependency extraction failed, or GHSA/OSV/age-lookup APIs errored, or an image comparison failed — the verdict is unreliable; manual review required. Also set when a container image changed under `release_age_policy: off`, which needs manual review and gets no `dependency-safety-error` label |
 
 Labels:
 
 | Label | Color | Applied when | Removed when |
 |-------|-------|--------------|--------------|
-| `security-review-needed` | red (`B60205`) | Advisory scan finds vulnerabilities affecting target versions | Re-scan finds zero applicable advisories AND no `error` state (the policy-`off` container-image case does not count: labels reconcile normally there) |
+| `security-review-needed` | red (`B60205`) | Advisory scan finds vulnerabilities affecting target versions, or an image bump introduces a fixable vulnerability | Re-scan finds zero applicable advisories AND no `error` state (the policy-`off` container-image case does not count: labels reconcile normally there) |
 | `dependency-age-violation` | amber (`FBCA04`) | Any target version is younger than `minimum_release_age_days` (only under `release_age_policy: advisory` or `blocking`) | All versions pass age check AND no `error` state (the policy-`off` container-image case does not count: labels reconcile normally there) |
 | `dependency-safety-error` | grey (`6E7781`) | Scan extraction failed or API errors occurred | Clean scan completes without errors |
 

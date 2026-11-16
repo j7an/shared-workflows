@@ -2744,8 +2744,9 @@ jobs:
           #
           # Priority: guard > errors > image-unchecked > blocking-age > advisories >
           # advisory-age > clean. Image-unchecked = RELEASE_AGE_POLICY=off with
-          # IMAGE_COUNT>0: images have no advisory data, so without an age check they
-          # need manual review (gate_state=error, no safety-error label, no auto-merge).
+          # IMAGE_COUNT>0: images get a vulnerability comparison but, under `off`, no age
+          # check, so they need manual review (gate_state=error, no safety-error label,
+          # no auto-merge).
           #
           # Contract invariant: RELEASE_AGE_POLICY=off requires AGE_ERROR_COUNT=0 and
           # AGE_VIOLATION_COUNT=0 — no age data may exist when no lookup ran. A
@@ -2885,7 +2886,7 @@ jobs:
             if [ "$RELEASE_AGE_POLICY" = "off" ]; then
               status_desc="Clean scan (no advisories). Auto-merge enabled."
             elif [ "$IMAGE_COUNT" -gt 0 ]; then
-              status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; container images age-checked only, no advisory data). Auto-merge enabled."
+              status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; images compared on linux/amd64, no new fixable vulnerabilities). Auto-merge enabled."
             else
               status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Auto-merge enabled."
             fi
@@ -2893,7 +2894,7 @@ jobs:
             if [ "$RELEASE_AGE_POLICY" = "off" ]; then
               status_desc="Clean scan (no advisories). Ready for merge."
             elif [ "$IMAGE_COUNT" -gt 0 ]; then
-              status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; container images age-checked only, no advisory data). Ready for merge."
+              status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d; images compared on linux/amd64, no new fixable vulnerabilities). Ready for merge."
             else
               status_desc="Clean scan (≥${MINIMUM_RELEASE_AGE_DAYS}d, no advisories). Ready for merge."
             fi
@@ -3596,7 +3597,8 @@ jobs:
           # --- END deps placeholder ---
 
           # --- BEGIN images line ---
-          # Container images get no advisory scan; say so honestly. PR-supplied
+          # One entry per image: old -> new reference and platform, plus the
+          # comparison counts (ok) or the failure reason (error). PR-supplied
           # names/versions are inert: backticks are stripped before they go
           # inside inline code.
           IMAGES_LINE=""
@@ -3604,19 +3606,60 @@ jobs:
             _img_list=""
             while IFS=$'\t' read -r _iname _iver; do
               [ -z "$_iname" ] && continue
-              _iname="${_iname//\`/}"
-              _iver="${_iver//\`/}"
-              if [ -n "$_img_list" ]; then _img_list="${_img_list}, "; fi
-              _img_list="${_img_list}\`${_iname}\` (${_iver})"
+              _istatus=$(printf '%s\n' "${IMAGE_COMPARE_TSV:-}" | awk -F '\t' -v n="$_iname" -v v="$_iver" '$1 == "image" && $2 == n && $3 == v { print $4; exit }')
+              _istatus="${_istatus:-no-comparison}"
+              _pair=$(printf '%s\n' "${IMAGE_COMPARE_TSV:-}" | awk -F '\t' -v n="$_iname" -v v="$_iver" '$1 == "pair" && $2 == n && $3 == v { print $4 "\t" $5; exit }')
+              _oname="${_pair%%$'\t'*}"
+              _over="${_pair#*$'\t'}"
+              _dispname="${_iname//\`/}"
+              _dispver="${_iver//\`/}"
+              _dispover="${_over//\`/}"
+              if [ "$_istatus" = "ok" ] && [ -n "$_pair" ]; then
+                _cnt() { printf '%s\n' "${IMAGE_COMPARE_TSV:-}" | awk -F '\t' -v n="$_iname" -v v="$_iver" -v on="$_oname" -v ov="$_over" -v d="$1" -v f="$2" '$1 == "vuln" && $2 == n && $3 == v && $4 == on && $5 == ov && $6 == d && (f == "" || $7 == f)' | sort -u | wc -l | tr -d ' '; }
+                _entry="\`${_dispname}\` (${_dispover} → ${_dispver}, linux/amd64): $(_cnt introduced fixable) new fixable, $(_cnt introduced unfixed) new unfixed, $(_cnt fixed '') fixed"
+              else
+                _istatus="${_istatus//\`/}"
+                _entry="\`${_dispname}\` (${_dispver}): comparison failed (${_istatus}); not vulnerability-checked"
+              fi
+              if [ -n "$_img_list" ]; then _img_list="${_img_list}; "; fi
+              _img_list="${_img_list}${_entry}"
             done <<< "$IMAGE_ROWS"
             if [ "$RELEASE_AGE_POLICY" = "off" ]; then
-              _img_suffix='release age not checked (`release_age_policy` is `off`); vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214).'
+              _img_suffix='release age not checked (`release_age_policy` is `off`).'
             else
-              _img_suffix='release age checked; vulnerability scan not performed (no advisory database covers container images; see j7an/shared-workflows#214).'
+              _img_suffix='release age checked.'
             fi
             IMAGES_LINE=$'\n\n'"**Container images:** ${_img_list} — ${_img_suffix}"
           fi
           # --- END images line ---
+
+          # --- BEGIN image comparison section ---
+          # Per ok pair: introduced-fixable, introduced-unfixed and fixed lists,
+          # rendered from the validated vuln rows only. No <details> anywhere, so
+          # the change-note ID extraction sees the same text as the previous one.
+          IMAGE_COMPARISON_SECTION=""
+          if [ "${IMAGE_COUNT:-0}" -gt 0 ] && printf '%s\n' "${IMAGE_COMPARE_TSV:-}" | grep -q '^pair'$'\t'; then
+            _sec=""
+            _vlist() {
+              local _rows
+              _rows=$(printf '%s\n' "${IMAGE_COMPARE_TSV:-}" | awk -F '\t' -v n="$_pn" -v v="$_pv" -v on="$_pon" -v ov="$_pov" -v d="$1" -v f="$2" '$1 == "vuln" && $2 == n && $3 == v && $4 == on && $5 == ov && $6 == d && (f == "" || $7 == f) { printf "| %s | %s | %s | %s | %s |\n", $9, $10, $11, $12, $13 }' | sort -u)
+              _sec="${_sec}"$'\n\n'"**$3 ($(printf '%s' "$_rows" | grep -c . || true))**"$'\n\n'
+              if [ -z "$_rows" ]; then
+                _sec="${_sec}None"
+              else
+                _sec="${_sec}| ID | Package | Installed | Fixed | Severity |"$'\n'"|----|---------|-----------|-------|----------|"$'\n'"${_rows}"
+              fi
+            }
+            while IFS=$'\t' read -r _pk _pn _pv _pon _pov _pplat _pst; do
+              [ "$_pk" = "pair" ] && [ "$_pst" = "ok" ] || continue
+              _sec="${_sec}"$'\n\n'"#### \`${_pn//\`/}\` ${_pov//\`/} → ${_pv//\`/} (${_pplat})"
+              _vlist introduced fixable "Introduced, fixable"
+              _vlist introduced unfixed "Introduced, unfixed"
+              _vlist fixed '' "Fixed"
+            done <<< "$IMAGE_COMPARE_TSV"
+            IMAGE_COMPARISON_SECTION=$'\n\n'"### Container image vulnerabilities"$'\n\nTrivy comparison of each new base image against the previous one (OS and language packages).'"${_sec}"
+          fi
+          # --- END image comparison section ---
 
           # --- Build comment body ---
           TOTAL=$((GHSA_TOTAL + OSV_TOTAL))
@@ -3833,15 +3876,20 @@ jobs:
               # Cross-reference: advisories are present too. Don't lose that signal under the age-violation header.
               RESULTS_FOOTER="${RESULTS_FOOTER}"$'\n'"> Also: ${TOTAL} advisory/ies affect target versions — see table above."
             fi
-          elif [ "$TOTAL" -gt 0 ]; then
-            RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
-            RESULTS_FOOTER="> Review the advisories above before deciding to merge."
+          elif [ "$((TOTAL + ${IMAGE_FIXABLE_INTRODUCED_COUNT:-0}))" -gt 0 ]; then
+            if [ "${IMAGE_FIXABLE_INTRODUCED_COUNT:-0}" -gt 0 ]; then
+              RESULTS_HEADER="**${TOTAL} package advisory/ies and ${IMAGE_FIXABLE_INTRODUCED_COUNT} new fixable image vulnerability/ies found** — review before merging."
+              RESULTS_FOOTER="> Review the advisories above and the container image vulnerabilities below before deciding to merge."
+            else
+              RESULTS_HEADER="**${TOTAL} advisory/ies found** affecting target versions — review before merging."
+              RESULTS_FOOTER="> Review the advisories above before deciding to merge."
+            fi
           elif [ "$HAS_AGE_VIOLATION" = "true" ]; then
             # release_age_policy: advisory — reported, not blocking.
             RESULTS_HEADER="$(age_status_phrase) (advisory policy — not blocking)."
             RESULTS_FOOTER="> Release-age violation reported (advisory policy — not blocking). Auto-merge suppressed."
           elif [ "${NO_PACKAGE_SCAN:-false}" = "true" ] && [ "${IMAGE_COUNT:-0}" -gt 0 ]; then
-            RESULTS_HEADER="No package dependencies to scan. Container image(s) passed the release-age check; no vulnerability scan was performed."
+            RESULTS_HEADER="No package dependencies to scan. Container image(s) passed the release-age check and were compared with their previous versions on linux/amd64: no new fixable vulnerabilities."
             if [ "$AUTO_MERGE_OK" = "true" ]; then
               RESULTS_FOOTER="> Auto-merge enabled. PR will merge once all required checks pass."
             else
@@ -3956,7 +4004,7 @@ jobs:
             EXTRACTION_WARNING_SECTION="$(printf '\n> %s\n' "$EXTRACTION_WARNING")"
           fi
 
-          COMMENT_BODY="$(printf '%s%s\n\n%s%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s%s' \
+          COMMENT_BODY="$(printf '%s%s\n\n%s%s\n\n%s\n\n%s\n\n%s\n\n%s%s%s%s%s%s%s' \
             "## Dependency Safety Scan" \
             "$EXTRACTION_WARNING_SECTION" \
             "**Packages scanned:** ${DEPS}" \
@@ -3965,6 +4013,7 @@ jobs:
             "$RESULTS_HEADER" \
             "$RESULTS_TABLE" \
             "$RESULTS_FOOTER" \
+            "$IMAGE_COMPARISON_SECTION" \
             "$HISTORICAL_SECTION" \
             "$RELEASE_AGE_SECTION" \
             "$TIER2_SECTION" \
@@ -3989,7 +4038,7 @@ jobs:
               sort -u | tr '\n' ',' | sed 's/,$//' || true)
           fi
 
-          CURRENT_IDS=$(echo "$SCAN_RESULTS" | \
+          CURRENT_IDS=$(printf '%s\n%s' "$SCAN_RESULTS" "$IMAGE_COMPARISON_SECTION" | \
             grep -oE '(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|PYSEC-[0-9]+-[0-9]+)' | \
             sort -u | tr '\n' ',' | sed 's/,$//' || true)
 
