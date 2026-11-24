@@ -231,6 +231,14 @@ run_npm_chain() {
   [[ "$output" == *"UNSUP=[pyproject.toml]"* ]] || return 1
 }
 
+@test "chain: dep-rank#271 single-line cap raise + uv.lock clears pyproject.toml (issue #224)" {
+  run_npm_chain tests/fixtures/pyproject-bump-extract/dep-rank-271-cap-raise.diff "" \
+    tests/fixtures/pyproject-bump-extract/head/dep-rank-271
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fastmcp	4.2.0	pypi"* ]] || return 1
+  [[ "$output" == *"UNSUP=[]"* ]] || return 1
+}
+
 # Drive the real `pyproject head fetch` block with a `gh` shim that serves
 # fixture content for pyproject.toml and fails for everything else.
 @test "pyproject head fetch: fetches head pyproject.toml, drops failed fetches (issue #169)" {
