@@ -691,3 +691,152 @@ diff --git a/pyproject.toml b/pyproject.toml
 DIFF
 )"
 }
+
+# --- Single-line arrays: key = ["entry"] (issue #224) ------------------------
+
+# Build a one-hunk diff whose only change is one single-line array line.
+# Args: $1 = table header name, $2 = minus line, $3 = plus line
+single_line_array_diff() {
+  printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' \
+    '--- a/pyproject.toml' \
+    '+++ b/pyproject.toml' \
+    '@@ -1,2 +1,2 @@' \
+    " [$1]" \
+    "-$2" \
+    "+$3"
+}
+
+@test "Positive: single-line array bump in [project.optional-dependencies] (issue #224)" {
+  assert_clean_bump_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3"]' 'mcp = ["fastmcp>=4.2.0"]')" \
+    "fastmcp	4.2.0	pypi" "pyproject.toml"
+}
+
+@test "Positive: single-line array bump in [project] dependencies (issue #224)" {
+  assert_clean_bump_diff "$(single_line_array_diff project 'dependencies = ["jsonschema>=4.18,<5"]' 'dependencies = ["jsonschema>=4.19,<5"]')" \
+    "jsonschema	4.19	pypi" "pyproject.toml"
+}
+
+@test "Positive: single-line array bump in [dependency-groups] (issue #224)" {
+  assert_clean_bump_diff "$(single_line_array_diff dependency-groups 'dev = ["ruff>=0.15.12"]' 'dev = ["ruff>=0.15.13"]')" \
+    "ruff	0.15.13	pypi" "pyproject.toml"
+}
+
+@test "Positive: single-line array bump in [tool.uv] constraint-dependencies (issue #224)" {
+  assert_clean_bump_diff "$(single_line_array_diff tool.uv 'constraint-dependencies = ["urllib3>=2.5.0"]' 'constraint-dependencies = ["urllib3>=2.6.0"]')" \
+    "urllib3	2.6.0	pypi" "pyproject.toml"
+}
+
+@test "Positive: single-line array bump in [tool.uv] override-dependencies (issue #224)" {
+  assert_clean_bump_diff "$(single_line_array_diff tool.uv 'override-dependencies = ["urllib3>=2.5.0"]' 'override-dependencies = ["urllib3>=2.6.0"]')" \
+    "urllib3	2.6.0	pypi" "pyproject.toml"
+}
+
+@test "Positive: single-line array cap raise with uv.lock clears the path and emits no row (issue #224)" {
+  assert_clean_bump_diff "$(with_lock_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3,<4.2"]' 'mcp = ["fastmcp>=4.1.3,<4.3"]')" uv.lock)" \
+    "" "pyproject.toml"
+}
+
+@test "Positive: single-line array bump tolerates bracket spacing and a trailing comma (issue #224)" {
+  assert_clean_bump_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3"]' 'mcp = [ "fastmcp>=4.2.0", ]')" \
+    "fastmcp	4.2.0	pypi" "pyproject.toml"
+}
+
+@test "Positive: single-line array bump with CRLF line endings (issue #224)" {
+  assert_clean_bump_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3"]' 'mcp = ["fastmcp>=4.2.0"]' | sed 's/$/\r/')" \
+    "fastmcp	4.2.0	pypi" "pyproject.toml"
+}
+
+@test "Positive: j7an/dep-rank#271 single-line cap raise clears pyproject.toml with no row (issue #224)" {
+  run bash scripts/pyproject-bump-extract.sh --mode=deps --head-dir="$PBX/head/dep-rank-271" < "$PBX/dep-rank-271-cap-raise.diff"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run bash scripts/pyproject-bump-extract.sh --mode=cleared-paths --head-dir="$PBX/head/dep-rank-271" < "$PBX/dep-rank-271-cap-raise.diff"
+  [ "$status" -eq 0 ]
+  [ "$output" = "pyproject.toml" ]
+}
+
+@test "Disqualify: single-line array cap raise without a lockfile change (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3,<4.2"]' 'mcp = ["fastmcp>=4.1.3,<4.3"]')"
+}
+
+@test "Disqualify: single-line array gains an entry (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3"]' 'mcp = ["fastmcp>=4.2.0", "httpx>=0.28"]')"
+}
+
+@test "Disqualify: single-line array loses an entry (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3", "httpx>=0.28"]' 'mcp = ["fastmcp>=4.2.0"]')"
+}
+
+@test "Disqualify: single-line array key renamed (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3"]' 'server = ["fastmcp>=4.2.0"]')"
+}
+
+@test "Disqualify: single-line array package name changed (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3"]' 'mcp = ["fastmcp-slim>=4.2.0"]')"
+}
+
+@test "Disqualify: single-line array operator changed (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp==4.1.3"]' 'mcp = ["fastmcp>=4.2.0"]')"
+}
+
+@test "Disqualify: single-line array reformatted with no version change (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3"]' 'mcp = [ "fastmcp>=4.1.3" ]')"
+}
+
+@test "Disqualify: single-line array with a trailing comment (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3"]' 'mcp = ["fastmcp>=4.2.0"] # pinned')"
+}
+
+@test "Disqualify: single-line [build-system] requires bump (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff build-system 'requires = ["hatchling>=1.28.0"]' 'requires = ["hatchling>=1.29.0"]')"
+}
+
+@test "Disqualify: single-line [project] keywords array is not a dependency array (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff project 'keywords = ["ruff>=0.1"]' 'keywords = ["ruff>=0.2"]')"
+}
+
+@test "Disqualify: single-line [tool.uv] dev-dependencies is not an accepted key (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff tool.uv 'dev-dependencies = ["ruff>=0.1"]' 'dev-dependencies = ["ruff>=0.2"]')"
+}
+
+@test "Disqualify: new single-line extras key added (issue #224)" {
+  assert_disqualified_diff "$(printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' '--- a/pyproject.toml' '+++ b/pyproject.toml' \
+    '@@ -1,1 +1,2 @@' ' [project.optional-dependencies]' '+lsp = ["lsprotocol>=2025.0.0"]')"
+}
+
+@test "Disqualify: single-line extras key removed (issue #224)" {
+  assert_disqualified_diff "$(printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' '--- a/pyproject.toml' '+++ b/pyproject.toml' \
+    '@@ -1,2 +1,1 @@' ' [project.optional-dependencies]' '-lsp = ["lsprotocol>=2025.0.0"]')"
+}
+
+@test "Disqualify: multi-line entry removed, single-line array added (issue #224)" {
+  assert_disqualified_diff "$(printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' '--- a/pyproject.toml' '+++ b/pyproject.toml' \
+    '@@ -1,4 +1,4 @@' ' [project.optional-dependencies]' ' mcp = [' \
+    '-    "fastmcp>=4.1.3",' '+mcp = ["fastmcp>=4.2.0"]')"
+}
+
+@test "Disqualify: single-line array removed, bare entry added (issue #224)" {
+  assert_disqualified_diff "$(printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' '--- a/pyproject.toml' '+++ b/pyproject.toml' \
+    '@@ -1,2 +1,2 @@' ' [project.optional-dependencies]' \
+    '-mcp = ["fastmcp>=4.1.3"]' '+    "fastmcp>=4.2.0",')"
+}
+
+@test "Disqualify: two adjacent single-line arrays bumped together, same as adjacent multi-line entries (issue #224)" {
+  assert_disqualified_diff "$(printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' '--- a/pyproject.toml' '+++ b/pyproject.toml' \
+    '@@ -1,3 +1,3 @@' ' [project.optional-dependencies]' \
+    '-claude = ["claude-agent-sdk>=0.2.158"]' '-codex = ["openai-codex>=0.157.1"]' \
+    '+claude = ["claude-agent-sdk>=0.2.160"]' '+codex = ["openai-codex>=0.158.0"]')"
+}
+
+@test "Disqualify: bare entry after an unchanged single-line array inherits no array context (issue #224)" {
+  assert_disqualified_diff "$(printf '%s\n' \
+    'diff --git a/pyproject.toml b/pyproject.toml' '--- a/pyproject.toml' '+++ b/pyproject.toml' \
+    '@@ -1,4 +1,4 @@' ' [project.optional-dependencies]' ' mcp = ["fastmcp>=4.1.3,<4.2"]' \
+    '-    "ruff>=0.15.12",' '+    "ruff>=0.15.13",')"
+}

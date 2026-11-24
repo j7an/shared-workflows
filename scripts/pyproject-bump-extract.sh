@@ -406,6 +406,23 @@ while IFS= read -r line; do
     fi
   fi
 
+  # Single-line array `key = ["entry"]` (issue #224): treat the line as its one
+  # entry so it takes the same checks as a multi-line entry. inline_key joins
+  # the skeleton, so a key rename or a single-line/multi-line mix disqualifies.
+  # The array opens and closes on this line, so no array stays open after it.
+  # ponytail: one entry per line; pair entries positionally if a real
+  # Dependabot PR bumps inside a multi-entry single-line array.
+  inline_key=""
+  if [[ "$content" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_-]*)[[:space:]]*=[[:space:]]*\[[[:space:]]*(\"[^\"]*\")[[:space:]]*,?[[:space:]]*\][[:space:]]*$ ]]; then
+    case "$current_table:${BASH_REMATCH[1]}" in
+      project_other:dependencies|project_optional_deps:*|dependency_groups:*|tool_uv:constraint-dependencies|tool_uv:override-dependencies)
+        inline_key="${BASH_REMATCH[1]}"
+        content="${BASH_REMATCH[2]}"
+        current_key=""
+        ;;
+    esac
+  fi
+
   # ---------------- Centralized pending consumption ----------------
   # If pending is set, this line MUST be the matching + (same kind/name/skeleton)
   # or the file is disqualified. No other line type may consume or pass through
@@ -416,7 +433,7 @@ while IFS= read -r line; do
       case "$pending_kind" in
         pep508)
           if parse_pep508_entry "$content"; then
-            plus_skeleton="${_pep_name}${_pep_extras}__VER__${_pep_marker}"
+            plus_skeleton="${inline_key}|${_pep_name}${_pep_extras}__VER__${_pep_marker}"
             if [ "$_pep_name" = "$pending_name" ] && [ "$plus_skeleton" = "$pending_skeleton" ]; then
               emit_bump "$_pep_name" "$_pep_version_spec" "$pending_minus_version"
               consumed=true
@@ -553,6 +570,7 @@ while IFS= read -r line; do
   if parse_pep508_entry "$content"; then
     # Positively-established array context required (Blocker 3).
     in_array=false
+    [ -n "$inline_key" ] && in_array=true
     case "$current_table" in
       project_other)
         [ "$current_key" = "dependencies" ] && in_array=true
@@ -573,7 +591,7 @@ while IFS= read -r line; do
     if [ "$prefix" = "-" ]; then
       pending_kind="pep508"
       pending_name="$_pep_name"
-      pending_skeleton="${_pep_name}${_pep_extras}__VER__${_pep_marker}"
+      pending_skeleton="${inline_key}|${_pep_name}${_pep_extras}__VER__${_pep_marker}"
       pending_minus_version="$_pep_version_spec"
       continue
     fi
