@@ -216,6 +216,40 @@ run_npm_chain() {
 # assigns it inside `if [ -z "$DEPS_TSV" ]`, so on a clean bump it is never set
 # and a bare "$ECO_HINT" would abort the case under `set -u`.
 
+# run_npm_chain_status <fixture> — the real `npm composition` block followed by
+# the real Layer 3 guard block, so GUARD_STATUS_DESC is derived from a diff end
+# to end. The guard capture mirrors extract_guard_block in guard-runtime.bats.
+run_npm_chain_status() {
+  local fixture="$1"
+  local block guard
+  block=$(extract_named_block "$WF" "npm composition")
+  guard=$(awk '/^[[:space:]]+# --- Layer 3:/{flag=1} flag {print} flag && /^          fi[[:space:]]*$/{exit}' "$WF" | sed -E 's/^          //')
+  run bash -c "
+    set -uo pipefail
+    extract_deps()           { bash scripts/extract-deps.sh \"\$@\"; }
+    diff_touches_lockfile()  { bash scripts/diff-touches-lockfile.sh \"\$@\"; }
+    classify_touched_paths() { bash scripts/classify-touched-paths.sh \"\$@\"; }
+    pyproject_bump_extract() { bash scripts/pyproject-bump-extract.sh \"\$@\"; }
+    pr_body_to_deps()        { bash scripts/pr-body-to-deps.sh \"\$@\"; }
+    npm_bump_extract()       { bash scripts/npm-bump-extract.sh \"\$@\"; }
+    DIFF=\$(cat '$fixture')
+    PR_BODY=''
+    PYPROJECT_HEAD_DIR=''
+    $block
+    $guard
+    printf 'GUARD=%s\nSTATUS<<<%s>>>\n' \"\$GUARD_TRIGGERED\" \"\$GUARD_STATUS_DESC\"
+  "
+}
+
+@test "chain: npm rejection status names the rejected lockfile when its path has a backtick (issue #225)" {
+  # The display string NPM_REJECTION has backticks removed, so only the raw
+  # diagnostic can identify this path.
+  run_npm_chain_status "$NPMFX/manifest-clean-lock-settings-backtick-path.diff"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"GUARD=true"* ]] || return 1
+  [[ "$output" == *'STATUS<<<Dependency parser rejected a`b/pnpm-lock.yaml (+1 more). Manual review required.>>>'* ]] || return 1
+}
+
 @test "chain: nexus-mcp#280 pyproject + uv.lock clears with head context (issue #169)" {
   run_npm_chain "$FIXTURES/nexus-280-pyproject-plus-uvlock.diff" "" \
     tests/fixtures/pyproject-bump-extract/head/nexus-280
@@ -855,7 +889,7 @@ run_deps_placeholder_img() {
     TIER2_COUNT='$tier2_count'
     IMAGE_COUNT='$image_count'
     $block
-    printf 'DEPS<<<%s>>> NPS=%s\n' \"\$DEPS\" \"\$NO_PACKAGE_SCAN\"
+    printf 'DEPS<<<%s>>> NPS=%s T1=%s\n' \"\$DEPS\" \"\$NO_PACKAGE_SCAN\" \"\${TIER1_SCANNED:-unset}\"
   "
 }
 
@@ -1045,10 +1079,11 @@ run_results_summary() {
   run bash -c "
     set -uo pipefail
     IMAGE_FIXABLE_INTRODUCED_COUNT='${IC_FIXABLE:-0}'
-    GUARD_TRIGGERED=false TOTAL='${IC_TOTAL:-0}' HAS_SAFETY_ERROR=false NO_PACKAGE_SCAN='$nps'
+    GUARD_TRIGGERED='${IC_GUARD:-false}' TOTAL='${IC_TOTAL:-0}' HAS_SAFETY_ERROR='${IC_SAFETY_ERROR:-false}' NO_PACKAGE_SCAN='$nps'
+    SCAN_ERROR_COUNT='${IC_SCAN_ERRORS:-0}' IMAGE_COMPARE_ERROR_COUNT='${IC_IMAGE_ERRORS:-0}' TIER1_SCANNED='${IC_TIER1:-true}'
     IMAGE_COUNT='$icount' RELEASE_AGE_POLICY='$policy' AUTO_MERGE_OK='$am_ok'
     HAS_AGE_VIOLATION=false AGE_ONLY_COUNT=0 SUPPLY_RISK_COUNT=0
-    MINIMUM_RELEASE_AGE_DAYS=7 SCAN_RESULTS=''
+    MINIMUM_RELEASE_AGE_DAYS=7 SCAN_RESULTS='${IC_SCAN_RESULTS:-}'
     $block
     printf 'HEADER<<<%s>>>\nFOOTER<<<%s>>>\nTABLE<<<%s>>>\n' \"\$RESULTS_HEADER\" \"\$RESULTS_FOOTER\" \"\$RESULTS_TABLE\"
   "
@@ -1112,6 +1147,152 @@ run_results_summary() {
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"FOOTER<<<> Ready for manual review and merge.>>>"* ]] || return 1
   [[ "$output" != *"Auto-merge enabled"* ]] || return 1
+}
+
+# --- results summary under the guard (issue #225) ----------------------------
+# The guard always sets HAS_SAFETY_ERROR=true (safety-verdict.sh), so every
+# guard case below sets both.
+
+@test "results summary: guard with a clean partial scan reports the scanned subset" {
+  IC_GUARD=true IC_SAFETY_ERROR=true run_results_summary false 0 off false
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"| GitHub Advisory (GHSA) | 0 affecting target (extracted packages only) |"* ]] || return 1
+  [[ "$output" == *"| OSV.dev | 0 affecting target (extracted packages only) |"* ]] || return 1
+  [[ "$output" != *"(not scanned)"* ]] || return 1
+  [[ "$output" != *"scan failed"* ]] || return 1
+  [[ "$output" == *"HEADER<<<Scan incomplete — manual review required.>>>"* ]] || return 1
+  [[ "$output" == *"FOOTER<<<> Some dependency changes could not be scanned — see the warning at the top of this comment. Results cover the extracted packages only.>>>"* ]] || return 1
+}
+
+@test "results summary: guard with nothing extracted still reports (not scanned)" {
+  IC_GUARD=true IC_SAFETY_ERROR=true run_results_summary true 0 off false
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"| GitHub Advisory (GHSA) | (not scanned) |"* ]] || return 1
+  [[ "$output" == *"| OSV.dev | (not scanned) |"* ]] || return 1
+  [[ "$output" != *"extracted packages only"* ]] || return 1
+  [[ "$output" == *"HEADER<<<Scan incomplete — manual review required.>>>"* ]] || return 1
+  [[ "$output" == *"FOOTER<<<> No packages could be scanned — see the warning at the top of this comment.>>>"* ]] || return 1
+}
+
+@test "results summary: guard with a partial scan that errored shows scan failed" {
+  IC_GUARD=true IC_SAFETY_ERROR=true IC_SCAN_ERRORS=1 run_results_summary false 0 off false
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"(scan failed — see logs)"* ]] || return 1
+  [[ "$output" != *"0 affecting target"* ]] || return 1
+  # A package-query error beside an image comparison error is still a failed scan.
+  IC_GUARD=true IC_SAFETY_ERROR=true IC_SCAN_ERRORS=2 IC_IMAGE_ERRORS=1 run_results_summary false 1 advisory false
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"(scan failed — see logs)"* ]] || return 1
+}
+
+@test "results summary: guard with clean packages and only an image comparison error keeps the clean rows" {
+  # An unresolved FROM always counts as an image comparison error, so the
+  # aggregate SCAN_ERROR_COUNT cannot decide the package rows.
+  IC_GUARD=true IC_SAFETY_ERROR=true IC_SCAN_ERRORS=1 IC_IMAGE_ERRORS=1 run_results_summary false 1 advisory false
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"| GitHub Advisory (GHSA) | 0 affecting target (extracted packages only) |"* ]] || return 1
+  [[ "$output" == *"| OSV.dev | 0 affecting target (extracted packages only) |"* ]] || return 1
+  [[ "$output" != *"scan failed"* ]] || return 1
+}
+
+@test "results summary: guard with only a clean tier-2 sweep reports GHSA as not scanned" {
+  # The tier-2 sweep queries OSV only.
+  IC_GUARD=true IC_SAFETY_ERROR=true IC_TIER1=false run_results_summary false 0 off false
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"| GitHub Advisory (GHSA) | (not scanned) |"* ]] || return 1
+  [[ "$output" == *"| OSV.dev | 0 affecting target (extracted packages only) |"* ]] || return 1
+}
+
+@test "results summary: guard with advisories in the subset keeps the advisory table" {
+  IC_GUARD=true IC_SAFETY_ERROR=true IC_TOTAL=2 \
+    IC_SCAN_RESULTS='| GHSA-aaaa-bbbb-cccc | high | x | GHSA |' \
+    run_results_summary false 0 off false
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"GHSA-aaaa-bbbb-cccc"* ]] || return 1
+  [[ "$output" == *"HEADER<<<Scan incomplete — manual review required.>>>"* ]] || return 1
+  [[ "$output" == *"Results cover the extracted packages only."* ]] || return 1
+  [[ "$output" == *"> Also: 2 advisory/ies were found in the scanned subset — see table above."* ]] || return 1
+}
+
+@test "results summary: guard with no package scanned and an image beside it does not deny the image comparison" {
+  # Covers an unresolved FROM alone, and an unsupported file (Cargo.lock)
+  # beside a successfully compared image: no package was scanned either way.
+  IC_GUARD=true IC_SAFETY_ERROR=true run_results_summary true 1 advisory false
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"(not scanned)"* ]] || return 1
+  [[ "$output" != *"not applicable"* ]] || return 1
+  [[ "$output" == *"FOOTER<<<> No packages could be scanned — see the warning at the top of this comment.>>>"* ]] || return 1
+  [[ "$output" != *"No dependencies could be scanned"* ]] || return 1
+}
+
+@test "results summary: the old total-failure wording is gone" {
+  run grep -c -E 'Dependency extraction failed — manual review required|> Parser could not extract dependencies\. Manual review required' "$WF"
+  [ "$output" = "0" ]
+}
+
+@test "deps placeholder: TIER1_SCANNED is true with tier-1 packages and false for a tier-2-only sweep" {
+  run_deps_placeholder_img "foo 1.0, " "0" "0"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"NPS=false T1=true"* ]] || return 1
+  run_deps_placeholder_img "" "3" "0"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"NPS=false T1=false"* ]] || return 1
+  run_deps_placeholder_img "" "0" "1"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"NPS=true T1=false"* ]] || return 1
+}
+
+# --- verdict parse / guard status (issue #225) -------------------------------
+
+# guard_verdict_tsv <guard: true|false> — the real script's TSV line, so a
+# rewording there cannot silently pass these tests.
+guard_verdict_tsv() {
+  AUTO_MERGE=true GUARD_TRIGGERED="$1" AGE_ERROR_COUNT=0 AGE_VIOLATION_COUNT=0 \
+    SCAN_ERROR_COUNT=0 ADVISORY_COUNT=0 RELEASE_AGE_POLICY=off \
+    MINIMUM_RELEASE_AGE_DAYS=7 IMAGE_COUNT=0 bash scripts/safety-verdict.sh
+}
+
+# run_verdict_parse <guard> <rc> <tsv> <guard_status_desc>
+run_verdict_parse() {
+  local block; block=$(extract_named_block "$WF" "verdict parse")
+  [ -n "$block" ] || return 1
+  VP_G="$1" VP_RC="$2" VP_TSV="$3" VP_GD="$4" run bash -c "
+    set -uo pipefail
+    GUARD_TRIGGERED=\"\$VP_G\" VERDICT_RC=\"\$VP_RC\" VERDICT_TSV=\"\$VP_TSV\" GUARD_STATUS_DESC=\"\$VP_GD\"
+    $block
+    printf 'STATE=%s\nSAFETY_ERROR=%s\nAUTO=%s\nDESC<<<%s>>>\n' \"\$GATE_STATE\" \"\$HAS_SAFETY_ERROR\" \"\$AUTO_MERGE_OK\" \"\$STATUS_DESC\"
+  "
+}
+
+@test "verdict parse: guard status line replaces the verdict's fixed sentence, verdict unchanged" {
+  run_verdict_parse true 0 "$(guard_verdict_tsv true)" "Unsupported dependency file: pyproject.toml. Manual review required."
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DESC<<<Unsupported dependency file: pyproject.toml. Manual review required.>>>"* ]] || return 1
+  [[ "$output" == *"STATE=error"* ]] || return 1
+  [[ "$output" == *"SAFETY_ERROR=true"* ]] || return 1
+  [[ "$output" == *"AUTO=false"* ]] || return 1
+}
+
+@test "verdict parse: a verdict script failure keeps the Internal text" {
+  run_verdict_parse true 2 "" "Unsupported dependency file: pyproject.toml. Manual review required."
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DESC<<<Internal: verdict script rejected inputs — see workflow logs.>>>"* ]] || return 1
+  [[ "$output" == *"STATE=error"* ]] || return 1
+}
+
+@test "verdict parse: no guard keeps the verdict's text" {
+  local tsv; tsv=$(guard_verdict_tsv false)
+  run_verdict_parse false 0 "$tsv" ""
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DESC<<<$(printf '%s' "$tsv" | cut -f6)>>>"* ]] || return 1
+  [[ "$output" == *"STATE=success"* ]] || return 1
+}
+
+@test "verdict parse: guard with no status line falls back to the verdict's sentence" {
+  local tsv; tsv=$(guard_verdict_tsv true)
+  run_verdict_parse true 0 "$tsv" ""
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DESC<<<$(printf '%s' "$tsv" | cut -f6)>>>"* ]] || return 1
 }
 
 # --- auto-merge (issue #213) -------------------------------------------------
