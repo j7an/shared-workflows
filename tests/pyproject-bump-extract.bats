@@ -742,6 +742,11 @@ single_line_array_diff() {
     "fastmcp	4.2.0	pypi" "pyproject.toml"
 }
 
+@test "Positive: single-line array bump with an unchanged marker containing escaped quotes (issue #224)" {
+  assert_clean_bump_diff "$(single_line_array_diff dependency-groups 'dev = ["demo>=1.0; python_version >= \"3.10\""]' 'dev = ["demo>=1.1; python_version >= \"3.10\""]')" \
+    "demo	1.1	pypi" "pyproject.toml"
+}
+
 @test "Positive: single-line array bump with CRLF line endings (issue #224)" {
   assert_clean_bump_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3"]' 'mcp = ["fastmcp>=4.2.0"]' | sed 's/$/\r/')" \
     "fastmcp	4.2.0	pypi" "pyproject.toml"
@@ -766,6 +771,10 @@ single_line_array_diff() {
 
 @test "Disqualify: single-line array loses an entry (issue #224)" {
   assert_disqualified_diff "$(single_line_array_diff project.optional-dependencies 'mcp = ["fastmcp>=4.1.3", "httpx>=0.28"]' 'mcp = ["fastmcp>=4.2.0"]')"
+}
+
+@test "Disqualify: two-entry single-line array whose first entry has an escaped-quote marker (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff dependency-groups 'dev = ["demo>=1.0; python_version >= \"3.10\"", "other>=1"]' 'dev = ["demo>=1.1; python_version >= \"3.10\"", "other>=1"]')"
 }
 
 @test "Disqualify: single-line array key renamed (issue #224)" {

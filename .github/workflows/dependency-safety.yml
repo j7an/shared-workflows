@@ -1222,6 +1222,12 @@ jobs:
             clear_pending
           }
 
+          # A `key = ["entry"]` line holding exactly one TOML basic string. The string
+          # may contain backslash escapes, such as \" inside an environment marker; an
+          # unescaped quote ends it. Kept in a variable so the backslashes reach the
+          # regex engine exactly as written.
+          inline_array_re='^[[:space:]]*([A-Za-z_][A-Za-z0-9_-]*)[[:space:]]*=[[:space:]]*\[[[:space:]]*("([^"\\]|\\.)*")[[:space:]]*,?[[:space:]]*\][[:space:]]*$'
+
           # --- Main parse loop ---
           while IFS= read -r line; do
             line="${line%$'\r'}"
@@ -1269,7 +1275,7 @@ jobs:
             # ponytail: one entry per line; pair entries positionally if a real
             # Dependabot PR bumps inside a multi-entry single-line array.
             inline_key=""
-            if [[ "$content" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_-]*)[[:space:]]*=[[:space:]]*\[[[:space:]]*(\"[^\"]*\")[[:space:]]*,?[[:space:]]*\][[:space:]]*$ ]]; then
+            if [[ "$content" =~ $inline_array_re ]]; then
               case "$current_table:${BASH_REMATCH[1]}" in
                 project_other:dependencies|project_optional_deps:*|dependency_groups:*|tool_uv:constraint-dependencies|tool_uv:override-dependencies)
                   inline_key="${BASH_REMATCH[1]}"
