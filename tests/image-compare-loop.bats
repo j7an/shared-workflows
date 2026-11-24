@@ -35,6 +35,8 @@ F
   chmod +x "$T/bin/trivy"
   export PATH="$T/bin:$PATH" FX TRIVY_LOG="$T/trivy.log" TRIVY_REFS="$T/refs"
   : >"$TRIVY_REFS"
+  # Pin the clock to 2h after the fixture DB's UpdatedAt; the diff rejects DBs older than 72h.
+  export IMAGE_DIFF_NOW=$(( $(jq -r '.VulnerabilityDB.UpdatedAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601' "$FX/db-version.json") + 7200 ))
   BLOCK=$(awk '/# --- BEGIN image compare loop ---/{f=1;next} /# --- END image compare loop ---/{exit} f{print}' .github/workflows/dependency-safety.yml | sed -E 's/^          //')
 }
 
