@@ -2998,9 +2998,13 @@ jobs:
           npm_reasons_file=$(mktemp "${RUNNER_TEMP:-/tmp}/npm-reasons.XXXXXX")
           CLEARED_NPM=$(printf '%s' "$DIFF" | npm_bump_extract --mode=cleared-paths 2>"$npm_reasons_file" || true)
           NPM_REJECTION=""
+          # The first diagnostic before display formatting, for the Layer 3 guard
+          # to match a touched path against. Never printed: it is PR-supplied text.
+          NPM_REJECTION_RAW=""
           if [ -s "$npm_reasons_file" ]; then
             echo "npm-bump-extract rejection reasons:"
             tr -d '\r' < "$npm_reasons_file"
+            NPM_REJECTION_RAW=$(head -n 1 "$npm_reasons_file" | sed 's/^npm-bump-extract\.sh: //')
             NPM_REJECTION="\`$(head -n 1 "$npm_reasons_file" | sed 's/^npm-bump-extract\.sh: //' | tr -d '`\r' | cut -c1-300)\`"
             npm_reason_count=$(wc -l < "$npm_reasons_file" | tr -d ' ')
             if [ "$npm_reason_count" -gt 1 ]; then
@@ -3063,11 +3067,32 @@ jobs:
           #  (b) All touched paths supported but extraction yielded zero rows: parser
           #      miss on a supported file (issue #52).
           # Unsupported takes message precedence — it's the more specific diagnosis.
+          #
+          # GUARD_STATUS_DESC names the cause for the commit status, because the
+          # verdict script has one sentence for every guard cause (issue #225).
+          # guard_path_summary prints the first path, cut to its last 60
+          # characters, plus "(+N more)": that keeps the longest sentence under
+          # GitHub's 140-character status description limit.
+          guard_path_summary() {
+            local _paths _first _count
+            _paths=$(printf '%s\n' "$1" | sed '/^$/d')
+            _first=$(printf '%s\n' "$_paths" | head -n 1)
+            _count=$(printf '%s\n' "$_paths" | sed '/^$/d' | wc -l | tr -d ' ')
+            if [ "${#_first}" -gt 60 ]; then
+              _first="...${_first: -60}"
+            fi
+            printf '%s' "$_first"
+            if [ "$_count" -gt 1 ]; then
+              printf ' (+%d more)' "$((_count - 1))"
+            fi
+          }
           GUARD_TRIGGERED=false
+          GUARD_STATUS_DESC=""
           if [ -n "$UNSUPPORTED_PATHS" ]; then
             GUARD_TRIGGERED=true
             UNSUPPORTED_LIST=$(echo "$UNSUPPORTED_PATHS" | paste -sd, -)
             EXTRACTION_WARNING="⚠️ Diff touches dependency files the parser does not support (${UNSUPPORTED_LIST}). Manual review required; the dependency-safety gate cannot scan these."
+            GUARD_STATUS_DESC="Unsupported dependency file: $(guard_path_summary "$UNSUPPORTED_PATHS"). Manual review required."
             # npm paths the parser rejected are supported files, so report the
             # parser's reason for them. Anything else really is unsupported.
             NPM_PATHS=$(printf '%s\n' "$UNSUPPORTED_PATHS" | grep -E '(^|/)(package\.json|pnpm-lock\.yaml)$' || true)
@@ -3077,16 +3102,42 @@ jobs:
               if [ -n "$OTHER_LIST" ]; then
                 EXTRACTION_WARNING="${EXTRACTION_WARNING} Also touches dependency files the parser does not support (${OTHER_LIST})."
               fi
+              # Name the npm path the raw diagnostic starts with ("<path>: ").
+              # NPM_PATHS is sorted, so its first line is only the fallback. The
+              # quoted case pattern compares literally; the path printed always
+              # comes from NPM_PATHS, never from the diagnostic text.
+              _g_named=""
+              while IFS= read -r _g_path; do
+                [ -n "$_g_path" ] || continue
+                case "${NPM_REJECTION_RAW:-}" in
+                  "$_g_path: "*) _g_named="$_g_path"; break ;;
+                esac
+              done <<< "$NPM_PATHS"
+              if [ -z "$_g_named" ]; then
+                _g_named=$(printf '%s\n' "$NPM_PATHS" | sed '/^$/d' | head -n 1)
+              fi
+              _g_others=$(printf '%s\n' "$UNSUPPORTED_PATHS" | sed '/^$/d' | grep -vxF -- "$_g_named" || true)
+              GUARD_STATUS_DESC="Dependency parser rejected $(guard_path_summary "$(printf '%s\n%s\n' "$_g_named" "$_g_others")"). Manual review required."
             fi
           elif [ -z "$(echo "$DEPS_TSV" | sed '/^$/d')" ] && [ -n "$EFFECTIVE_TOUCHED" ]; then
             GUARD_TRIGGERED=true
             TOUCHED_LIST=$(echo "$EFFECTIVE_TOUCHED" | paste -sd, -)
             EXTRACTION_WARNING="⚠️ Parser could not extract dependencies from this diff (touched: ${TOUCHED_LIST}). Manual review required before merge."
+            GUARD_STATUS_DESC="No dependencies extracted from $(guard_path_summary "$EFFECTIVE_TOUCHED"). Manual review required."
           elif UNRESOLVED_IMAGES=$(printf '%s\n' "$DEPS_TSV" | awk -F'\t' '$3=="docker" && $2=="-" {print $1}' | paste -sd, -) && [ -n "$UNRESOLVED_IMAGES" ]; then
             # An unparsed FROM line (e.g. a build argument) leaves a marker row
             # with version "-"; the image cannot be age-checked, so fail loud.
             GUARD_TRIGGERED=true
             EXTRACTION_WARNING="⚠️ Dockerfile FROM line the parser cannot resolve to an image (${UNRESOLVED_IMAGES}), for example a build argument. Manual review required."
+            # Name the file only when exactly one touched path is Dockerfile-type
+            # (the basename patterns of diff-touches-lockfile.sh); otherwise the
+            # marker row cannot be attributed to a file.
+            _g_dockerfiles=$(printf '%s\n' "$EFFECTIVE_TOUCHED" | grep -E '(^|/)(Dockerfile|Containerfile|[^/]*\.Dockerfile|Dockerfile\.[^/]*)$' || true)
+            if [ "$(printf '%s\n' "$_g_dockerfiles" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 1 ]; then
+              GUARD_STATUS_DESC="Unresolved FROM line in $(guard_path_summary "$_g_dockerfiles"). Manual review required."
+            else
+              GUARD_STATUS_DESC="Dockerfile FROM line could not be resolved to an image. Manual review required."
+            fi
           fi
 
           # --- BEGIN dep routing ---

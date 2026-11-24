@@ -1,0 +1,24 @@
+diff --git a/a`b/package.json b/a`b/package.json
+index 1111111..2222222 100644
+--- a/a`b/package.json
++++ b/a`b/package.json
+@@ -168,4 +168,4 @@
+   "devDependencies": {
+-    "@commitlint/cli": "^20.5.0",
++    "@commitlint/cli": "^21.0.2",
+     "typescript": "^5.9.3"
+diff --git a/a`b/pnpm-lock.yaml b/a`b/pnpm-lock.yaml
+index 3333333..4444444 100644
+--- a/a`b/pnpm-lock.yaml
++++ b/a`b/pnpm-lock.yaml
+@@ -199,5 +199,5 @@ importers:
+     devDependencies:
+       '@commitlint/cli':
+-        specifier: ^20.5.0
+-        version: 20.5.0
++        specifier: ^21.0.2
++        version: 21.0.2
+@@ -104,3 +104,3 @@ settings:
+   autoInstallPeers: true
+-  excludeLinksFromLockfile: false
++  excludeLinksFromLockfile: true

@@ -216,6 +216,40 @@ run_npm_chain() {
 # assigns it inside `if [ -z "$DEPS_TSV" ]`, so on a clean bump it is never set
 # and a bare "$ECO_HINT" would abort the case under `set -u`.
 
+# run_npm_chain_status <fixture> — the real `npm composition` block followed by
+# the real Layer 3 guard block, so GUARD_STATUS_DESC is derived from a diff end
+# to end. The guard capture mirrors extract_guard_block in guard-runtime.bats.
+run_npm_chain_status() {
+  local fixture="$1"
+  local block guard
+  block=$(extract_named_block "$WF" "npm composition")
+  guard=$(awk '/^[[:space:]]+# --- Layer 3:/{flag=1} flag {print} flag && /^          fi[[:space:]]*$/{exit}' "$WF" | sed -E 's/^          //')
+  run bash -c "
+    set -uo pipefail
+    extract_deps()           { bash scripts/extract-deps.sh \"\$@\"; }
+    diff_touches_lockfile()  { bash scripts/diff-touches-lockfile.sh \"\$@\"; }
+    classify_touched_paths() { bash scripts/classify-touched-paths.sh \"\$@\"; }
+    pyproject_bump_extract() { bash scripts/pyproject-bump-extract.sh \"\$@\"; }
+    pr_body_to_deps()        { bash scripts/pr-body-to-deps.sh \"\$@\"; }
+    npm_bump_extract()       { bash scripts/npm-bump-extract.sh \"\$@\"; }
+    DIFF=\$(cat '$fixture')
+    PR_BODY=''
+    PYPROJECT_HEAD_DIR=''
+    $block
+    $guard
+    printf 'GUARD=%s\nSTATUS<<<%s>>>\n' \"\$GUARD_TRIGGERED\" \"\$GUARD_STATUS_DESC\"
+  "
+}
+
+@test "chain: npm rejection status names the rejected lockfile when its path has a backtick (issue #225)" {
+  # The display string NPM_REJECTION has backticks removed, so only the raw
+  # diagnostic can identify this path.
+  run_npm_chain_status "$NPMFX/manifest-clean-lock-settings-backtick-path.diff"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"GUARD=true"* ]] || return 1
+  [[ "$output" == *'STATUS<<<Dependency parser rejected a`b/pnpm-lock.yaml (+1 more). Manual review required.>>>'* ]] || return 1
+}
+
 @test "chain: nexus-mcp#280 pyproject + uv.lock clears with head context (issue #169)" {
   run_npm_chain "$FIXTURES/nexus-280-pyproject-plus-uvlock.diff" "" \
     tests/fixtures/pyproject-bump-extract/head/nexus-280
