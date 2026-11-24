@@ -1148,6 +1148,59 @@ run_results_summary() {
   [[ "$output" != *"Auto-merge enabled"* ]] || return 1
 }
 
+# --- verdict parse / guard status (issue #225) -------------------------------
+
+# guard_verdict_tsv <guard: true|false> — the real script's TSV line, so a
+# rewording there cannot silently pass these tests.
+guard_verdict_tsv() {
+  AUTO_MERGE=true GUARD_TRIGGERED="$1" AGE_ERROR_COUNT=0 AGE_VIOLATION_COUNT=0 \
+    SCAN_ERROR_COUNT=0 ADVISORY_COUNT=0 RELEASE_AGE_POLICY=off \
+    MINIMUM_RELEASE_AGE_DAYS=7 IMAGE_COUNT=0 bash scripts/safety-verdict.sh
+}
+
+# run_verdict_parse <guard> <rc> <tsv> <guard_status_desc>
+run_verdict_parse() {
+  local block; block=$(extract_named_block "$WF" "verdict parse")
+  [ -n "$block" ] || return 1
+  VP_G="$1" VP_RC="$2" VP_TSV="$3" VP_GD="$4" run bash -c "
+    set -uo pipefail
+    GUARD_TRIGGERED=\"\$VP_G\" VERDICT_RC=\"\$VP_RC\" VERDICT_TSV=\"\$VP_TSV\" GUARD_STATUS_DESC=\"\$VP_GD\"
+    $block
+    printf 'STATE=%s\nSAFETY_ERROR=%s\nAUTO=%s\nDESC<<<%s>>>\n' \"\$GATE_STATE\" \"\$HAS_SAFETY_ERROR\" \"\$AUTO_MERGE_OK\" \"\$STATUS_DESC\"
+  "
+}
+
+@test "verdict parse: guard status line replaces the verdict's fixed sentence, verdict unchanged" {
+  run_verdict_parse true 0 "$(guard_verdict_tsv true)" "Unsupported dependency file: pyproject.toml. Manual review required."
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DESC<<<Unsupported dependency file: pyproject.toml. Manual review required.>>>"* ]] || return 1
+  [[ "$output" == *"STATE=error"* ]] || return 1
+  [[ "$output" == *"SAFETY_ERROR=true"* ]] || return 1
+  [[ "$output" == *"AUTO=false"* ]] || return 1
+}
+
+@test "verdict parse: a verdict script failure keeps the Internal text" {
+  run_verdict_parse true 2 "" "Unsupported dependency file: pyproject.toml. Manual review required."
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DESC<<<Internal: verdict script rejected inputs — see workflow logs.>>>"* ]] || return 1
+  [[ "$output" == *"STATE=error"* ]] || return 1
+}
+
+@test "verdict parse: no guard keeps the verdict's text" {
+  local tsv; tsv=$(guard_verdict_tsv false)
+  run_verdict_parse false 0 "$tsv" ""
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DESC<<<$(printf '%s' "$tsv" | cut -f6)>>>"* ]] || return 1
+  [[ "$output" == *"STATE=success"* ]] || return 1
+}
+
+@test "verdict parse: guard with no status line falls back to the verdict's sentence" {
+  local tsv; tsv=$(guard_verdict_tsv true)
+  run_verdict_parse true 0 "$tsv" ""
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DESC<<<$(printf '%s' "$tsv" | cut -f6)>>>"* ]] || return 1
+}
+
 # --- auto-merge (issue #213) -------------------------------------------------
 
 # run_auto_merge <gh_rc> <policy> <image_count> <min_days>

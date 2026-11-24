@@ -3803,6 +3803,7 @@ jobs:
             VERDICT_RC=$?
           fi
 
+          # --- BEGIN verdict parse ---
           if [ "$VERDICT_RC" -ne 0 ] || [ -z "$VERDICT_TSV" ]; then
             # Fail-closed: synthesize an error verdict so the gate is red and
             # auto-merge is suppressed even if the script crashed unexpectedly.
@@ -3816,7 +3817,14 @@ jobs:
             IFS=$'\t' read -r GATE_STATE AUTO_MERGE_OK HAS_SAFETY_ERROR \
                               HAS_AGE_VIOLATION HAS_SECURITY_REVIEW STATUS_DESC \
                               <<< "$VERDICT_TSV"
+            # The verdict script has one sentence for every guard cause; the
+            # guard block knows the cause, so its line wins. Only here, in the
+            # parsed branch, so the fail-closed Internal: text is never replaced.
+            if [ "$GUARD_TRIGGERED" = "true" ] && [ -n "${GUARD_STATUS_DESC:-}" ]; then
+              STATUS_DESC="$GUARD_STATUS_DESC"
+            fi
           fi
+          # --- END verdict parse ---
 
           # Map verdict's HAS_SAFETY_ERROR to the legacy HAS_ERROR variable that
           # reconcile_label() inspects for the conservative-preserve rule.
