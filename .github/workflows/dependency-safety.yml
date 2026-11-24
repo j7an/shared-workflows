@@ -3669,6 +3669,12 @@ jobs:
           if [ -z "$DEPS" ] && [ "$TIER2_COUNT" -eq 0 ]; then
             NO_PACKAGE_SCAN=true
           fi
+          # TIER1_SCANNED: a tier-1 package was scanned, so GHSA was queried. The
+          # tier-2 sweep queries OSV only.
+          TIER1_SCANNED=false
+          if [ -n "$DEPS" ]; then
+            TIER1_SCANNED=true
+          fi
           if [ -z "$DEPS" ]; then
             if [ "$TIER2_COUNT" -gt 0 ]; then
               DEPS="(no declared dependency changes — ${TIER2_COUNT} transitive lockfile version(s) swept, see below)"
@@ -3898,12 +3904,11 @@ jobs:
 
           # --- BEGIN results summary ---
           # ---- Results table (from scan state only) ----
-          if [ "$GUARD_TRIGGERED" = "true" ] && [ "$TOTAL" -eq 0 ]; then
-            # Extraction failed AND no advisories from any subset that did get scanned:
-            # show "(not scanned)". With the issue #62 fix the guard can ALSO fire on a
-            # partial-extraction PR where DEPS_TSV is non-empty and scans found
-            # advisories — that case falls through to the TOTAL>0 branch so the actual
-            # advisory IDs are preserved.
+          if [ "$GUARD_TRIGGERED" = "true" ] && [ "$TOTAL" -eq 0 ] && [ "${NO_PACKAGE_SCAN:-false}" = "true" ]; then
+            # "(not scanned)" only when the guard fired and no package was scanned
+            # at all. A partial scan with advisories falls through to the TOTAL>0
+            # branch so the advisory IDs are preserved; a clean partial scan gets
+            # the guarded clean rows below (issue #225).
             TABLE_HDR="| Source | Vulnerabilities |"
             TABLE_SEP="|--------|----------------|"
             ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
@@ -3922,6 +3927,23 @@ jobs:
             TABLE_HDR="| ID | Severity | Summary | Source |"
             TABLE_SEP="|----|----------|---------|--------|"
             RESULTS_TABLE="$(printf '%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$SCAN_RESULTS")"
+          elif [ "$GUARD_TRIGGERED" = "true" ] && [ "$(( ${SCAN_ERROR_COUNT:-0} - ${IMAGE_COMPARE_ERROR_COUNT:-0} ))" -eq 0 ]; then
+            # Guard fired, but the extracted packages were scanned without a query
+            # error. The guard sets HAS_SAFETY_ERROR, so without this branch a clean
+            # partial scan would read "scan failed". Image comparison errors are
+            # excluded: an unresolved FROM always produces one, and they are
+            # reported on the Container images line. The tier-2 sweep queries OSV
+            # only, so GHSA is "(not scanned)" when no tier-1 package was scanned.
+            # The qualifier keeps a clean row from reading as a clean diff.
+            TABLE_HDR="| Source | Vulnerabilities |"
+            TABLE_SEP="|--------|----------------|"
+            if [ "${TIER1_SCANNED:-true}" = "true" ]; then
+              ROW1="| GitHub Advisory (GHSA) | 0 affecting target (extracted packages only) |"
+            else
+              ROW1="| GitHub Advisory (GHSA) | (not scanned) |"
+            fi
+            ROW2="| OSV.dev | 0 affecting target (extracted packages only) |"
+            RESULTS_TABLE="$(printf '%s\n%s\n%s\n%s' "$TABLE_HDR" "$TABLE_SEP" "$ROW1" "$ROW2")"
           elif [ "$HAS_SAFETY_ERROR" = "true" ]; then
             # Scan errored AND no advisories tallied — table is empty/unknown.
             TABLE_HDR="| ID | Severity | Summary | Source |"
@@ -3954,8 +3976,13 @@ jobs:
           # Priority: guard > error > image-unchecked > blocking-age > advisories > advisory-age > clean.
           # Spec §6.1 — keep this order in sync with the script.
           if [ "$GUARD_TRIGGERED" = "true" ]; then
-            RESULTS_HEADER="Dependency extraction failed — manual review required."
-            RESULTS_FOOTER="> Parser could not extract dependencies. Manual review required."
+            RESULTS_HEADER="Scan incomplete — manual review required."
+            if [ "${NO_PACKAGE_SCAN:-false}" = "true" ]; then
+              # "packages": a container image in the same diff may have been compared.
+              RESULTS_FOOTER="> No packages could be scanned — see the warning at the top of this comment."
+            else
+              RESULTS_FOOTER="> Some dependency changes could not be scanned — see the warning at the top of this comment. Results cover the extracted packages only."
+            fi
             if [ "$TOTAL" -gt 0 ]; then
               # Partial extraction: scans of the supported subset DID surface advisories.
               # Cross-reference so the IDs aren't lost under the guard header.
