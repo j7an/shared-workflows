@@ -800,6 +800,14 @@ single_line_array_diff() {
   assert_disqualified_diff "$(single_line_array_diff tool.uv 'dev-dependencies = ["ruff>=0.1"]' 'dev-dependencies = ["ruff>=0.2"]')"
 }
 
+@test "Disqualify: single-line array in an unrecognized table (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff tool.foo 'a = ["a>=1"]' 'a = ["a>=2"]')"
+}
+
+@test "Disqualify: single-line array in a Poetry dependencies table (issue #224)" {
+  assert_disqualified_diff "$(single_line_array_diff tool.poetry.dependencies 'a = ["a>=1"]' 'a = ["a>=2"]')"
+}
+
 @test "Disqualify: new single-line extras key added (issue #224)" {
   assert_disqualified_diff "$(printf '%s\n' \
     'diff --git a/pyproject.toml b/pyproject.toml' '--- a/pyproject.toml' '+++ b/pyproject.toml' \
